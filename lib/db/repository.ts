@@ -2435,7 +2435,6 @@ export async function getUserBySessionToken(token: string) {
   }
 
   if (new Date(String(row.expires_at)).getTime() <= Date.now()) {
-    await execute("delete from sessions where token_hash = ?", [hashSessionToken(token)]);
     return null;
   }
 
