@@ -28,6 +28,10 @@ function isFileDatabaseUrl(url: string) {
   return url.startsWith("file:");
 }
 
+function isRemoteDatabaseUrl(url: string) {
+  return !isFileDatabaseUrl(url);
+}
+
 function normalizeDatabaseUrl(rawUrl: string) {
   const trimmed = rawUrl.trim();
 
@@ -68,15 +72,23 @@ export function getDbRuntimeConfig() {
   const localUrl = getConfiguredDatabaseUrl("LOCAL_DATABASE_URL");
 
   if (externalUrl) {
+    const authToken = process.env.DATABASE_AUTH_TOKEN?.trim() || undefined;
+
     if (deploymentRuntime && isFileDatabaseUrl(externalUrl)) {
       throw new Error(
         "DATABASE_URL points to a local file database. Vercel production must use an external libSQL/Turso database URL.",
       );
     }
 
+    if (isRemoteDatabaseUrl(externalUrl) && !authToken) {
+      throw new Error(
+        "Missing DATABASE_AUTH_TOKEN. Remote libSQL/Turso databases require DATABASE_URL and DATABASE_AUTH_TOKEN in production.",
+      );
+    }
+
     runtimeConfig = {
       url: externalUrl,
-      authToken: process.env.DATABASE_AUTH_TOKEN?.trim() || undefined,
+      authToken,
       source: "DATABASE_URL",
       usingLocalDatabase: isFileDatabaseUrl(externalUrl),
       usingExternalDatabase: !isFileDatabaseUrl(externalUrl),
