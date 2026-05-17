@@ -1,0 +1,88 @@
+ ⨯ Error [ZodError]: [
+  {
+    "origin": "string",
+    "code": "too_small",
+    "minimum": 2,
+    "inclusive": true,
+    "path": [
+      "title"
+    ],
+    "message": "Invalid input"
+  },
+  {
+    "origin": "string",
+    "code": "too_small",
+    "minimum": 2,
+    "inclusive": true,
+    "path": [
+      "collection"
+    ],
+    "message": "Invalid input"
+  },
+  {
+    "origin": "string",
+    "code": "too_small",
+    "minimum": 2,
+    "inclusive": true,
+    "path": [
+      "category"
+    ],
+    "message": "Invalid input"
+  },
+  {
+    "origin": "string",
+    "code": "too_small",
+    "minimum": 10,
+    "inclusive": true,
+    "path": [
+      "description"
+    ],
+    "message": "Invalid input"
+  },
+  {
+    "origin": "string",
+    "code": "too_small",
+    "minimum": 4,
+    "inclusive": true,
+    "path": [
+      "tagline"
+    ],
+    "message": "Invalid input"
+  },
+  {
+    "origin": "string",
+    "code": "too_small",
+    "minimum": 4,
+    "inclusive": true,
+    "path": [
+      "deliveryDigital"
+    ],
+    "message": "Invalid input"
+  },
+  {
+    "origin": "string",
+    "code": "too_small",
+    "minimum": 4,
+    "inclusive": true,
+    "path": [
+      "deliveryPhysical"
+    ],
+    "message": "Invalid input"
+  },
+  {
+    "origin": "string",
+    "code": "too_small",
+    "minimum": 2,
+    "inclusive": true,
+    "path": [
+      "edition"
+    ],
+    "message": "Invalid input"
+  }
+]
+    at n (D:\etsy_parser\rebohrome-site\.next\server\chunks\9788.js:2:1254)
+    at p (D:\etsy_parser\rebohrome-site\.next\server\chunks\9788.js:2:2000)
+    at async m (D:\etsy_parser\rebohrome-site\.next\server\app\(admin)\admin\upload\page.js:1:7548)
+    at async p (D:\etsy_parser\rebohrome-site\.next\server\app\(admin)\admin\upload\page.js:2:1861) {
+  digest: '3680995682'
+}
