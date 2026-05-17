@@ -5,7 +5,6 @@ import { createClient } from "@libsql/client";
 
 const projectRoot = process.cwd();
 const envPath = path.join(projectRoot, ".env.local");
-const dbPath = path.join(projectRoot, "data", "rebohrome-platform.db").replace(/\\/g, "/");
 
 function parseEnv(text) {
   const result = {};
@@ -37,6 +36,35 @@ async function loadEnv() {
   };
 }
 
+function normalizeDatabaseUrl(rawUrl) {
+  const trimmed = rawUrl.trim();
+
+  if (!trimmed.startsWith("file:")) {
+    return trimmed;
+  }
+
+  const rawPath = trimmed.slice("file:".length).replace(/\\/g, "/");
+
+  if (rawPath.startsWith("/") || /^[a-zA-Z]:\//.test(rawPath)) {
+    return `file:${rawPath}`;
+  }
+
+  return `file:${path.resolve(projectRoot, rawPath).replace(/\\/g, "/")}`;
+}
+
+function resolveDatabaseConfig(env) {
+  const rawUrl = env.DATABASE_URL?.trim() || env.LOCAL_DATABASE_URL?.trim();
+
+  if (!rawUrl) {
+    throw new Error("Missing DATABASE_URL or LOCAL_DATABASE_URL.");
+  }
+
+  return {
+    url: normalizeDatabaseUrl(rawUrl),
+    authToken: env.DATABASE_AUTH_TOKEN?.trim() || undefined,
+  };
+}
+
 function readArg(prefix, fallback = "") {
   const value = process.argv.find((entry) => entry.startsWith(`${prefix}=`));
   return value ? value.slice(prefix.length + 1) : fallback;
@@ -44,6 +72,7 @@ function readArg(prefix, fallback = "") {
 
 async function main() {
   const env = await loadEnv();
+  const dbConfig = resolveDatabaseConfig(env);
   const baseUrl = env.APP_BASE_URL || "http://127.0.0.1:3003";
   const secret =
     env.TELEGRAM_CALLBACK_SECRET ||
@@ -61,7 +90,10 @@ async function main() {
     throw new Error("Missing TELEGRAM_CALLBACK_SECRET.");
   }
 
-  const db = createClient({ url: `file:${dbPath}` });
+  const db = createClient({
+    url: dbConfig.url,
+    authToken: dbConfig.authToken,
+  });
   const args = action
     ? [action, explicitWithdrawalId || null]
     : [explicitWithdrawalId || null];

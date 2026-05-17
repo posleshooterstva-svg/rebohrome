@@ -1,0 +1,574 @@
+import { promises as fs } from "node:fs";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { randomBytes, randomUUID, scryptSync } from "node:crypto";
+import { createClient } from "@libsql/client";
+
+const projectRoot = process.cwd();
+const envPath = path.join(projectRoot, ".env.local");
+const productsSeedPath = path.join(projectRoot, "data", "seeds", "products.json");
+const useLocalDatabase = process.argv.includes("--local");
+const shouldSeed = process.argv.includes("--seed");
+
+function parseEnv(text) {
+  const result = {};
+
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    const separatorIndex = trimmed.indexOf("=");
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, separatorIndex).trim();
+    const rawValue = trimmed.slice(separatorIndex + 1).trim();
+    result[key] = rawValue.replace(/^['"]|['"]$/g, "");
+  }
+
+  return result;
+}
+
+async function loadEnv() {
+  const localEnv = await fs.readFile(envPath, "utf8").catch(() => "");
+  return {
+    ...parseEnv(localEnv),
+    ...process.env,
+  };
+}
+
+function normalizeUsername(value) {
+  return value.trim().toLowerCase();
+}
+
+function normalizeTelegramUsername(value) {
+  const next = value.trim();
+  return next.startsWith("@") ? next.toLowerCase() : `@${next.toLowerCase()}`;
+}
+
+function buildPlaceholderEmail(username) {
+  return `${normalizeUsername(username)}@rebohrome.local`;
+}
+
+function hashPassword(password) {
+  const salt = randomBytes(16).toString("hex");
+  const hash = scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+
+function normalizeDatabaseUrl(rawUrl) {
+  const trimmed = rawUrl.trim();
+
+  if (!trimmed.startsWith("file:")) {
+    return trimmed;
+  }
+
+  const rawPath = trimmed.slice("file:".length).replace(/\\/g, "/");
+
+  if (!rawPath) {
+    throw new Error("Invalid file database URL: missing file path.");
+  }
+
+  if (rawPath.startsWith("/") || /^[a-zA-Z]:\//.test(rawPath)) {
+    return `file:${rawPath}`;
+  }
+
+  const absolutePath = path.resolve(projectRoot, rawPath).replace(/\\/g, "/");
+  return `file:${absolutePath}`;
+}
+
+function resolveDatabaseConfig(env) {
+  const externalUrl = env.DATABASE_URL?.trim();
+  const localUrl = env.LOCAL_DATABASE_URL?.trim();
+  const selectedUrl = useLocalDatabase
+    ? localUrl || externalUrl
+    : externalUrl || localUrl;
+
+  if (!selectedUrl) {
+    throw new Error(
+      "Missing database URL. Set DATABASE_URL for an external database or LOCAL_DATABASE_URL for local setup.",
+    );
+  }
+
+  const normalizedUrl = normalizeDatabaseUrl(selectedUrl);
+
+  if (normalizedUrl.startsWith("file:")) {
+    mkdirSync(path.dirname(normalizedUrl.slice("file:".length)), {
+      recursive: true,
+    });
+  }
+
+  return {
+    url: normalizedUrl,
+    authToken: env.DATABASE_AUTH_TOKEN?.trim() || undefined,
+  };
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+async function loadSeedProducts() {
+  const file = await fs.readFile(productsSeedPath, "utf8");
+  return JSON.parse(file);
+}
+
+const CREATE_STATEMENTS = [
+  `create table if not exists users (
+    id text primary key,
+    username text not null unique,
+    email text not null unique,
+    name text not null,
+    password_hash text not null,
+    status text not null,
+    created_at text not null,
+    updated_at text not null,
+    last_login_at text
+  )`,
+  `create table if not exists profiles (
+    user_id text primary key,
+    role text not null,
+    telegram_username text not null unique,
+    telegram_id text,
+    withdrawal_wallet text,
+    verified integer not null default 1,
+    created_at text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists balances (
+    user_id text primary key,
+    available integer not null default 0,
+    pending_withdrawal integer not null default 0,
+    total_deposited integer not null default 0,
+    total_spent integer not null default 0,
+    total_withdrawn integer not null default 0,
+    updated_at text not null
+  )`,
+  `create table if not exists sessions (
+    id text primary key,
+    user_id text not null,
+    token_hash text not null unique,
+    user_agent text,
+    ip_address text,
+    created_at text not null,
+    expires_at text not null
+  )`,
+  `create table if not exists products (
+    id text primary key,
+    title text not null,
+    rarity text not null,
+    price integer not null,
+    currency text not null default 'USD',
+    stock integer not null,
+    collection text not null,
+    category text not null,
+    description text not null,
+    tagline text not null,
+    default_delivery_type text not null default 'digital',
+    delivery_digital text not null,
+    delivery_physical text not null,
+    edition text not null,
+    shape text not null,
+    image_url text,
+    featured integer not null default 0,
+    status text not null default 'active',
+    archived integer not null default 0,
+    palette_glow text not null,
+    palette_glow_soft text not null,
+    palette_core text not null,
+    palette_ring text not null,
+    created_at text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists orders (
+    id text primary key,
+    user_id text not null,
+    status text not null,
+    payment_state text not null,
+    subtotal integer not null,
+    shipping integer not null,
+    total integer not null,
+    currency text not null default 'USD',
+    shipping_name text not null,
+    shipping_email text not null,
+    shipping_address text not null,
+    shipping_city text not null,
+    shipping_postal_code text not null,
+    payment_method text not null,
+    payment_provider text,
+    failure_reason text,
+    remaining_balance integer,
+    created_at text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists payment_sessions (
+    id text primary key,
+    user_id text not null,
+    payment_method text not null,
+    payment_provider text not null,
+    currency text not null,
+    subtotal integer not null,
+    shipping integer not null,
+    total integer not null,
+    status text not null,
+    items_json text not null,
+    meta_json text,
+    order_id text,
+    transaction_id text,
+    created_at text not null,
+    updated_at text not null,
+    expires_at text not null
+  )`,
+  `create table if not exists deposit_payment_sessions (
+    id text primary key,
+    user_id text not null,
+    payment_method text not null,
+    payment_provider text not null,
+    currency text not null,
+    original_amount integer not null,
+    credited_amount_usd integer not null,
+    exchange_rate real not null,
+    status text not null,
+    meta_json text,
+    deposit_id text,
+    transaction_id text,
+    created_at text not null,
+    updated_at text not null,
+    expires_at text not null
+  )`,
+  `create table if not exists order_items (
+    id text primary key,
+    order_id text not null,
+    product_id text not null,
+    quantity integer not null,
+    unit_price integer not null,
+    delivery_type text not null
+  )`,
+  `create table if not exists owned_cards (
+    id text primary key,
+    user_id text not null,
+    product_id text not null,
+    order_id text not null,
+    quantity integer not null,
+    acquired_at text not null
+  )`,
+  `create table if not exists cart_items (
+    id text primary key,
+    user_id text not null,
+    product_id text not null,
+    quantity integer not null,
+    delivery_type text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists transactions (
+    id text primary key,
+    user_id text not null,
+    kind text not null,
+    amount integer not null,
+    original_amount integer,
+    original_currency text,
+    display_currency text,
+    credited_amount_usd integer,
+    exchange_rate real,
+    payment_method text,
+    payment_provider text,
+    status text not null,
+    reference_id text not null,
+    summary text not null,
+    meta_json text,
+    created_at text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists deposits (
+    id text primary key,
+    user_id text not null,
+    amount integer not null,
+    original_amount integer,
+    original_currency text,
+    credited_amount_usd integer,
+    exchange_rate real,
+    payment_method text not null,
+    payment_provider text,
+    cardholder_name text not null,
+    card_masked text not null,
+    status text not null,
+    balance_before integer not null,
+    balance_after integer not null,
+    created_at text not null,
+    completed_at text
+  )`,
+  `create table if not exists withdrawal_requests (
+    id text primary key,
+    user_id text not null,
+    amount integer not null,
+    wallet_address text not null,
+    telegram_id text not null,
+    status text not null,
+    source_deposit_id text,
+    source_card_masked text,
+    source_cardholder_name text,
+    admin_note text,
+    telegram_chat_id text,
+    telegram_message_id text,
+    telegram_sync_status text not null default 'pending',
+    telegram_synced_at text,
+    telegram_last_error text,
+    last_action_source text not null default 'system',
+    last_updated_by_admin_id text,
+    created_at text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists admin_logs (
+    id text primary key,
+    admin_user_id text not null,
+    action text not null,
+    entity_type text not null,
+    entity_id text not null,
+    message text not null,
+    source text not null default 'dashboard',
+    previous_status text,
+    next_status text,
+    metadata_json text,
+    created_at text not null
+  )`,
+  `create table if not exists withdrawal_status_history (
+    id text primary key,
+    withdrawal_id text not null,
+    action_type text not null,
+    previous_status text,
+    next_status text not null,
+    source text not null,
+    admin_user_id text,
+    admin_username text,
+    admin_telegram_username text,
+    note text,
+    created_at text not null
+  )`,
+  `create table if not exists telegram_action_tokens (
+    id text primary key,
+    withdrawal_id text not null,
+    action_type text not null,
+    callback_signature text not null,
+    allowed_from_status text not null,
+    expires_at text not null,
+    consumed_at text,
+    created_at text not null
+  )`,
+  `create table if not exists telegram_runtime_state (
+    state_key text primary key,
+    state_value text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists notifications (
+    id text primary key,
+    user_id text not null,
+    kind text not null,
+    title text not null,
+    body text not null,
+    status text not null default 'unread',
+    meta_json text,
+    created_at text not null,
+    read_at text
+  )`,
+];
+
+const COLUMN_PATCHES = [
+  ["withdrawal_requests", "telegram_chat_id text"],
+  ["withdrawal_requests", "telegram_message_id text"],
+  ["withdrawal_requests", "telegram_sync_status text not null default 'pending'"],
+  ["withdrawal_requests", "telegram_synced_at text"],
+  ["withdrawal_requests", "telegram_last_error text"],
+  ["withdrawal_requests", "last_action_source text not null default 'system'"],
+  ["withdrawal_requests", "last_updated_by_admin_id text"],
+  ["admin_logs", "source text not null default 'dashboard'"],
+  ["admin_logs", "previous_status text"],
+  ["admin_logs", "next_status text"],
+  ["admin_logs", "metadata_json text"],
+  ["orders", "currency text not null default 'USD'"],
+  ["orders", "payment_provider text"],
+  ["transactions", "original_amount integer"],
+  ["transactions", "original_currency text"],
+  ["transactions", "display_currency text"],
+  ["transactions", "credited_amount_usd integer"],
+  ["transactions", "exchange_rate real"],
+  ["transactions", "payment_method text"],
+  ["transactions", "payment_provider text"],
+  ["deposits", "original_amount integer"],
+  ["deposits", "original_currency text"],
+  ["deposits", "credited_amount_usd integer"],
+  ["deposits", "exchange_rate real"],
+  ["deposits", "payment_provider text"],
+  ["products", "currency text not null default 'USD'"],
+  ["products", "default_delivery_type text not null default 'digital'"],
+  ["products", "featured integer not null default 0"],
+  ["products", "status text not null default 'active'"],
+];
+
+const DATA_PATCHES = [
+  "update withdrawal_requests set status = 'declined' where status = 'rejected'",
+  "update withdrawal_requests set status = 'completed' where status = 'paid'",
+  "update withdrawal_requests set telegram_sync_status = 'pending' where telegram_sync_status is null or telegram_sync_status = ''",
+  "update withdrawal_requests set last_action_source = 'system' where last_action_source is null or last_action_source = ''",
+  "update orders set currency = 'USD' where currency is null or currency = ''",
+  "update products set currency = 'USD' where currency is null or currency = ''",
+  "update products set default_delivery_type = 'digital' where default_delivery_type is null or default_delivery_type = ''",
+  "update products set status = 'active' where status is null or status = ''",
+];
+
+async function main() {
+  const env = await loadEnv();
+  const dbConfig = resolveDatabaseConfig(env);
+  const db = createClient({
+    url: dbConfig.url,
+    authToken: dbConfig.authToken,
+  });
+
+  const execute = (sql, args = []) => db.execute({ sql, args });
+  const queryOne = async (sql, args = []) => {
+    const result = await execute(sql, args);
+    return result.rows[0] ?? null;
+  };
+
+  const ensureColumn = async (table, definition) => {
+    try {
+      await execute(`alter table ${table} add column ${definition}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : "";
+      if (
+        message.includes("duplicate column name") ||
+        message.includes("already exists")
+      ) {
+        return;
+      }
+
+      throw error;
+    }
+  };
+
+  for (const statement of CREATE_STATEMENTS) {
+    await execute(statement);
+  }
+
+  for (const [table, definition] of COLUMN_PATCHES) {
+    await ensureColumn(table, definition);
+  }
+
+  for (const statement of DATA_PATCHES) {
+    await execute(statement);
+  }
+
+  if (shouldSeed) {
+    const productsRow = await queryOne("select count(*) as count from products");
+    if (Number(productsRow?.count ?? 0) === 0) {
+      const timestamp = nowIso();
+      const products = await loadSeedProducts();
+
+      for (const product of products) {
+        await execute(
+          `insert into products (
+            id, title, rarity, price, currency, stock, collection, category, description, tagline,
+            default_delivery_type, delivery_digital, delivery_physical, edition, shape,
+            image_url, featured, status, archived, palette_glow, palette_glow_soft,
+            palette_core, palette_ring, created_at, updated_at
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            product.id,
+            product.title,
+            product.rarity,
+            product.price,
+            product.currency,
+            product.stock,
+            product.collection,
+            product.category,
+            product.description,
+            product.tagline,
+            product.defaultDeliveryType,
+            product.deliveryDigital,
+            product.deliveryPhysical,
+            product.edition,
+            product.shape,
+            product.imageUrl,
+            product.featured ? 1 : 0,
+            product.status,
+            0,
+            product.palette.glow,
+            product.palette.glowSoft,
+            product.palette.core,
+            product.palette.ring,
+            timestamp,
+            timestamp,
+          ],
+        );
+      }
+    }
+
+    const adminUsername = normalizeUsername(env.ADMIN_SEED_USERNAME || "monohrome_admin");
+    const adminRow = await queryOne(
+      `select users.id
+       from users
+       inner join profiles on profiles.user_id = users.id
+       where users.username = ?
+       limit 1`,
+      [adminUsername],
+    );
+
+    if (!adminRow) {
+      const timestamp = nowIso();
+      const userId = randomUUID();
+
+      await execute(
+        `insert into users (
+          id, username, email, name, password_hash, status, created_at, updated_at, last_login_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          userId,
+          adminUsername,
+          buildPlaceholderEmail(adminUsername),
+          "Archive Admin",
+          hashPassword(env.ADMIN_SEED_PASSWORD || "123123nrrN!!"),
+          "active",
+          timestamp,
+          timestamp,
+          null,
+        ],
+      );
+
+      await execute(
+        `insert into profiles (
+          user_id, role, telegram_username, telegram_id, withdrawal_wallet, verified, created_at, updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          userId,
+          "admin",
+          normalizeTelegramUsername(
+            env.ADMIN_SEED_TELEGRAM_USERNAME || "@monohrome_admin",
+          ),
+          null,
+          null,
+          1,
+          timestamp,
+          timestamp,
+        ],
+      );
+
+      await execute(
+        `insert into balances (
+          user_id, available, pending_withdrawal, total_deposited, total_spent, total_withdrawn, updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?)`,
+        [userId, 0, 0, 0, 0, 0, timestamp],
+      );
+    }
+  }
+
+  console.log(
+    `[db-setup] Database ready using ${dbConfig.url.startsWith("file:") ? "LOCAL_DATABASE_URL" : "DATABASE_URL"}${shouldSeed ? " with seed data" : ""}.`,
+  );
+}
+
+main().catch((error) => {
+  console.error("[db-setup] failed", error);
+  process.exitCode = 1;
+});

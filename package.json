@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "db:setup": "node scripts/db-setup.mjs",
+    "db:seed": "node scripts/db-setup.mjs --seed",
     "telegram:poll": "node scripts/telegram-poll.mjs",
     "telegram:poll:watch": "node scripts/telegram-poll.mjs --watch",
     "telegram:poll:takeover": "node scripts/telegram-poll.mjs --takeover",

@@ -60,13 +60,40 @@ import {
   type WithdrawalStatus,
   type WithdrawalStatusHistoryRecord,
 } from "@/lib/rebohrome-data";
-import { getDbClient } from "./client";
+import {
+  getDbClient,
+  getDbRuntimeConfig,
+  shouldAutoSeedDatabase,
+  shouldAutoSetupDatabase,
+} from "./client";
 
 type SqlValue = string | number | null;
 type DbRow = Record<string, SqlValue>;
 
 let initialized = false;
 let initializationPromise: Promise<void> | null = null;
+
+const REQUIRED_TABLES = [
+  "users",
+  "profiles",
+  "balances",
+  "sessions",
+  "products",
+  "orders",
+  "payment_sessions",
+  "deposit_payment_sessions",
+  "order_items",
+  "owned_cards",
+  "cart_items",
+  "transactions",
+  "deposits",
+  "withdrawal_requests",
+  "admin_logs",
+  "withdrawal_status_history",
+  "telegram_action_tokens",
+  "telegram_runtime_state",
+  "notifications",
+] as const;
 
 function nowIso() {
   return new Date().toISOString();
@@ -411,6 +438,31 @@ async function ensureColumn(table: string, definition: string) {
 
     throw error;
   }
+}
+
+async function assertDatabaseReady() {
+  const rows = await queryMany(
+    `select name from sqlite_master
+     where type = 'table'
+       and name in (${REQUIRED_TABLES.map(() => "?").join(", ")})`,
+    [...REQUIRED_TABLES],
+  );
+
+  const existingTables = new Set(rows.map((row) => String(row.name)));
+  const missingTables = REQUIRED_TABLES.filter(
+    (tableName) => !existingTables.has(tableName),
+  );
+
+  if (missingTables.length === 0) {
+    return;
+  }
+
+  const config = getDbRuntimeConfig();
+  throw new Error(
+    `Database schema is not initialized for ${config.source}. Missing tables: ${missingTables.join(
+      ", ",
+    )}. Run "npm run db:setup" before starting the app, and use "npm run db:seed" if you also need the initial catalog and admin account.`,
+  );
 }
 
 async function seedProductsIfEmpty() {
@@ -1687,6 +1739,12 @@ export async function ensureDatabase() {
 
   if (!initializationPromise) {
     initializationPromise = (async () => {
+      if (!shouldAutoSetupDatabase()) {
+        await assertDatabaseReady();
+        initialized = true;
+        return;
+      }
+
       await execute(
         `create table if not exists users (
           id text primary key,
@@ -1986,6 +2044,20 @@ export async function ensureDatabase() {
         )`,
       );
 
+      await execute(
+        `create table if not exists notifications (
+          id text primary key,
+          user_id text not null,
+          kind text not null,
+          title text not null,
+          body text not null,
+          status text not null default 'unread',
+          meta_json text,
+          created_at text not null,
+          read_at text
+        )`,
+      );
+
       await ensureColumn("withdrawal_requests", "telegram_chat_id text");
       await ensureColumn("withdrawal_requests", "telegram_message_id text");
       await ensureColumn(
@@ -2050,8 +2122,11 @@ export async function ensureDatabase() {
         "update products set status = 'active' where status is null or status = ''",
       );
 
-      await seedProductsIfEmpty();
-      await seedAdminAccount();
+      if (shouldAutoSeedDatabase()) {
+        await seedProductsIfEmpty();
+        await seedAdminAccount();
+      }
+
       initialized = true;
     })().catch((error) => {
       initializationPromise = null;
