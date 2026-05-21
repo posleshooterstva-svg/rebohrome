@@ -23,6 +23,7 @@ export default async function CheckoutPage() {
         defaultEmail={user?.email ?? "collector@rebohrome.com"}
         defaultName={user?.name ?? user?.username ?? "Collector"}
         products={products}
+        userId={session.userId}
       />
     </main>
   );

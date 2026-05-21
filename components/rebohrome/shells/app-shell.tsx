@@ -20,6 +20,7 @@ type AppShellProps = {
   searchPlaceholder?: string;
   contentClassName?: string;
   surfaceClassName?: string;
+  mobileNavigation?: React.ReactNode;
 };
 
 export function AppShell({
@@ -39,11 +40,18 @@ export function AppShell({
   searchPlaceholder = "Search collectibles, collections...",
   contentClassName,
   surfaceClassName,
+  mobileNavigation,
 }: AppShellProps) {
   const showIntro = !hideIntro && Boolean(eyebrow || title || description);
 
   return (
-    <main className="mx-auto w-full max-w-[1540px] px-4 py-6 sm:px-6 lg:px-8">
+    <>
+      <main
+        className={cn(
+          "mx-auto w-full max-w-[1540px] px-4 py-6 sm:px-6 lg:px-8",
+          mobileNavigation ? "pb-28 xl:pb-6" : "pb-6",
+        )}
+      >
       <header className="relative z-[120]">
         <WorkspaceTopbar
           account={account}
@@ -80,10 +88,12 @@ export function AppShell({
                 ) : null}
               </div>
             ) : null}
-            <div className={showIntro ? "mt-8" : ""}>{children}</div>
-          </div>
-        </ArchiveSurfaceLayout>
+          <div className={showIntro ? "mt-8" : ""}>{children}</div>
+        </div>
+      </ArchiveSurfaceLayout>
       </div>
-    </main>
+      </main>
+      {mobileNavigation}
+    </>
   );
 }

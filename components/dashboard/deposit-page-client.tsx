@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { Check, LockKeyhole, ShieldCheck } from "lucide-react";
+import { CinematicLoadingOverlay } from "@/components/rebohrome/cinematic-loading-overlay";
+import { PaymentSuccessModal, type PaymentSuccessRow } from "@/components/rebohrome/payment-success-modal";
 import {
   depositPaymentOptions,
   formatCurrency,
@@ -15,8 +17,10 @@ import {
   type PaymentProviderName,
   type SupportedCurrency,
 } from "@/lib/rebohrome-data";
+import { useAccountExperienceStore } from "@/lib/stores/account-experience-store";
 
 type DepositPageClientProps = {
+  userId: string;
   initialOutcome: {
     deposit: DepositRecord;
     transactionId: string | null;
@@ -35,6 +39,7 @@ type DepositDraft = {
 type DepositSessionResponse =
   | {
       sessionId: string;
+      paymentUrl?: string;
       redirectPath: string;
     }
   | { error?: string };
@@ -43,9 +48,11 @@ const DEPOSIT_DRAFT_KEY = "rebohrome-deposit-draft";
 const amountOptions = [50, 100, 250, 500, 1000];
 
 export function DepositPageClient({
+  userId,
   initialOutcome,
 }: DepositPageClientProps) {
   const router = useRouter();
+  const applyDeposit = useAccountExperienceStore((state) => state.applyDeposit);
   const [selectedAmount, setSelectedAmount] = useState(250);
   const [customAmount, setCustomAmount] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodName | "">("");
@@ -95,18 +102,13 @@ export function DepositPageClient({
   }, [currency, customAmount, mounted, paymentMethod, provider, selectedAmount]);
 
   useEffect(() => {
-    if (!currency) {
+    if (!paymentMethod || !currency) {
       setProvider("");
       return;
     }
 
-    const activeProvider = paymentProviderOptions.find((option) => option.id === provider);
-    if (activeProvider && activeProvider.supportedCurrencies.includes(currency)) {
-      return;
-    }
-
-    setProvider("");
-  }, [currency, provider]);
+    setProvider("TransVoucher");
+  }, [currency, paymentMethod]);
 
   const amount = useMemo(() => {
     const normalized = Number(customAmount);
@@ -130,6 +132,103 @@ export function DepositPageClient({
     initialOutcome?.deposit.status === "failed"
       ? initialOutcome.failureReason || "Payment was declined by the issuing bank."
       : null;
+  const receiptRows: PaymentSuccessRow[] =
+    initialOutcome && initialOutcome.deposit.status === "completed"
+      ? [
+          {
+            label: "Deposit ID",
+            value: initialOutcome.deposit.id,
+            icon: "receipt",
+          },
+          {
+            label: "Local Transaction ID",
+            value: initialOutcome.transactionId ?? "Pending",
+            icon: "transaction",
+          },
+          {
+            label: "TransVoucher Transaction ID",
+            value: initialOutcome.deposit.transvoucherTransactionId ?? "Pending",
+            icon: "transaction",
+          },
+          {
+            label: "Paid",
+            value: formatCurrency(
+              initialOutcome.deposit.originalAmount ?? initialOutcome.deposit.amount,
+              initialOutcome.deposit.originalCurrency ?? "USD",
+            ),
+            icon: "paid",
+          },
+          {
+            label: "Credited",
+            value: `+${formatUsd(
+              initialOutcome.deposit.creditedAmountUsd ?? initialOutcome.deposit.amount,
+            )}`,
+            icon: "credited",
+            tone: "accent",
+          },
+          {
+            label: "Exchange Rate",
+            value: `1 ${initialOutcome.deposit.originalCurrency ?? "USD"} = ${(
+              initialOutcome.deposit.exchangeRate ?? 1
+            ).toFixed(2)} USD`,
+            icon: "exchange-rate",
+          },
+          {
+            label: "Payment",
+            value: initialOutcome.deposit.paymentMethod,
+            icon: "payment",
+          },
+          {
+            label: "Provider",
+            value: initialOutcome.deposit.paymentProvider ?? "Unknown",
+            icon: "provider",
+          },
+          {
+            label: "Reference ID",
+            value:
+              initialOutcome.deposit.transvoucherReferenceId ??
+              initialOutcome.deposit.cardMasked,
+            icon: "reference",
+          },
+          {
+            label: "Updated Balance",
+            value: formatUsd(initialOutcome.deposit.balanceAfter),
+            icon: "wallet",
+            tone: "accent",
+          },
+          {
+            label: "Timestamp",
+            value: formatDisplayDateTime(
+              initialOutcome.deposit.completedAt ?? initialOutcome.deposit.createdAt,
+            ),
+            icon: "timestamp",
+          },
+          {
+            label: "Status",
+            value: "SUCCESS",
+            icon: "status",
+            tone: "success",
+          },
+        ]
+      : [];
+
+  useEffect(() => {
+    if (!initialOutcome || initialOutcome.deposit.status !== "completed") {
+      return;
+    }
+
+    applyDeposit(userId, {
+      depositId: initialOutcome.deposit.id,
+      originalAmount:
+        initialOutcome.deposit.originalAmount ?? initialOutcome.deposit.amount,
+      originalCurrency: initialOutcome.deposit.originalCurrency ?? "USD",
+      creditedAmountUsd:
+        initialOutcome.deposit.creditedAmountUsd ?? initialOutcome.deposit.amount,
+      summary: `${initialOutcome.deposit.id} · ${formatDisplayDateTime(
+        initialOutcome.deposit.completedAt ?? initialOutcome.deposit.createdAt,
+      )}`,
+    });
+  }, [applyDeposit, initialOutcome, userId]);
 
   async function handleContinue() {
     if (!paymentMethod || !currency || !provider || isSubmitting || amount <= 0) {
@@ -160,7 +259,7 @@ export function DepositPageClient({
         );
       }
 
-      router.push(payload.redirectPath);
+      window.location.assign(payload.paymentUrl ?? payload.redirectPath);
     } catch (depositError) {
       setError(
         depositError instanceof Error
@@ -178,6 +277,12 @@ export function DepositPageClient({
     router.refresh();
   }
 
+  function continueToDashboard() {
+    setShowReceipt(false);
+    setError(null);
+    router.push("/dashboard");
+  }
+
   function downloadReceipt() {
     if (!initialOutcome || initialOutcome.deposit.status !== "completed") {
       return;
@@ -187,13 +292,14 @@ export function DepositPageClient({
     const content = [
       "REBOHROME DEPOSIT RECEIPT",
       `Deposit ID: ${deposit.id}`,
-      `Transaction ID: ${transactionId ?? "Pending"}`,
+      `Local Transaction ID: ${transactionId ?? "Pending"}`,
+      `TransVoucher Transaction ID: ${deposit.transvoucherTransactionId ?? "Pending"}`,
       `Paid Amount: ${formatCurrency(deposit.originalAmount ?? deposit.amount, deposit.originalCurrency ?? "USD")}`,
       `Credited Amount: +${formatUsd(deposit.creditedAmountUsd ?? deposit.amount)}`,
       `Exchange Rate: 1 ${deposit.originalCurrency ?? "USD"} = ${(deposit.exchangeRate ?? 1).toFixed(2)} USD`,
       `Payment Method: ${deposit.paymentMethod}`,
       `Provider: ${deposit.paymentProvider ?? "Unknown"}`,
-      `Reference: ${deposit.cardMasked}`,
+      `Reference ID: ${deposit.transvoucherReferenceId ?? deposit.cardMasked}`,
       `Updated Balance: ${formatUsd(deposit.balanceAfter)}`,
       `Timestamp: ${formatDisplayDateTime(deposit.completedAt ?? deposit.createdAt)}`,
       "Status: SUCCESS",
@@ -210,6 +316,11 @@ export function DepositPageClient({
 
   return (
     <>
+      <CinematicLoadingOverlay
+        description="We are opening the secure provider environment and preparing your archive balance update."
+        open={isSubmitting}
+        title="Preparing Deposit"
+      />
       <section className="space-y-5">
         <div>
           <h1 className="display-font text-4xl font-semibold tracking-[-0.05em] text-foreground sm:text-5xl">
@@ -313,18 +424,10 @@ export function DepositPageClient({
                     key={option.id}
                     active={provider === option.id}
                     disabled={!option.supported}
-                    label={option.id === "Stripe Pay" ? "Stripe" : option.label}
-                    speedLabel={
-                      option.id === "Stripe Pay"
-                        ? "Secure payments"
-                        : option.speedLabel
-                    }
-                    secureLabel={
-                      option.id === "Stripe Pay"
-                        ? "Powered by Stripe"
-                        : option.secureLabel
-                    }
-                    recommended={option.id === "Stripe Pay"}
+                    label={option.label}
+                    speedLabel={option.speedLabel}
+                    secureLabel={option.secureLabel}
+                    recommended
                     onClick={() => setProvider(option.id)}
                   />
                 ))}
@@ -359,89 +462,19 @@ export function DepositPageClient({
 
       <AnimatePresence>
         {showReceipt && initialOutcome && initialOutcome.deposit.status === "completed" ? (
-          <motion.div
-            animate={{ opacity: 1 }}
-            className="fixed inset-0 z-[260] flex items-center justify-center bg-[rgba(250,251,255,0.9)] px-4 backdrop-blur-2xl"
-            exit={{ opacity: 0 }}
-            initial={{ opacity: 0 }}
-          >
-            <motion.div
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              className="w-full max-w-md rounded-[28px] border border-white/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(244,247,255,0.92))] p-7 shadow-[0_50px_120px_rgba(138,149,201,0.24)]"
-              initial={{ opacity: 0, y: 16, scale: 0.98 }}
-              transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
-            >
-              <div className="flex items-center justify-between">
-                <div className="text-xs uppercase tracking-[0.26em] text-[var(--accent)]">
-                  Deposit Receipt
-                </div>
-                <div className="flex size-10 items-center justify-center rounded-full bg-[var(--accent-soft)] text-[var(--accent)]">
-                  <Check className="size-5" />
-                </div>
-              </div>
-
-              <div className="mt-6 space-y-3 text-sm text-muted">
-                <ReceiptRow label="Deposit ID" value={initialOutcome.deposit.id} />
-                <ReceiptRow
-                  label="Transaction ID"
-                  value={initialOutcome.transactionId ?? "Pending"}
-                />
-                <ReceiptRow
-                  label="Paid"
-                  value={formatCurrency(
-                    initialOutcome.deposit.originalAmount ?? initialOutcome.deposit.amount,
-                    initialOutcome.deposit.originalCurrency ?? "USD",
-                  )}
-                />
-                <ReceiptRow
-                  label="Credited"
-                  value={`+${formatUsd(
-                    initialOutcome.deposit.creditedAmountUsd ?? initialOutcome.deposit.amount,
-                  )}`}
-                />
-                <ReceiptRow
-                  label="Exchange Rate"
-                  value={`1 ${initialOutcome.deposit.originalCurrency ?? "USD"} = ${(
-                    initialOutcome.deposit.exchangeRate ?? 1
-                  ).toFixed(2)} USD`}
-                />
-                <ReceiptRow label="Payment" value={initialOutcome.deposit.paymentMethod} />
-                <ReceiptRow
-                  label="Provider"
-                  value={initialOutcome.deposit.paymentProvider ?? "Unknown"}
-                />
-                <ReceiptRow label="Reference" value={initialOutcome.deposit.cardMasked} />
-                <ReceiptRow
-                  label="Updated Balance"
-                  value={formatUsd(initialOutcome.deposit.balanceAfter)}
-                />
-                <ReceiptRow
-                  label="Timestamp"
-                  value={formatDisplayDateTime(
-                    initialOutcome.deposit.completedAt ?? initialOutcome.deposit.createdAt,
-                  )}
-                />
-                <ReceiptRow label="Status" value="SUCCESS" />
-              </div>
-
-              <div className="mt-7 grid grid-cols-2 gap-3">
-                <button
-                  className="rounded-[12px] border border-line bg-white px-4 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--foreground-soft)]"
-                  onClick={downloadReceipt}
-                  type="button"
-                >
-                  Download Receipt
-                </button>
-                <button
-                  className="rounded-[12px] bg-foreground px-4 py-3 text-sm font-medium text-white transition hover:opacity-92"
-                  onClick={dismissOutcome}
-                  type="button"
-                >
-                  Continue
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
+          <PaymentSuccessModal
+            continueLabel="Continue to Dashboard"
+            downloadLabel="Download Receipt"
+            onClose={dismissOutcome}
+            onContinue={continueToDashboard}
+            onDownload={downloadReceipt}
+            rows={receiptRows}
+            statusLabel="Payment Successful"
+            subtitle="Your transaction has been completed successfully."
+            supportDescription="Explore the marketplace and discover rare digital collectibles."
+            supportTitle="Your funds are secure and ready to use."
+            title="Thank you for your purchase!"
+          />
         ) : null}
       </AnimatePresence>
     </>
@@ -578,13 +611,4 @@ function StepHeader({ number, title }: { number: string; title: string }) {
 
 function ShieldInfoIcon() {
   return <ShieldCheck className="size-4 text-[var(--accent)]" />;
-}
-
-function ReceiptRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <span>{label}</span>
-      <span className="text-right font-medium text-foreground">{value}</span>
-    </div>
-  );
 }

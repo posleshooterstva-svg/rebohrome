@@ -1,8 +1,7 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
-import { PaymentHostedPageClient } from "@/components/payment/payment-hosted-page-client";
+import { notFound, redirect } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { getCheckoutPaymentSessionBundle, getUserById } from "@/lib/db/repository";
+import { getCheckoutPaymentSessionBundle } from "@/lib/db/repository";
 import { paymentProviderSlugMap, type PaymentProviderSlug } from "@/lib/rebohrome-data";
 import { requireUserSession } from "@/lib/session";
 
@@ -40,16 +39,20 @@ export default async function PaymentProviderPage({
   const session = await requireUserSession(
     `/login?redirectTo=/payment/${providerSlug}?session=${sessionId}`,
   );
-  const [paymentBundle, user] = await Promise.all([
-    getCheckoutPaymentSessionBundle(sessionId, session.userId),
-    getUserById(session.userId),
-  ]);
+  const paymentBundle = await getCheckoutPaymentSessionBundle(sessionId, session.userId);
 
   if (!paymentBundle || paymentBundle.session.paymentProvider !== providerName) {
     notFound();
   }
 
-  if (paymentBundle.session.status !== "pending") {
+  if (
+    ["pending", "attempting", "processing"].includes(paymentBundle.session.status) &&
+    paymentBundle.session.paymentUrl
+  ) {
+    redirect(paymentBundle.session.paymentUrl);
+  }
+
+  if (paymentBundle.session.status !== "completed") {
     return (
       <main className="min-h-screen bg-[#f3f4f8] px-4 py-10 sm:px-6 lg:px-8">
         <section className="mx-auto w-full max-w-3xl rounded-[20px] border border-line bg-white px-6 py-10 shadow-panel sm:px-8">
@@ -71,9 +74,9 @@ export default async function PaymentProviderPage({
               <Button asChild variant="secondary">
                 <Link
                   href={
-                    paymentBundle.session.status === "completed"
-                      ? `/success?order=${paymentBundle.session.orderId}`
-                      : `/checkout/declined?order=${paymentBundle.session.orderId}`
+                    paymentBundle.session.status === "failed"
+                      ? `/checkout/declined?order=${paymentBundle.session.orderId}`
+                      : `/checkout?pending=${paymentBundle.session.orderId}`
                   }
                 >
                   Open receipt
@@ -86,17 +89,5 @@ export default async function PaymentProviderPage({
     );
   }
 
-  return (
-    <PaymentHostedPageClient
-      collectorName={user?.name ?? user?.username ?? "Collector"}
-      currency={paymentBundle.session.currency}
-      items={paymentBundle.items}
-      paymentMethod={paymentBundle.session.paymentMethod}
-      provider={paymentBundle.session.paymentProvider}
-      sessionId={paymentBundle.session.id}
-      shipping={paymentBundle.session.shipping}
-      subtotal={paymentBundle.session.subtotal}
-      total={paymentBundle.session.total}
-    />
-  );
+  redirect(`/success?order=${encodeURIComponent(paymentBundle.session.orderId ?? "")}`);
 }

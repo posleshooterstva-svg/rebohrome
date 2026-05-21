@@ -3,11 +3,13 @@ import {
   retryWithdrawalTelegramSyncAction,
   updateWithdrawalStatusAction,
 } from "@/app/actions/marketplace";
+import { AdminUsersManager } from "@/components/admin/admin-users-manager";
 import { LiveRefreshControl } from "@/components/rebohrome/live-refresh-control";
 import { AdminShell } from "@/components/rebohrome/shells/admin-shell";
 import {
   getAdminUsers,
   getAdminWithdrawalRequests,
+  trackUsersPageVisit,
 } from "@/lib/db/repository";
 import {
   formatDisplayDateTime,
@@ -16,6 +18,7 @@ import {
   type WithdrawalActionSource,
   type WithdrawalStatus,
 } from "@/lib/rebohrome-data";
+import { getRequestMeta, requireAdminSession } from "@/lib/session";
 
 type AdminUsersPageProps = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -80,11 +83,27 @@ function formatActionLabel(value: string) {
 export default async function AdminUsersPage({
   searchParams,
 }: AdminUsersPageProps) {
+  const session = await requireAdminSession("/");
   const params = await searchParams;
+  const meta = await getRequestMeta("/admin/users");
   const [users, withdrawals] = await Promise.all([
     getAdminUsers(),
     getAdminWithdrawalRequests(),
   ]);
+
+  await trackUsersPageVisit({
+    eventType: "users_page_visit",
+    userId: session.user.id,
+    username: session.user.username,
+    telegramUsername: session.user.telegramUsername,
+    role: session.user.role,
+    ipAddress: meta.ipAddress,
+    country: meta.country,
+    userAgent: meta.userAgent,
+    language: meta.language,
+    route: meta.route,
+    timestamp: meta.timestamp,
+  });
 
   return (
     <AdminShell
@@ -104,42 +123,7 @@ export default async function AdminUsersPage({
         </Banner>
       ) : null}
 
-      <section className="rounded-[28px] border border-line bg-panel-strong p-5">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="text-lg font-semibold text-foreground">Collectors</div>
-            <p className="mt-1 text-sm text-muted">
-              Balances, roles, and linked Telegram identities stay visible in one place.
-            </p>
-          </div>
-          <LiveRefreshControl label="Refresh collectors" />
-        </div>
-
-        <div className="mt-5 space-y-3">
-          {users.map((entry) => (
-            <div
-              key={entry.user.id}
-              className="grid gap-3 rounded-[22px] border border-line bg-panel px-4 py-4 text-sm md:grid-cols-[1.1fr_1fr_0.8fr_0.9fr_0.9fr]"
-            >
-              <div>
-                <div className="font-semibold text-foreground">{entry.user.username}</div>
-                <div className="mt-1 text-xs text-muted">{entry.user.telegramUsername}</div>
-              </div>
-              <div className="text-muted">
-                <div>{entry.user.role === "admin" ? "Administrator" : "Collector"}</div>
-                <div className="mt-1 text-xs">{entry.user.email}</div>
-              </div>
-              <div className="text-foreground">{formatUsd(entry.balance.available)}</div>
-              <div className="text-muted">
-                Pending {formatUsd(entry.balance.pendingWithdrawal)}
-              </div>
-              <div className="text-muted">
-                Deposited {formatUsd(entry.balance.totalDeposited)}
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
+      <AdminUsersManager initialUsers={users} />
 
       <section className="mt-6 rounded-[28px] border border-line bg-panel-strong p-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">

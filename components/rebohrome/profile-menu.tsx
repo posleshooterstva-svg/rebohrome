@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { logoutAction } from "@/app/actions/auth";
 import { formatUsd, type HeaderAccount } from "@/lib/rebohrome-data";
+import { useAccountExperienceStore } from "@/lib/stores/account-experience-store";
 
 type ProfileMenuProps = {
   account: HeaderAccount;
@@ -28,6 +29,26 @@ const quickLinks = [
 export function ProfileMenu({ account }: ProfileMenuProps) {
   const [open, setOpen] = useState(false);
   const shellRef = useRef<HTMLDivElement | null>(null);
+  const primeAccount = useAccountExperienceStore((state) => state.primeAccount);
+  const liveAccount = useAccountExperienceStore(
+    (state) => state.accounts[account.user.id],
+  );
+
+  useEffect(() => {
+    primeAccount(
+      account.user.id,
+      {
+        available: account.balance.available,
+        pendingWithdrawal: account.balance.pendingWithdrawal,
+        totalDeposited: account.balance.totalDeposited,
+        totalSpent: account.balance.totalSpent,
+        totalWithdrawn: account.balance.totalWithdrawn,
+      },
+      [],
+    );
+  }, [account, primeAccount]);
+
+  const balanceLabel = formatUsd(liveAccount?.balance.available ?? account.balance.available);
 
   useEffect(() => {
     function handlePointer(event: MouseEvent) {
@@ -63,10 +84,10 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
         <div className="flex size-8 items-center justify-center rounded-full bg-[radial-gradient(circle_at_top,rgba(153,141,255,0.85),rgba(86,112,255,0.62))] text-white">
           {account.user.username.slice(0, 1).toUpperCase()}
         </div>
-        <span className="hidden text-left sm:block">
+          <span className="hidden text-left sm:block">
           <span className="block text-xs text-muted">Archive User</span>
           <span className="block font-medium text-foreground">
-            {formatUsd(account.balance.available)}
+            {balanceLabel}
           </span>
         </span>
         <ChevronDown className="size-4 text-muted" />
@@ -110,7 +131,7 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
                   Current Balance
                 </div>
                 <div className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-foreground">
-                  {formatUsd(account.balance.available)}
+                  {balanceLabel}
                 </div>
                 <div className="mt-2 text-sm text-cyan-600">
                   Synced with your archive wallet

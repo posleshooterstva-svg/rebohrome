@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowUpRight, ShieldAlert } from "lucide-react";
+import { CinematicLoadingOverlay } from "@/components/rebohrome/cinematic-loading-overlay";
 import { LiveRefreshControl } from "@/components/rebohrome/live-refresh-control";
 import { TrustBlock } from "@/components/rebohrome/trust-block";
 import { WITHDRAWAL_POLICY_SUMMARY } from "@/lib/legal-content";
@@ -14,8 +15,10 @@ import {
   type WithdrawalRecord,
   type WithdrawalStatus,
 } from "@/lib/rebohrome-data";
+import { useAccountExperienceStore } from "@/lib/stores/account-experience-store";
 
 type WithdrawPageClientProps = {
+  userId: string;
   balance: BalanceRecord | null;
   walletAddress: string | null;
   telegramId: string | null;
@@ -65,18 +68,43 @@ function formatSyncLabel(request: WithdrawalRecord) {
 }
 
 export function WithdrawPageClient({
+  userId,
   balance,
   walletAddress,
   telegramId,
   telegramUsername,
   recentWithdrawals,
 }: WithdrawPageClientProps) {
+  const primeAccount = useAccountExperienceStore((state) => state.primeAccount);
+  const applyWithdrawalRequest = useAccountExperienceStore(
+    (state) => state.applyWithdrawalRequest,
+  );
+  const liveAccount = useAccountExperienceStore((state) => state.accounts[userId]);
   const [amount, setAmount] = useState("");
   const [wallet, setWallet] = useState(walletAddress ?? "");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [optimisticWithdrawals, setOptimisticWithdrawals] = useState(recentWithdrawals);
   const canWithdraw = Boolean(walletAddress && telegramId && telegramUsername);
+
+  useEffect(() => {
+    primeAccount(
+      userId,
+      {
+        available: balance?.available ?? 0,
+        pendingWithdrawal: balance?.pendingWithdrawal ?? 0,
+        totalDeposited: balance?.totalDeposited ?? 0,
+        totalSpent: balance?.totalSpent ?? 0,
+        totalWithdrawn: balance?.totalWithdrawn ?? 0,
+      },
+      [],
+    );
+  }, [balance, primeAccount, userId]);
+
+  useEffect(() => {
+    setOptimisticWithdrawals(recentWithdrawals);
+  }, [recentWithdrawals]);
 
   async function handleSubmit() {
     if (isSubmitting) {
@@ -105,7 +133,38 @@ export function WithdrawPageClient({
         throw new Error(payload.error || "Unable to create withdrawal request.");
       }
 
-      setSuccess(payload.requestId);
+      const numericAmount = Number(amount);
+      const requestId = payload.requestId;
+      applyWithdrawalRequest(userId, {
+        requestId,
+        amount: numericAmount,
+        summary: `${requestId} · Awaiting manual review`,
+      });
+      setOptimisticWithdrawals((current) => [
+        {
+          id: requestId,
+          userId,
+          amount: numericAmount,
+          walletAddress: wallet,
+          telegramId: telegramId ?? "",
+          status: "pending",
+          sourceDepositId: null,
+          sourceCardMasked: null,
+          sourceCardholderName: null,
+          adminNote: null,
+          telegramChatId: null,
+          telegramMessageId: null,
+          telegramSyncStatus: "pending",
+          telegramSyncedAt: null,
+          telegramLastError: null,
+          lastActionSource: "dashboard",
+          lastUpdatedByAdminId: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        ...current,
+      ]);
+      setSuccess(requestId);
       setAmount("");
     } catch (withdrawError) {
       setError(
@@ -120,6 +179,11 @@ export function WithdrawPageClient({
 
   return (
     <div className="space-y-6">
+      <CinematicLoadingOverlay
+        description="Your payout request is being secured, queued for review, and linked to your archive activity."
+        open={isSubmitting}
+        title="Submitting Withdrawal"
+      />
       <div className="flex justify-end">
         <LiveRefreshControl label="Refresh withdrawal status" />
       </div>
@@ -219,14 +283,19 @@ export function WithdrawPageClient({
           <section className="rounded-[34px] border border-line bg-panel p-6 shadow-panel">
             <div className="text-lg font-semibold text-foreground">Withdrawal Summary</div>
             <div className="mt-5 space-y-3">
-              <SummaryRow label="Available balance" value={formatUsd(balance?.available ?? 0)} />
+              <SummaryRow
+                label="Available balance"
+                value={formatUsd(liveAccount?.balance.available ?? balance?.available ?? 0)}
+              />
               <SummaryRow
                 label="Pending withdrawals"
-                value={formatUsd(balance?.pendingWithdrawal ?? 0)}
+                value={formatUsd(
+                  liveAccount?.balance.pendingWithdrawal ?? balance?.pendingWithdrawal ?? 0,
+                )}
               />
               <SummaryRow
                 label="Total withdrawn"
-                value={formatUsd(balance?.totalWithdrawn ?? 0)}
+                value={formatUsd(liveAccount?.balance.totalWithdrawn ?? balance?.totalWithdrawn ?? 0)}
               />
             </div>
           </section>
@@ -277,12 +346,12 @@ export function WithdrawPageClient({
         </div>
 
         <div className="mt-5 space-y-3">
-          {recentWithdrawals.length === 0 ? (
+          {optimisticWithdrawals.length === 0 ? (
             <div className="rounded-[24px] border border-dashed border-line bg-panel-strong px-4 py-6 text-sm text-muted">
               No withdrawal requests yet.
             </div>
           ) : (
-            recentWithdrawals.map((request) => (
+            optimisticWithdrawals.map((request) => (
               <div
                 key={request.id}
                 className="rounded-[24px] border border-line bg-panel-strong px-4 py-4"

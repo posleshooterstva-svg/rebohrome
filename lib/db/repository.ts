@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "fs/promises";
+import { readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { revalidatePath } from "next/cache";
@@ -7,6 +7,7 @@ import {
   ADMIN_SEED_TELEGRAM,
   ADMIN_SEED_USERNAME,
   TELEGRAM_CALLBACK_SECRET,
+  TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_ID,
 } from "@/lib/server-config";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
@@ -31,12 +32,12 @@ import {
   maskCardNumber,
   normalizeTelegramUsername,
   normalizeUsername,
-  paymentProviderRouteMap,
   type BalanceRecord,
   type CheckoutPaymentSessionRecord,
   type CheckoutPaymentSessionStatus,
   type CollectionSummary,
   type CryptoNetwork,
+  type DashboardStat,
   type DeliveryType,
   type DepositPaymentSessionRecord,
   type DepositPaymentSessionStatus,
@@ -55,17 +56,33 @@ import {
   type TransactionRecord,
   type TelegramSyncStatus,
   type UserRecord,
+  type UserRole,
+  type UserStatus,
   type WithdrawalActionSource,
   type WithdrawalRecord,
   type WithdrawalStatus,
   type WithdrawalStatusHistoryRecord,
 } from "@/lib/rebohrome-data";
+import { validateProductImageFile } from "@/lib/product-image";
+import {
+  buildTransVoucherReturnUrls,
+  createTransVoucherPayment,
+  getTransVoucherPaymentStatus,
+  mapTransVoucherMethod,
+} from "@/lib/transvoucher";
 import {
   getDbClient,
   getDbRuntimeConfig,
+  resetDbClient,
   shouldAutoSeedDatabase,
   shouldAutoSetupDatabase,
 } from "./client";
+import {
+  isSupabaseManagedImageUrl,
+  isSupabaseStorageAvailable,
+  removeImageFromSupabaseStorage,
+  uploadImageToSupabaseStorage,
+} from "@/lib/supabase-storage";
 
 type SqlValue = string | number | null;
 type DbRow = Record<string, SqlValue>;
@@ -93,7 +110,30 @@ const REQUIRED_TABLES = [
   "telegram_action_tokens",
   "telegram_runtime_state",
   "notifications",
+  "security_audit_events",
 ] as const;
+
+type SecurityAuditEventType =
+  | "users_page_visit"
+  | "user_registered"
+  | "user_login"
+  | "transvoucher_invalid_signature";
+
+type SecurityAuditEventInput = {
+  eventType: SecurityAuditEventType;
+  userId?: string | null;
+  username?: string | null;
+  telegramUsername?: string | null;
+  role?: string | null;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+};
+
+let missingSecurityTelegramWarningLogged = false;
 
 function nowIso() {
   return new Date().toISOString();
@@ -140,6 +180,25 @@ function toJson(value: unknown) {
   return JSON.stringify(value);
 }
 
+function escapeTelegramHtml(value: string | null | undefined) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function truncateForTelegram(value: string | null | undefined, limit = 220) {
+  const next = String(value ?? "");
+  return next.length > limit ? `${next.slice(0, limit - 1)}…` : next;
+}
+
+function getSecurityFieldValue(value: string | null | undefined) {
+  const trimmed = String(value ?? "").trim();
+  return trimmed.length > 0 ? trimmed : "Unknown";
+}
+
 function fromJson<T>(value: SqlValue) {
   if (typeof value !== "string" || !value) {
     return null;
@@ -168,7 +227,11 @@ function normalizeProduct(row: DbRow): ProductRecord {
     edition: String(row.edition),
     shape: String(row.shape) as ProductRecord["shape"],
     imageUrl: row.image_url ? String(row.image_url) : null,
+    imagePath: row.image_path ? String(row.image_path) : null,
+    imageUpdatedAt: row.image_updated_at ? String(row.image_updated_at) : null,
     featured: asBoolean(row.featured ?? 0),
+    homepageFeatured: asBoolean(row.homepage_featured ?? 0),
+    featuredStartedAt: row.featured_started_at ? String(row.featured_started_at) : null,
     status: row.status ? (String(row.status) as ProductRecord["status"]) : "active",
     archived: asBoolean(row.archived ?? 0),
     palette: {
@@ -223,6 +286,13 @@ function normalizeOrder(row: DbRow): OrderRecord {
     total: Number(row.total),
     currency: row.currency ? (String(row.currency) as SupportedCurrency) : "USD",
     paymentProvider: row.payment_provider ? String(row.payment_provider) : null,
+    transvoucherTransactionId: row.transvoucher_transaction_id
+      ? String(row.transvoucher_transaction_id)
+      : null,
+    transvoucherReferenceId: row.transvoucher_reference_id
+      ? String(row.transvoucher_reference_id)
+      : null,
+    providerStatus: row.provider_status ? String(row.provider_status) : null,
     shippingName: String(row.shipping_name),
     shippingEmail: String(row.shipping_email),
     shippingAddress: String(row.shipping_address),
@@ -234,6 +304,7 @@ function normalizeOrder(row: DbRow): OrderRecord {
       row.remaining_balance === null ? null : Number(row.remaining_balance),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+    paidAt: row.paid_at ? String(row.paid_at) : null,
     itemCount: row.item_count === null ? undefined : Number(row.item_count),
   };
 }
@@ -264,12 +335,24 @@ function normalizeTransaction(row: DbRow): TransactionRecord {
         : Number(row.exchange_rate),
     paymentMethod: row.payment_method ? String(row.payment_method) : null,
     paymentProvider: row.payment_provider ? String(row.payment_provider) : null,
+    transvoucherTransactionId: row.transvoucher_transaction_id
+      ? String(row.transvoucher_transaction_id)
+      : null,
+    transvoucherReferenceId: row.transvoucher_reference_id
+      ? String(row.transvoucher_reference_id)
+      : null,
+    paymentUrl: row.payment_url ? String(row.payment_url) : null,
+    providerStatus: row.provider_status ? String(row.provider_status) : null,
+    rawProviderResponse: row.raw_provider_response
+      ? String(row.raw_provider_response)
+      : null,
     status: String(row.status) as TransactionRecord["status"],
     referenceId: String(row.reference_id),
     summary: String(row.summary),
     metaJson: row.meta_json ? String(row.meta_json) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+    paidAt: row.paid_at ? String(row.paid_at) : null,
   };
 }
 
@@ -295,6 +378,12 @@ function normalizeDeposit(row: DbRow): DepositRecord {
         : Number(row.exchange_rate),
     paymentMethod: String(row.payment_method),
     paymentProvider: row.payment_provider ? String(row.payment_provider) : null,
+    transvoucherTransactionId: row.transvoucher_transaction_id
+      ? String(row.transvoucher_transaction_id)
+      : null,
+    transvoucherReferenceId: row.transvoucher_reference_id
+      ? String(row.transvoucher_reference_id)
+      : null,
     cardholderName: String(row.cardholder_name),
     cardMasked: String(row.card_masked),
     status: String(row.status) as DepositRecord["status"],
@@ -302,6 +391,7 @@ function normalizeDeposit(row: DbRow): DepositRecord {
     balanceAfter: Number(row.balance_after),
     createdAt: String(row.created_at),
     completedAt: row.completed_at ? String(row.completed_at) : null,
+    paidAt: row.paid_at ? String(row.paid_at) : null,
   };
 }
 
@@ -374,6 +464,17 @@ function normalizeCheckoutPaymentSession(
     metaJson: row.meta_json ? String(row.meta_json) : null,
     orderId: row.order_id ? String(row.order_id) : null,
     transactionId: row.transaction_id ? String(row.transaction_id) : null,
+    transvoucherTransactionId: row.transvoucher_transaction_id
+      ? String(row.transvoucher_transaction_id)
+      : null,
+    transvoucherReferenceId: row.transvoucher_reference_id
+      ? String(row.transvoucher_reference_id)
+      : null,
+    paymentUrl: row.payment_url ? String(row.payment_url) : null,
+    providerStatus: row.provider_status ? String(row.provider_status) : null,
+    rawProviderResponse: row.raw_provider_response
+      ? String(row.raw_provider_response)
+      : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     expiresAt: String(row.expires_at),
@@ -396,6 +497,17 @@ function normalizeDepositPaymentSession(
     metaJson: row.meta_json ? String(row.meta_json) : null,
     depositId: row.deposit_id ? String(row.deposit_id) : null,
     transactionId: row.transaction_id ? String(row.transaction_id) : null,
+    transvoucherTransactionId: row.transvoucher_transaction_id
+      ? String(row.transvoucher_transaction_id)
+      : null,
+    transvoucherReferenceId: row.transvoucher_reference_id
+      ? String(row.transvoucher_reference_id)
+      : null,
+    paymentUrl: row.payment_url ? String(row.payment_url) : null,
+    providerStatus: row.provider_status ? String(row.provider_status) : null,
+    rawProviderResponse: row.raw_provider_response
+      ? String(row.raw_provider_response)
+      : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     expiresAt: String(row.expires_at),
@@ -405,13 +517,65 @@ function normalizeDepositPaymentSession(
 async function loadSeedProducts() {
   const seedPath = path.join(process.cwd(), "data", "seeds", "products.json");
   const file = await readFile(seedPath, "utf8");
-  return JSON.parse(file) as Array<
-    Omit<ProductRecord, "createdAt" | "updatedAt">
-  >;
+  return JSON.parse(file) as ProductInput[];
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getErrorFingerprint(error: unknown): string {
+  if (!error || typeof error !== "object") {
+    return "";
+  }
+
+  const errorRecord = error as Record<string, unknown>;
+  const message =
+    typeof errorRecord.message === "string" ? errorRecord.message : "";
+  const code = typeof errorRecord.code === "string" ? errorRecord.code : "";
+  const cause = "cause" in errorRecord ? getErrorFingerprint(errorRecord.cause) : "";
+
+  return `${message} ${code} ${cause}`.toLowerCase();
+}
+
+function isTransientDatabaseError(error: unknown) {
+  const fingerprint = getErrorFingerprint(error);
+
+  return [
+    "fetch failed",
+    "econnreset",
+    "etimedout",
+    "socket hang up",
+    "networkerror",
+    "temporarily unavailable",
+    "connection reset",
+    "connection closed",
+  ].some((marker) => fingerprint.includes(marker));
 }
 
 async function execute(sql: string, args: SqlValue[] = []) {
-  return getDbClient().execute({ sql, args });
+  const runtime = getDbRuntimeConfig();
+  const maxAttempts = runtime.usingExternalDatabase ? 3 : 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await getDbClient().execute({ sql, args });
+    } catch (error) {
+      const shouldRetry =
+        runtime.usingExternalDatabase &&
+        attempt < maxAttempts &&
+        isTransientDatabaseError(error);
+
+      if (!shouldRetry) {
+        throw error;
+      }
+
+      resetDbClient();
+      await delay(160 * attempt);
+    }
+  }
+
+  throw new Error("Database request failed after exhausting retry attempts.");
 }
 
 async function queryOne(sql: string, args: SqlValue[] = []) {
@@ -438,6 +602,57 @@ async function ensureColumn(table: string, definition: string) {
 
     throw error;
   }
+}
+
+async function insertSecurityAuditEvent(input: SecurityAuditEventInput) {
+  await execute(
+    `insert into security_audit_events (
+      id, event_type, user_id, username, telegram_username, role, ip_address,
+      country, user_agent, language, route, created_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      input.eventType,
+      input.userId ?? null,
+      input.username ?? null,
+      input.telegramUsername ?? null,
+      input.role ?? null,
+      input.ipAddress,
+      input.country,
+      input.userAgent,
+      input.language,
+      input.route,
+      input.timestamp,
+    ],
+  );
+}
+
+async function hasRecentSecurityAuditEvent(input: {
+  eventType: SecurityAuditEventType;
+  username?: string | null;
+  ipAddress: string;
+  route?: string | null;
+  since: string;
+}) {
+  const row = await queryOne(
+    `select id from security_audit_events
+     where event_type = ?
+       and coalesce(username, '') = ?
+       and ip_address = ?
+       and coalesce(route, '') = ?
+       and created_at >= ?
+     order by created_at desc
+     limit 1`,
+    [
+      input.eventType,
+      input.username ?? "",
+      input.ipAddress,
+      input.route ?? "",
+      input.since,
+    ],
+  );
+
+  return Boolean(row);
 }
 
 async function assertDatabaseReady() {
@@ -480,9 +695,10 @@ async function seedProductsIfEmpty() {
       `insert into products (
         id, title, rarity, price, currency, stock, collection, category, description, tagline,
         default_delivery_type, delivery_digital, delivery_physical, edition, shape,
-        image_url, featured, status, archived, palette_glow, palette_glow_soft,
+        image_url, featured, homepage_featured, featured_started_at, showcase_float,
+        showcase_rotation_seconds, status, archived, palette_glow, palette_glow_soft,
         palette_core, palette_ring, created_at, updated_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         product.id,
         product.title,
@@ -501,6 +717,10 @@ async function seedProductsIfEmpty() {
         product.shape,
         product.imageUrl,
         product.featured ? 1 : 0,
+        product.homepageFeatured ? 1 : 0,
+        product.homepageFeatured ? timestamp : null,
+        1,
+        12,
         product.status,
         0,
         product.palette.glow,
@@ -686,6 +906,7 @@ async function getUserAndBalance(userId: string) {
 }
 
 async function createTransactionRecord(input: {
+  id?: string;
   userId: string;
   kind: TransactionRecord["kind"];
   amount: number;
@@ -696,20 +917,28 @@ async function createTransactionRecord(input: {
   exchangeRate?: number | null;
   paymentMethod?: string | null;
   paymentProvider?: string | null;
+  transvoucherTransactionId?: string | null;
+  transvoucherReferenceId?: string | null;
+  paymentUrl?: string | null;
+  providerStatus?: string | null;
+  rawProviderResponse?: string | null;
   status: TransactionRecord["status"];
   referenceId: string;
   summary: string;
   meta?: Record<string, unknown> | null;
+  paidAt?: string | null;
 }) {
-  const id = createReadableId("TXN");
+  const id = input.id ?? createReadableId("TXN");
   const timestamp = nowIso();
 
   await execute(
     `insert into transactions (
       id, user_id, kind, amount, original_amount, original_currency, display_currency,
       credited_amount_usd, exchange_rate, payment_method, payment_provider,
-      status, reference_id, summary, meta_json, created_at, updated_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      transvoucher_transaction_id, transvoucher_reference_id, payment_url,
+      provider_status, raw_provider_response, status, reference_id, summary,
+      meta_json, created_at, updated_at, paid_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
     [
       id,
       input.userId,
@@ -722,12 +951,18 @@ async function createTransactionRecord(input: {
       input.exchangeRate ?? null,
       input.paymentMethod ?? null,
       input.paymentProvider ?? null,
+      input.transvoucherTransactionId ?? null,
+      input.transvoucherReferenceId ?? null,
+      input.paymentUrl ?? null,
+      input.providerStatus ?? null,
+      input.rawProviderResponse ?? null,
       input.status,
       input.referenceId,
       input.summary,
       input.meta ? toJson(input.meta) : null,
       timestamp,
       timestamp,
+      input.paidAt ?? null,
     ],
   );
 
@@ -852,6 +1087,171 @@ function parseCheckoutSessionItems(itemsJson: string) {
   return JSON.parse(itemsJson) as CheckoutSessionLine[];
 }
 
+function normalizeProviderStatus(value: string | null | undefined) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function mapProviderStatusToTransactionStatus(
+  status: string,
+): TransactionRecord["status"] {
+  const normalized = normalizeProviderStatus(status);
+
+  if (normalized === "attempting") {
+    return "attempting";
+  }
+
+  if (normalized === "processing") {
+    return "processing";
+  }
+
+  if (
+    normalized === "succeeded" ||
+    normalized === "completed" ||
+    normalized === "paid" ||
+    normalized === "success"
+  ) {
+    return "completed";
+  }
+
+  if (
+    normalized === "failed" ||
+    normalized === "declined" ||
+    normalized === "cancelled" ||
+    normalized === "canceled" ||
+    normalized === "expired"
+  ) {
+    return "failed";
+  }
+
+  return "pending";
+}
+
+function mapProviderStatusToCheckoutSessionStatus(
+  status: string,
+): CheckoutPaymentSessionStatus {
+  const normalized = normalizeProviderStatus(status);
+
+  if (normalized === "attempting") {
+    return "attempting";
+  }
+
+  if (normalized === "processing") {
+    return "processing";
+  }
+
+  if (
+    normalized === "succeeded" ||
+    normalized === "completed" ||
+    normalized === "paid" ||
+    normalized === "success"
+  ) {
+    return "completed";
+  }
+
+  if (
+    normalized === "failed" ||
+    normalized === "declined" ||
+    normalized === "cancelled" ||
+    normalized === "canceled"
+  ) {
+    return "failed";
+  }
+
+  if (normalized === "expired") {
+    return "expired";
+  }
+
+  return "pending";
+}
+
+function mapProviderStatusToDepositSessionStatus(
+  status: string,
+): DepositPaymentSessionStatus {
+  const normalized = normalizeProviderStatus(status);
+
+  if (normalized === "attempting") {
+    return "attempting";
+  }
+
+  if (normalized === "processing") {
+    return "processing";
+  }
+
+  if (
+    normalized === "succeeded" ||
+    normalized === "completed" ||
+    normalized === "paid" ||
+    normalized === "success"
+  ) {
+    return "completed";
+  }
+
+  if (
+    normalized === "failed" ||
+    normalized === "declined" ||
+    normalized === "cancelled" ||
+    normalized === "canceled"
+  ) {
+    return "failed";
+  }
+
+  if (normalized === "expired") {
+    return "expired";
+  }
+
+  return "pending";
+}
+
+function isProviderCompletedStatus(status: string) {
+  return mapProviderStatusToTransactionStatus(status) === "completed";
+}
+
+function isProviderFailedStatus(status: string) {
+  return mapProviderStatusToTransactionStatus(status) === "failed";
+}
+
+function buildTransVoucherPaymentReference(input: {
+  referenceId?: string | null;
+  transactionId?: string | null;
+}) {
+  return input.referenceId?.trim() || input.transactionId?.trim() || "TransVoucher session";
+}
+
+function getTransactionMeta(record: TransactionRecord | null) {
+  return record?.metaJson ? fromJson<Record<string, unknown>>(record.metaJson) ?? {} : {};
+}
+
+function extractProviderFailureReason(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const record = raw as Record<string, unknown>;
+  const directFields = [
+    "failure_reason",
+    "failureReason",
+    "reason",
+    "message",
+    "error",
+  ];
+
+  for (const field of directFields) {
+    if (typeof record[field] === "string" && record[field].trim()) {
+      return String(record[field]).trim();
+    }
+  }
+
+  const nestedCandidates = [record.data, record.result, record.payment, record.payment_intent];
+  for (const candidate of nestedCandidates) {
+    const nested = extractProviderFailureReason(candidate);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
 function formatTelegramTimestamp(value: string) {
   return `${formatUtcDateTime(value)} UTC`;
 }
@@ -937,6 +1337,8 @@ function buildTelegramFailureMessage(input: {
   paymentMethod: string;
   reason: string;
   referenceId: string;
+  transactionId?: string | null;
+  providerReferenceId?: string | null;
   timestamp: string;
 }) {
   return [
@@ -953,6 +1355,8 @@ function buildTelegramFailureMessage(input: {
     "",
     "Order ID:",
     input.referenceId,
+    ...(input.transactionId ? ["", "Transaction ID:", input.transactionId] : []),
+    ...(input.providerReferenceId ? ["", "Reference ID:", input.providerReferenceId] : []),
     "",
     "Timestamp:",
     formatTelegramTimestamp(input.timestamp),
@@ -1012,6 +1416,8 @@ async function sendDepositNotification(params: {
   exchangeRate: number;
   paymentMethod: string;
   provider: string;
+  transactionId?: string | null;
+  referenceId?: string | null;
   timestamp: string;
 }) {
   await sendTelegramNotification(
@@ -1029,9 +1435,13 @@ async function sendDepositNotification(params: {
       `Provider: ${params.provider}`,
       `Method: ${params.paymentMethod}`,
       `Deposit ID: ${params.depositId}`,
+      params.transactionId ? `Transaction ID: ${params.transactionId}` : null,
+      params.referenceId ? `Reference ID: ${params.referenceId}` : null,
       "------------------",
       `Timestamp: ${formatTelegramTimestamp(params.timestamp)}`,
-    ].join("\n"),
+    ]
+      .filter(Boolean)
+      .join("\n"),
   );
 }
 
@@ -1043,6 +1453,8 @@ async function sendPurchaseNotification(params: {
   currency: SupportedCurrency;
   paymentMethod: string;
   provider: string;
+  transactionId?: string | null;
+  referenceId?: string | null;
   items: Array<{ title: string; quantity: number }>;
   timestamp: string;
 }) {
@@ -1057,6 +1469,8 @@ async function sendPurchaseNotification(params: {
       `Method: ${params.paymentMethod}`,
       `Provider: ${params.provider}`,
       `Order ID: ${params.orderId}`,
+      params.transactionId ? `Transaction ID: ${params.transactionId}` : null,
+      params.referenceId ? `Reference ID: ${params.referenceId}` : null,
       "",
       "Purchased:",
       ...lines,
@@ -1064,7 +1478,9 @@ async function sendPurchaseNotification(params: {
       `Total: ${formatCurrency(params.total, params.currency)}`,
       "------------------",
       `Timestamp: ${formatTelegramTimestamp(params.timestamp)}`,
-    ].join("\n"),
+    ]
+      .filter(Boolean)
+      .join("\n"),
   );
 }
 
@@ -1075,20 +1491,27 @@ async function sendDepositFailureNotification(params: {
   amount: number;
   currency: SupportedCurrency;
   paymentMethod: string;
+  provider?: string | null;
+  transactionId?: string | null;
+  referenceId?: string | null;
   reason: string;
   timestamp: string;
 }) {
   await sendTelegramNotification(
     buildTelegramFailureMessage({
-      title: "Payment Declined",
+      title: "Payment Failed",
       username: params.username,
       telegramUsername: params.telegramUsername,
       amount: params.amount,
       currency: params.currency,
-      paymentMethod: params.paymentMethod,
+      paymentMethod: params.provider
+        ? `${params.paymentMethod} · ${params.provider}`
+        : params.paymentMethod,
       reason: params.reason,
       referenceId: params.depositId,
       timestamp: params.timestamp,
+      transactionId: params.transactionId,
+      providerReferenceId: params.referenceId,
     }),
   );
 }
@@ -1100,20 +1523,27 @@ async function sendPurchaseFailureNotification(params: {
   amount: number;
   currency: SupportedCurrency;
   paymentMethod: string;
+  provider?: string | null;
+  transactionId?: string | null;
+  referenceId?: string | null;
   reason: string;
   timestamp: string;
 }) {
   await sendTelegramNotification(
     buildTelegramFailureMessage({
-      title: "Payment Declined",
+      title: "Payment Failed",
       username: params.username,
       telegramUsername: params.telegramUsername,
       amount: params.amount,
       currency: params.currency,
-      paymentMethod: params.paymentMethod,
+      paymentMethod: params.provider
+        ? `${params.paymentMethod} · ${params.provider}`
+        : params.paymentMethod,
       reason: params.reason,
       referenceId: params.orderId,
       timestamp: params.timestamp,
+      transactionId: params.transactionId,
+      providerReferenceId: params.referenceId,
     }),
   );
 }
@@ -1157,6 +1587,146 @@ async function notifySafely(task: () => Promise<unknown>) {
     await task();
   } catch (error) {
     console.error("Telegram notification failed", error);
+  }
+}
+
+function canSendSecurityTelegramNotification() {
+  if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+    return true;
+  }
+
+  if (!missingSecurityTelegramWarningLogged) {
+    console.warn(
+      "Telegram security notifications are disabled because TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.",
+    );
+    missingSecurityTelegramWarningLogged = true;
+  }
+
+  return false;
+}
+
+async function sendSecurityTelegramNotification(message: string) {
+  if (!canSendSecurityTelegramNotification()) {
+    return;
+  }
+
+  await notifySafely(() => sendTelegramNotification(message));
+}
+
+function buildUsersPageVisitTelegramMessage(input: SecurityAuditEventInput) {
+  return [
+    "<b>Users Page Visit</b>",
+    "",
+    `User: ${escapeTelegramHtml(getSecurityFieldValue(input.username))}`,
+    `Role: ${escapeTelegramHtml(getSecurityFieldValue(input.role))}`,
+    `Route: ${escapeTelegramHtml(getSecurityFieldValue(input.route))}`,
+    `IP: ${escapeTelegramHtml(getSecurityFieldValue(input.ipAddress))}`,
+    `Country: ${escapeTelegramHtml(getSecurityFieldValue(input.country))}`,
+    `User Agent: ${escapeTelegramHtml(truncateForTelegram(input.userAgent, 280))}`,
+    `Language: ${escapeTelegramHtml(getSecurityFieldValue(input.language))}`,
+    `Time: ${escapeTelegramHtml(formatTelegramTimestamp(input.timestamp))}`,
+  ].join("\n");
+}
+
+function buildUserRegistrationTelegramMessage(input: SecurityAuditEventInput) {
+  return [
+    "<b>New User Registration</b>",
+    "",
+    `Username: ${escapeTelegramHtml(getSecurityFieldValue(input.username))}`,
+    `Telegram: ${escapeTelegramHtml(getSecurityFieldValue(input.telegramUsername))}`,
+    `IP: ${escapeTelegramHtml(getSecurityFieldValue(input.ipAddress))}`,
+    `Country: ${escapeTelegramHtml(getSecurityFieldValue(input.country))}`,
+    `User Agent: ${escapeTelegramHtml(truncateForTelegram(input.userAgent, 280))}`,
+    `Language: ${escapeTelegramHtml(getSecurityFieldValue(input.language))}`,
+    `Time: ${escapeTelegramHtml(formatTelegramTimestamp(input.timestamp))}`,
+  ].join("\n");
+}
+
+function buildUserLoginTelegramMessage(input: SecurityAuditEventInput) {
+  return [
+    "<b>User Login</b>",
+    "",
+    `Username: ${escapeTelegramHtml(getSecurityFieldValue(input.username))}`,
+    `Telegram: ${escapeTelegramHtml(getSecurityFieldValue(input.telegramUsername))}`,
+    `IP: ${escapeTelegramHtml(getSecurityFieldValue(input.ipAddress))}`,
+    `Country: ${escapeTelegramHtml(getSecurityFieldValue(input.country))}`,
+    `User Agent: ${escapeTelegramHtml(truncateForTelegram(input.userAgent, 280))}`,
+    `Language: ${escapeTelegramHtml(getSecurityFieldValue(input.language))}`,
+    `Time: ${escapeTelegramHtml(formatTelegramTimestamp(input.timestamp))}`,
+  ].join("\n");
+}
+
+export async function trackUsersPageVisit(input: SecurityAuditEventInput) {
+  await ensureDatabase();
+  const cooldownSince = new Date(
+    new Date(input.timestamp).getTime() - 5 * 60 * 1000,
+  ).toISOString();
+  const shouldSendTelegram = !(
+    await hasRecentSecurityAuditEvent({
+      eventType: "users_page_visit",
+      username: input.username,
+      ipAddress: input.ipAddress,
+      route: input.route,
+      since: cooldownSince,
+    })
+  );
+
+  await insertSecurityAuditEvent({
+    ...input,
+    eventType: "users_page_visit",
+  });
+
+  if (shouldSendTelegram) {
+    await sendSecurityTelegramNotification(
+      buildUsersPageVisitTelegramMessage({
+        ...input,
+        eventType: "users_page_visit",
+      }),
+    );
+  }
+}
+
+export async function trackUserRegistered(input: SecurityAuditEventInput) {
+  await ensureDatabase();
+  await insertSecurityAuditEvent({
+    ...input,
+    eventType: "user_registered",
+  });
+  await sendSecurityTelegramNotification(
+    buildUserRegistrationTelegramMessage({
+      ...input,
+      eventType: "user_registered",
+    }),
+  );
+}
+
+export async function trackUserLogin(input: SecurityAuditEventInput) {
+  await ensureDatabase();
+  const cooldownSince = new Date(
+    new Date(input.timestamp).getTime() - 5 * 60 * 1000,
+  ).toISOString();
+  const shouldSendTelegram = !(
+    await hasRecentSecurityAuditEvent({
+      eventType: "user_login",
+      username: input.username,
+      ipAddress: input.ipAddress,
+      route: input.route,
+      since: cooldownSince,
+    })
+  );
+
+  await insertSecurityAuditEvent({
+    ...input,
+    eventType: "user_login",
+  });
+
+  if (shouldSendTelegram) {
+    await sendSecurityTelegramNotification(
+      buildUserLoginTelegramMessage({
+        ...input,
+        eventType: "user_login",
+      }),
+    );
   }
 }
 
@@ -1814,7 +2384,13 @@ export async function ensureDatabase() {
           edition text not null,
           shape text not null,
           image_url text,
+          image_path text,
+          image_updated_at text,
           featured integer not null default 0,
+          homepage_featured integer not null default 0,
+          featured_started_at text,
+          showcase_float real not null default 1,
+          showcase_rotation_seconds integer not null default 12,
           status text not null default 'active',
           archived integer not null default 0,
           palette_glow text not null,
@@ -1843,10 +2419,14 @@ export async function ensureDatabase() {
           shipping_postal_code text not null,
           payment_method text not null,
           payment_provider text,
+          transvoucher_transaction_id text,
+          transvoucher_reference_id text,
+          provider_status text,
           failure_reason text,
           remaining_balance integer,
           created_at text not null,
-          updated_at text not null
+          updated_at text not null,
+          paid_at text
         )`,
       );
 
@@ -1865,6 +2445,11 @@ export async function ensureDatabase() {
           meta_json text,
           order_id text,
           transaction_id text,
+          transvoucher_transaction_id text,
+          transvoucher_reference_id text,
+          payment_url text,
+          provider_status text,
+          raw_provider_response text,
           created_at text not null,
           updated_at text not null,
           expires_at text not null
@@ -1885,6 +2470,11 @@ export async function ensureDatabase() {
           meta_json text,
           deposit_id text,
           transaction_id text,
+          transvoucher_transaction_id text,
+          transvoucher_reference_id text,
+          payment_url text,
+          provider_status text,
+          raw_provider_response text,
           created_at text not null,
           updated_at text not null,
           expires_at text not null
@@ -1937,12 +2527,18 @@ export async function ensureDatabase() {
           exchange_rate real,
           payment_method text,
           payment_provider text,
+          transvoucher_transaction_id text,
+          transvoucher_reference_id text,
+          payment_url text,
+          provider_status text,
+          raw_provider_response text,
           status text not null,
           reference_id text not null,
           summary text not null,
           meta_json text,
           created_at text not null,
-          updated_at text not null
+          updated_at text not null,
+          paid_at text
         )`,
       );
 
@@ -1957,13 +2553,17 @@ export async function ensureDatabase() {
           exchange_rate real,
           payment_method text not null,
           payment_provider text,
+          transvoucher_transaction_id text,
+          transvoucher_reference_id text,
           cardholder_name text not null,
           card_masked text not null,
           status text not null,
           balance_before integer not null,
           balance_after integer not null,
           created_at text not null,
-          completed_at text
+          updated_at text,
+          completed_at text,
+          paid_at text
         )`,
       );
 
@@ -2058,6 +2658,23 @@ export async function ensureDatabase() {
         )`,
       );
 
+      await execute(
+        `create table if not exists security_audit_events (
+          id text primary key,
+          event_type text not null,
+          user_id text,
+          username text,
+          telegram_username text,
+          role text,
+          ip_address text not null,
+          country text not null,
+          user_agent text not null,
+          language text not null,
+          route text not null,
+          created_at text not null
+        )`,
+      );
+
       await ensureColumn("withdrawal_requests", "telegram_chat_id text");
       await ensureColumn("withdrawal_requests", "telegram_message_id text");
       await ensureColumn(
@@ -2077,6 +2694,20 @@ export async function ensureDatabase() {
       await ensureColumn("admin_logs", "metadata_json text");
       await ensureColumn("orders", "currency text not null default 'USD'");
       await ensureColumn("orders", "payment_provider text");
+      await ensureColumn("orders", "transvoucher_transaction_id text");
+      await ensureColumn("orders", "transvoucher_reference_id text");
+      await ensureColumn("orders", "provider_status text");
+      await ensureColumn("orders", "paid_at text");
+      await ensureColumn("payment_sessions", "transvoucher_transaction_id text");
+      await ensureColumn("payment_sessions", "transvoucher_reference_id text");
+      await ensureColumn("payment_sessions", "payment_url text");
+      await ensureColumn("payment_sessions", "provider_status text");
+      await ensureColumn("payment_sessions", "raw_provider_response text");
+      await ensureColumn("deposit_payment_sessions", "transvoucher_transaction_id text");
+      await ensureColumn("deposit_payment_sessions", "transvoucher_reference_id text");
+      await ensureColumn("deposit_payment_sessions", "payment_url text");
+      await ensureColumn("deposit_payment_sessions", "provider_status text");
+      await ensureColumn("deposit_payment_sessions", "raw_provider_response text");
       await ensureColumn("transactions", "original_amount integer");
       await ensureColumn("transactions", "original_currency text");
       await ensureColumn("transactions", "display_currency text");
@@ -2084,17 +2715,33 @@ export async function ensureDatabase() {
       await ensureColumn("transactions", "exchange_rate real");
       await ensureColumn("transactions", "payment_method text");
       await ensureColumn("transactions", "payment_provider text");
+      await ensureColumn("transactions", "transvoucher_transaction_id text");
+      await ensureColumn("transactions", "transvoucher_reference_id text");
+      await ensureColumn("transactions", "payment_url text");
+      await ensureColumn("transactions", "provider_status text");
+      await ensureColumn("transactions", "raw_provider_response text");
+      await ensureColumn("transactions", "paid_at text");
       await ensureColumn("deposits", "original_amount integer");
       await ensureColumn("deposits", "original_currency text");
       await ensureColumn("deposits", "credited_amount_usd integer");
       await ensureColumn("deposits", "exchange_rate real");
       await ensureColumn("deposits", "payment_provider text");
+      await ensureColumn("deposits", "transvoucher_transaction_id text");
+      await ensureColumn("deposits", "transvoucher_reference_id text");
+      await ensureColumn("deposits", "updated_at text");
+      await ensureColumn("deposits", "paid_at text");
       await ensureColumn("products", "currency text not null default 'USD'");
       await ensureColumn(
         "products",
         "default_delivery_type text not null default 'digital'",
       );
       await ensureColumn("products", "featured integer not null default 0");
+      await ensureColumn("products", "homepage_featured integer not null default 0");
+      await ensureColumn("products", "featured_started_at text");
+      await ensureColumn("products", "image_path text");
+      await ensureColumn("products", "image_updated_at text");
+      await ensureColumn("products", "showcase_float real not null default 1");
+      await ensureColumn("products", "showcase_rotation_seconds integer not null default 12");
       await ensureColumn("products", "status text not null default 'active'");
 
       await execute(
@@ -2113,13 +2760,28 @@ export async function ensureDatabase() {
         "update orders set currency = 'USD' where currency is null or currency = ''",
       );
       await execute(
+        "update orders set provider_status = payment_state where provider_status is null or provider_status = ''",
+      );
+      await execute(
         "update products set currency = 'USD' where currency is null or currency = ''",
       );
       await execute(
         "update products set default_delivery_type = 'digital' where default_delivery_type is null or default_delivery_type = ''",
       );
       await execute(
+        "update deposits set updated_at = created_at where updated_at is null or updated_at = ''",
+      );
+      await execute(
         "update products set status = 'active' where status is null or status = ''",
+      );
+      await execute(
+        "update products set homepage_featured = 0 where homepage_featured is null",
+      );
+      await execute(
+        "update products set showcase_float = 1 where showcase_float is null or showcase_float <= 0",
+      );
+      await execute(
+        "update products set showcase_rotation_seconds = 12 where showcase_rotation_seconds is null or showcase_rotation_seconds <= 0",
       );
 
       if (shouldAutoSeedDatabase()) {
@@ -2225,6 +2887,18 @@ export async function getHeroProducts(limit = 3) {
     [limit],
   );
   return rows.map((row) => normalizeProduct(row));
+}
+
+export async function getHomepageFeaturedProduct() {
+  await ensureDatabase();
+  const row = await queryOne(
+    `select * from products
+     where archived = 0 and status = 'active' and homepage_featured = 1
+     order by featured_started_at desc, updated_at desc
+     limit 1`,
+  );
+
+  return row ? normalizeProduct(row) : null;
 }
 
 export async function getFeaturedCollections() {
@@ -2508,7 +3182,7 @@ export async function updateUserProfile(
   revalidatePrivate(userId);
 }
 
-export async function getDashboardStats(userId: string) {
+export async function getDashboardStats(userId: string): Promise<DashboardStat[]> {
   await ensureDatabase();
   const [balanceRow, purchaseRow, cardsRow] = await Promise.all([
     getBalanceRowByUserId(userId),
@@ -2700,8 +3374,8 @@ export async function createDeposit(input: {
     throw new Error("Deposit amount must be greater than zero.");
   }
 
-  if (input.provider === "OnlinePay" && input.currency === "EUR") {
-    throw new Error("OnlinePay supports USD only.");
+  if (input.provider !== "TransVoucher") {
+    throw new Error("TransVoucher is the only active payment provider.");
   }
 
   const account = await getUserAndBalance(input.userId);
@@ -2735,8 +3409,8 @@ export async function createDeposit(input: {
     `insert into deposits (
       id, user_id, amount, original_amount, original_currency, credited_amount_usd,
       exchange_rate, payment_method, payment_provider, cardholder_name, card_masked,
-      status, balance_before, balance_after, created_at, completed_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+      status, balance_before, balance_after, created_at, updated_at, completed_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
     [
       depositId,
       input.userId,
@@ -2752,6 +3426,7 @@ export async function createDeposit(input: {
       shouldDecline ? "failed" : "completed",
       balanceBefore,
       balanceAfter,
+      timestamp,
       timestamp,
       shouldDecline ? null : timestamp,
     ],
@@ -2991,38 +3666,193 @@ export async function createCheckoutPaymentSession(input: {
 }) {
   await ensureDatabase();
 
-  if (input.provider === "OnlinePay" && input.currency === "EUR") {
-    throw new Error("OnlinePay supports USD only.");
+  if (input.provider !== "TransVoucher") {
+    throw new Error("TransVoucher is the only active payment provider.");
+  }
+
+  if (input.paymentMethod === "Crypto") {
+    throw new Error("Crypto checkout is not available in the TransVoucher flow.");
+  }
+
+  const account = await getUserAndBalance(input.userId);
+
+  if (!account) {
+    throw new Error("Unable to load collector account.");
   }
 
   const { productMap } = await resolveCheckoutProducts(input.items);
   const pricing = calculateCheckoutTotals(input.items, productMap);
   const sessionId = randomUUID();
+  const orderId = createReadableId("ORD");
+  const transactionId = createReadableId("TXN");
   const timestamp = nowIso();
   const expiresAt = new Date(
     Date.now() + CHECKOUT_PAYMENT_SESSION_TTL_MINUTES * 60 * 1000,
   ).toISOString();
+  const shippingName = account.user.name || account.user.username;
+  const shippingEmail = account.user.email;
+  const shippingAddress =
+    pricing.shipping > 0
+      ? "Archive delivery managed after verified payment confirmation."
+      : "Digital delivery";
+  const shippingCity = "Archive";
+  const shippingPostalCode = "00000";
+  const { successUrl, cancelUrl, redirectUrl } =
+    buildTransVoucherReturnUrls(transactionId);
+  const payment = await createTransVoucherPayment({
+    amount: pricing.total,
+    currency: input.currency,
+    title: `ReboHrome Order ${orderId}`,
+    description: `${input.items.length} archive collectible${
+      input.items.length === 1 ? "" : "s"
+    }`,
+    successUrl,
+    cancelUrl,
+    redirectUrl,
+    customerDetails: {
+      username: account.user.username,
+      telegramUsername: account.user.telegramUsername,
+      email: account.user.email,
+    },
+    metadata: {
+      type: "purchase",
+      user_id: account.user.id,
+      username: account.user.username,
+      telegram_username: account.user.telegramUsername,
+      internal_order_id: orderId,
+      internal_transaction_id: transactionId,
+      cart_id: sessionId,
+    },
+    defaultPaymentMethod: mapTransVoucherMethod(input.paymentMethod),
+    paymentMethodForced: true,
+  });
+  const providerStatus = normalizeProviderStatus(payment.status);
+  const mappedSessionStatus = mapProviderStatusToCheckoutSessionStatus(providerStatus);
+  const mappedTransactionStatus = mapProviderStatusToTransactionStatus(providerStatus);
+  const initialSessionStatus =
+    mappedSessionStatus === "completed" ? "processing" : mappedSessionStatus;
+  const initialTransactionStatus =
+    mappedTransactionStatus === "completed" ? "processing" : mappedTransactionStatus;
+  const paymentReference = buildTransVoucherPaymentReference({
+    referenceId: payment.referenceId,
+    transactionId: payment.transactionId,
+  });
+
+  await execute(
+    `insert into orders (
+      id, user_id, status, payment_state, subtotal, shipping, total, currency,
+      shipping_name, shipping_email, shipping_address, shipping_city,
+      shipping_postal_code, payment_method, payment_provider,
+      transvoucher_transaction_id, transvoucher_reference_id, provider_status,
+      failure_reason, remaining_balance, created_at, updated_at, paid_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      orderId,
+      input.userId,
+      "Pending",
+      initialTransactionStatus === "failed" ? "failed" : "pending",
+      pricing.subtotal,
+      pricing.shipping,
+      pricing.total,
+      input.currency,
+      shippingName,
+      shippingEmail,
+      shippingAddress,
+      shippingCity,
+      shippingPostalCode,
+      input.paymentMethod,
+      "TransVoucher",
+      payment.transactionId,
+      payment.referenceId,
+      providerStatus || null,
+      initialTransactionStatus === "failed"
+        ? "Unable to initialize TransVoucher payment."
+        : null,
+      account.balance.available,
+      timestamp,
+      timestamp,
+      null,
+    ],
+  );
+
+  for (const item of input.items) {
+    const product = productMap.get(item.productId)!;
+    await execute(
+      `insert into order_items (
+        id, order_id, product_id, quantity, unit_price, delivery_type
+      ) values (?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(),
+        orderId,
+        product.id,
+        item.quantity,
+        product.price,
+        item.deliveryType,
+      ],
+    );
+  }
+
+  await createTransactionRecord({
+    id: transactionId,
+    userId: input.userId,
+    kind: "purchase",
+    amount: -pricing.total,
+    originalAmount: pricing.total,
+    originalCurrency: input.currency,
+    displayCurrency: input.currency,
+    paymentMethod: input.paymentMethod,
+    paymentProvider: "TransVoucher",
+    transvoucherTransactionId: payment.transactionId,
+    transvoucherReferenceId: payment.referenceId,
+    paymentUrl: payment.paymentUrl,
+    providerStatus: providerStatus || null,
+    rawProviderResponse: toJson(payment.raw),
+    status: initialTransactionStatus,
+    referenceId: orderId,
+    summary: "Awaiting TransVoucher payment confirmation",
+    meta: {
+      currency: input.currency,
+      paymentMethod: input.paymentMethod,
+      provider: "TransVoucher",
+      paymentReference,
+      paymentSessionId: sessionId,
+      telegramUsername: account.user.telegramUsername,
+      items: input.items,
+    },
+  });
 
   await execute(
     `insert into payment_sessions (
       id, user_id, payment_method, payment_provider, currency, subtotal,
       shipping, total, status, items_json, meta_json, order_id, transaction_id,
-      created_at, updated_at, expires_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      transvoucher_transaction_id, transvoucher_reference_id, payment_url,
+      provider_status, raw_provider_response, created_at, updated_at, expires_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       sessionId,
       input.userId,
       input.paymentMethod,
-      input.provider,
+      "TransVoucher",
       input.currency,
       pricing.subtotal,
       pricing.shipping,
       pricing.total,
-      "pending",
+      initialSessionStatus,
       toJson(input.items),
-      null,
-      null,
-      null,
+      toJson({
+        internalOrderId: orderId,
+        internalTransactionId: transactionId,
+        successUrl,
+        cancelUrl,
+        redirectUrl,
+      }),
+      orderId,
+      transactionId,
+      payment.transactionId,
+      payment.referenceId,
+      payment.paymentUrl,
+      providerStatus || null,
+      toJson(payment.raw),
       timestamp,
       timestamp,
       expiresAt,
@@ -3031,7 +3861,8 @@ export async function createCheckoutPaymentSession(input: {
 
   return {
     sessionId,
-    redirectPath: `/payment/${paymentProviderRouteMap[input.provider]}?session=${sessionId}`,
+    paymentUrl: payment.paymentUrl,
+    redirectPath: payment.paymentUrl,
   };
 }
 
@@ -3048,36 +3879,161 @@ export async function createDepositPaymentSession(input: {
     throw new Error("Deposit amount must be greater than zero.");
   }
 
-  if (input.provider === "OnlinePay" && input.currency === "EUR") {
-    throw new Error("OnlinePay supports USD only.");
+  if (input.provider !== "TransVoucher") {
+    throw new Error("TransVoucher is the only active payment provider.");
+  }
+
+  if (input.paymentMethod === "Crypto") {
+    throw new Error("Crypto deposits are not available in the TransVoucher flow.");
+  }
+
+  const account = await getUserAndBalance(input.userId);
+
+  if (!account) {
+    throw new Error("Unable to load collector account.");
   }
 
   const conversion = await convertAmount(input.amount, input.currency, "USD");
   const sessionId = randomUUID();
+  const depositId = createReadableId("DEP");
+  const transactionId = createReadableId("TXN");
   const timestamp = nowIso();
   const expiresAt = new Date(
     Date.now() + CHECKOUT_PAYMENT_SESSION_TTL_MINUTES * 60 * 1000,
   ).toISOString();
+  const { successUrl, cancelUrl, redirectUrl } =
+    buildTransVoucherReturnUrls(transactionId);
+  const payment = await createTransVoucherPayment({
+    amount: input.amount,
+    currency: input.currency,
+    title: `ReboHrome Deposit ${depositId}`,
+    description: `Archive balance funding for ${account.user.username}`,
+    successUrl,
+    cancelUrl,
+    redirectUrl,
+    customerDetails: {
+      username: account.user.username,
+      telegramUsername: account.user.telegramUsername,
+      email: account.user.email,
+    },
+    metadata: {
+      type: "deposit",
+      user_id: account.user.id,
+      username: account.user.username,
+      telegram_username: account.user.telegramUsername,
+      internal_deposit_id: depositId,
+      internal_transaction_id: transactionId,
+    },
+    defaultPaymentMethod: mapTransVoucherMethod(input.paymentMethod),
+    paymentMethodForced: true,
+  });
+  const providerStatus = normalizeProviderStatus(payment.status);
+  const mappedSessionStatus = mapProviderStatusToDepositSessionStatus(providerStatus);
+  const mappedTransactionStatus = mapProviderStatusToTransactionStatus(providerStatus);
+  const initialSessionStatus =
+    mappedSessionStatus === "completed" ? "processing" : mappedSessionStatus;
+  const initialTransactionStatus =
+    mappedTransactionStatus === "completed" ? "processing" : mappedTransactionStatus;
+  const paymentReference = buildTransVoucherPaymentReference({
+    referenceId: payment.referenceId,
+    transactionId: payment.transactionId,
+  });
+
+  await execute(
+    `insert into deposits (
+      id, user_id, amount, original_amount, original_currency, credited_amount_usd,
+      exchange_rate, payment_method, payment_provider, transvoucher_transaction_id,
+      transvoucher_reference_id, cardholder_name, card_masked, status, balance_before,
+      balance_after, created_at, updated_at, completed_at, paid_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      depositId,
+      input.userId,
+      conversion.convertedAmount,
+      input.amount,
+      input.currency,
+      conversion.convertedAmount,
+      conversion.exchangeRate,
+      input.paymentMethod,
+      "TransVoucher",
+      payment.transactionId,
+      payment.referenceId,
+      "TransVoucher hosted payment",
+      paymentReference,
+      initialTransactionStatus === "failed" ? "failed" : "processing",
+      account.balance.available,
+      account.balance.available,
+      timestamp,
+      timestamp,
+      null,
+      null,
+    ],
+  );
+
+  await createTransactionRecord({
+    id: transactionId,
+    userId: input.userId,
+    kind: "deposit",
+    amount: conversion.convertedAmount,
+    originalAmount: input.amount,
+    originalCurrency: input.currency,
+    displayCurrency: input.currency,
+    creditedAmountUsd: conversion.convertedAmount,
+    exchangeRate: conversion.exchangeRate,
+    paymentMethod: input.paymentMethod,
+    paymentProvider: "TransVoucher",
+    transvoucherTransactionId: payment.transactionId,
+    transvoucherReferenceId: payment.referenceId,
+    paymentUrl: payment.paymentUrl,
+    providerStatus: providerStatus || null,
+    rawProviderResponse: toJson(payment.raw),
+    status: initialTransactionStatus,
+    referenceId: depositId,
+    summary: "Awaiting TransVoucher deposit confirmation",
+    meta: {
+      originalAmount: input.amount,
+      originalCurrency: input.currency,
+      creditedAmountUsd: conversion.convertedAmount,
+      exchangeRate: conversion.exchangeRate,
+      paymentMethod: input.paymentMethod,
+      provider: "TransVoucher",
+      paymentReference,
+      relatedOrderId: depositId,
+      telegramUsername: account.user.telegramUsername,
+    },
+  });
 
   await execute(
     `insert into deposit_payment_sessions (
       id, user_id, payment_method, payment_provider, currency, original_amount,
       credited_amount_usd, exchange_rate, status, meta_json, deposit_id, transaction_id,
-      created_at, updated_at, expires_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      transvoucher_transaction_id, transvoucher_reference_id, payment_url,
+      provider_status, raw_provider_response, created_at, updated_at, expires_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       sessionId,
       input.userId,
       input.paymentMethod,
-      input.provider,
+      "TransVoucher",
       input.currency,
       input.amount,
       conversion.convertedAmount,
       conversion.exchangeRate,
-      "pending",
-      null,
-      null,
-      null,
+      initialSessionStatus,
+      toJson({
+        internalDepositId: depositId,
+        internalTransactionId: transactionId,
+        successUrl,
+        cancelUrl,
+        redirectUrl,
+      }),
+      depositId,
+      transactionId,
+      payment.transactionId,
+      payment.referenceId,
+      payment.paymentUrl,
+      providerStatus || null,
+      toJson(payment.raw),
       timestamp,
       timestamp,
       expiresAt,
@@ -3086,7 +4042,8 @@ export async function createDepositPaymentSession(input: {
 
   return {
     sessionId,
-    redirectPath: `/payment/deposit/${paymentProviderRouteMap[input.provider]}?session=${sessionId}`,
+    paymentUrl: payment.paymentUrl,
+    redirectPath: payment.paymentUrl,
   };
 }
 
@@ -3288,6 +4245,1004 @@ export async function finalizeDepositPaymentSession(input: {
   return result;
 }
 
+export async function recordTransVoucherInvalidSignatureAttempt(input: {
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+  await insertSecurityAuditEvent({
+    eventType: "transvoucher_invalid_signature",
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp: input.timestamp,
+  });
+}
+
+async function reconcileTransVoucherPurchase(input: {
+  transaction: TransactionRecord;
+  order: OrderRecord;
+  session: CheckoutPaymentSessionRecord | null;
+  providerStatus: string;
+  providerTransactionId: string | null;
+  providerReferenceId: string | null;
+  paymentUrl: string | null;
+  paidAt: string | null;
+  rawProviderResponse: unknown;
+}) {
+  const timestamp = nowIso();
+  const rawProviderResponse = toJson(input.rawProviderResponse);
+  const paymentReference = buildTransVoucherPaymentReference({
+    referenceId: input.providerReferenceId,
+    transactionId: input.providerTransactionId,
+  });
+  const mergedMeta = {
+    ...getTransactionMeta(input.transaction),
+    provider: "TransVoucher",
+    paymentReference,
+    transvoucherTransactionId: input.providerTransactionId,
+    transvoucherReferenceId: input.providerReferenceId,
+    providerStatus: input.providerStatus,
+    paymentUrl: input.paymentUrl,
+    paidAt: input.paidAt,
+  };
+
+  if (isProviderCompletedStatus(input.providerStatus)) {
+    let remainingBalance = input.order.remainingBalance ?? 0;
+
+    if (input.order.paymentState !== "completed") {
+      const account = await getUserAndBalance(input.order.userId);
+
+      if (!account) {
+        throw new Error("Unable to load collector account for TransVoucher reconciliation.");
+      }
+
+      const itemRows = await queryMany(
+        `select
+          order_items.product_id,
+          order_items.quantity,
+          order_items.delivery_type,
+          products.*
+         from order_items
+         inner join products on products.id = order_items.product_id
+         where order_items.order_id = ?`,
+        [input.order.id],
+      );
+
+      const items = itemRows.map((row) => ({
+        productId: String(row.product_id),
+        quantity: Number(row.quantity),
+        deliveryType: row.delivery_type as DeliveryType,
+        product: normalizeProduct(row),
+      }));
+
+      for (const item of items) {
+        if (item.product.stock < item.quantity) {
+          throw new Error(`${item.product.title} no longer has enough stock to fulfill this payment.`);
+        }
+      }
+
+      for (const item of items) {
+        await execute(
+          "update products set stock = stock - ?, updated_at = ? where id = ?",
+          [item.quantity, timestamp, item.product.id],
+        );
+
+        await execute(
+          `insert into owned_cards (
+            id, user_id, product_id, order_id, quantity, acquired_at
+          ) values (?, ?, ?, ?, ?, ?)`,
+          [
+            randomUUID(),
+            input.order.userId,
+            item.product.id,
+            input.order.id,
+            item.quantity,
+            input.paidAt ?? timestamp,
+          ],
+        );
+      }
+
+      await execute(
+        `update balances set
+          total_spent = total_spent + ?,
+          updated_at = ?
+         where user_id = ?`,
+        [input.order.total, timestamp, input.order.userId],
+      );
+
+      remainingBalance = account.balance.available;
+      await clearUserCartItems(input.order.userId);
+
+      await notifySafely(() =>
+        sendPurchaseNotification({
+          username: account.user.username,
+          telegramUsername: account.user.telegramUsername,
+          orderId: input.order.id,
+          total: input.order.total,
+          currency: input.order.currency,
+          paymentMethod: input.order.paymentMethod,
+          provider: "TransVoucher",
+          transactionId: input.providerTransactionId,
+          referenceId: input.providerReferenceId,
+          items: items.map((item) => ({
+            title: item.product.title,
+            quantity: item.quantity,
+          })),
+          timestamp: input.paidAt ?? timestamp,
+        }),
+      );
+    }
+
+    await execute(
+      `update orders set
+        status = ?,
+        payment_state = ?,
+        failure_reason = null,
+        remaining_balance = ?,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        provider_status = ?,
+        paid_at = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        input.order.shipping > 0 ? "Processing" : "Completed",
+        "completed",
+        remainingBalance,
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.providerStatus,
+        input.paidAt ?? timestamp,
+        timestamp,
+        input.order.id,
+      ],
+    );
+
+    await execute(
+      `update transactions set
+        payment_provider = ?,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        payment_url = ?,
+        provider_status = ?,
+        raw_provider_response = ?,
+        status = ?,
+        summary = ?,
+        meta_json = ?,
+        paid_at = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        "TransVoucher",
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.paymentUrl,
+        input.providerStatus,
+        rawProviderResponse,
+        "completed",
+        "Card purchase completed",
+        toJson(mergedMeta),
+        input.paidAt ?? timestamp,
+        timestamp,
+        input.transaction.id,
+      ],
+    );
+
+    if (input.session) {
+      await execute(
+        `update payment_sessions set
+          status = ?,
+          transvoucher_transaction_id = ?,
+          transvoucher_reference_id = ?,
+          payment_url = ?,
+          provider_status = ?,
+          raw_provider_response = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          "completed",
+          input.providerTransactionId,
+          input.providerReferenceId,
+          input.paymentUrl,
+          input.providerStatus,
+          rawProviderResponse,
+          timestamp,
+          input.session.id,
+        ],
+      );
+    }
+
+    revalidateStorefront();
+    revalidatePrivate(input.order.userId);
+    revalidateAdmin();
+    return;
+  }
+
+  if (isProviderFailedStatus(input.providerStatus)) {
+    const failureReason =
+      extractProviderFailureReason(input.rawProviderResponse) ??
+      "Payment failed or was declined by TransVoucher.";
+
+    if (
+      input.order.paymentState !== "completed" &&
+      input.order.paymentState !== "failed"
+    ) {
+      const user = await getUserById(input.order.userId);
+      await notifySafely(() =>
+        sendPurchaseFailureNotification({
+          username: user?.username ?? "collector",
+          telegramUsername: user?.telegramUsername ?? "@unknown",
+          orderId: input.order.id,
+          amount: input.order.total,
+          currency: input.order.currency,
+          paymentMethod: `${input.order.paymentMethod} ${paymentReference}`,
+          provider: "TransVoucher",
+          transactionId: input.providerTransactionId,
+          referenceId: input.providerReferenceId,
+          reason: failureReason,
+          timestamp: input.paidAt ?? timestamp,
+        }),
+      );
+    }
+
+    if (input.order.paymentState !== "completed") {
+      await execute(
+        `update orders set
+          status = ?,
+          payment_state = ?,
+          failure_reason = ?,
+          transvoucher_transaction_id = ?,
+          transvoucher_reference_id = ?,
+          provider_status = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          "Declined",
+          "failed",
+          failureReason,
+          input.providerTransactionId,
+          input.providerReferenceId,
+          input.providerStatus,
+          timestamp,
+          input.order.id,
+        ],
+      );
+    }
+
+    await execute(
+      `update transactions set
+        payment_provider = ?,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        payment_url = ?,
+        provider_status = ?,
+        raw_provider_response = ?,
+        status = ?,
+        summary = ?,
+        meta_json = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        "TransVoucher",
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.paymentUrl,
+        input.providerStatus,
+        rawProviderResponse,
+        "failed",
+        "Purchase declined",
+        toJson({
+          ...mergedMeta,
+          reason: failureReason,
+        }),
+        timestamp,
+        input.transaction.id,
+      ],
+    );
+
+    if (input.session) {
+      await execute(
+        `update payment_sessions set
+          status = ?,
+          transvoucher_transaction_id = ?,
+          transvoucher_reference_id = ?,
+          payment_url = ?,
+          provider_status = ?,
+          raw_provider_response = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          "failed",
+          input.providerTransactionId,
+          input.providerReferenceId,
+          input.paymentUrl,
+          input.providerStatus,
+          rawProviderResponse,
+          timestamp,
+          input.session.id,
+        ],
+      );
+    }
+
+    revalidatePrivate(input.order.userId);
+    revalidateAdmin();
+    return;
+  }
+
+  if (input.order.paymentState !== "completed") {
+    await execute(
+      `update orders set
+        status = ?,
+        payment_state = ?,
+        failure_reason = null,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        provider_status = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        "Pending",
+        "pending",
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.providerStatus,
+        timestamp,
+        input.order.id,
+      ],
+    );
+  }
+
+  await execute(
+    `update transactions set
+      payment_provider = ?,
+      transvoucher_transaction_id = ?,
+      transvoucher_reference_id = ?,
+      payment_url = ?,
+      provider_status = ?,
+      raw_provider_response = ?,
+      status = ?,
+      summary = ?,
+      meta_json = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      "TransVoucher",
+      input.providerTransactionId,
+      input.providerReferenceId,
+      input.paymentUrl,
+      input.providerStatus,
+      rawProviderResponse,
+      mapProviderStatusToTransactionStatus(input.providerStatus),
+      "TransVoucher payment status updated",
+      toJson(mergedMeta),
+      timestamp,
+      input.transaction.id,
+    ],
+  );
+
+  if (input.session) {
+    await execute(
+      `update payment_sessions set
+        status = ?,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        payment_url = ?,
+        provider_status = ?,
+        raw_provider_response = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        mapProviderStatusToCheckoutSessionStatus(input.providerStatus),
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.paymentUrl,
+        input.providerStatus,
+        rawProviderResponse,
+        timestamp,
+        input.session.id,
+      ],
+    );
+  }
+}
+
+async function reconcileTransVoucherDeposit(input: {
+  transaction: TransactionRecord;
+  deposit: DepositRecord;
+  session: DepositPaymentSessionRecord | null;
+  providerStatus: string;
+  providerTransactionId: string | null;
+  providerReferenceId: string | null;
+  paymentUrl: string | null;
+  paidAt: string | null;
+  rawProviderResponse: unknown;
+}) {
+  const timestamp = nowIso();
+  const rawProviderResponse = toJson(input.rawProviderResponse);
+  const paymentReference = buildTransVoucherPaymentReference({
+    referenceId: input.providerReferenceId,
+    transactionId: input.providerTransactionId,
+  });
+  const mergedMeta = {
+    ...getTransactionMeta(input.transaction),
+    provider: "TransVoucher",
+    paymentReference,
+    transvoucherTransactionId: input.providerTransactionId,
+    transvoucherReferenceId: input.providerReferenceId,
+    providerStatus: input.providerStatus,
+    paymentUrl: input.paymentUrl,
+    paidAt: input.paidAt,
+  };
+
+  if (isProviderCompletedStatus(input.providerStatus)) {
+    let balanceAfter = input.deposit.balanceAfter;
+
+    if (input.deposit.status !== "completed") {
+      const account = await getUserAndBalance(input.deposit.userId);
+
+      if (!account) {
+        throw new Error("Unable to load collector account for deposit reconciliation.");
+      }
+
+      balanceAfter = Number(
+        (
+          account.balance.available +
+          (input.deposit.creditedAmountUsd ?? input.deposit.amount)
+        ).toFixed(2),
+      );
+
+      await execute(
+        `update balances set
+          available = ?,
+          total_deposited = total_deposited + ?,
+          updated_at = ?
+         where user_id = ?`,
+        [
+          balanceAfter,
+          input.deposit.creditedAmountUsd ?? input.deposit.amount,
+          timestamp,
+          input.deposit.userId,
+        ],
+      );
+
+      const user = await getUserById(input.deposit.userId);
+      await notifySafely(() =>
+        sendDepositNotification({
+          username: user?.username ?? "collector",
+          telegramUsername: user?.telegramUsername ?? "@unknown",
+          depositId: input.deposit.id,
+          originalAmount: input.deposit.originalAmount ?? input.deposit.amount,
+          originalCurrency: input.deposit.originalCurrency ?? "USD",
+          creditedAmountUsd:
+            input.deposit.creditedAmountUsd ?? input.deposit.amount,
+          exchangeRate: input.deposit.exchangeRate ?? 1,
+          paymentMethod: input.deposit.paymentMethod,
+          provider: "TransVoucher",
+          transactionId: input.providerTransactionId,
+          referenceId: input.providerReferenceId,
+          timestamp: input.paidAt ?? timestamp,
+        }),
+      );
+    }
+
+    await execute(
+      `update deposits set
+        payment_provider = ?,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        card_masked = ?,
+        status = ?,
+        balance_after = ?,
+        completed_at = ?,
+        paid_at = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        "TransVoucher",
+        input.providerTransactionId,
+        input.providerReferenceId,
+        paymentReference,
+        "completed",
+        balanceAfter,
+        input.paidAt ?? timestamp,
+        input.paidAt ?? timestamp,
+        timestamp,
+        input.deposit.id,
+      ],
+    );
+
+    await execute(
+      `update transactions set
+        payment_provider = ?,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        payment_url = ?,
+        provider_status = ?,
+        raw_provider_response = ?,
+        status = ?,
+        summary = ?,
+        meta_json = ?,
+        paid_at = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        "TransVoucher",
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.paymentUrl,
+        input.providerStatus,
+        rawProviderResponse,
+        "completed",
+        "Deposit completed",
+        toJson(mergedMeta),
+        input.paidAt ?? timestamp,
+        timestamp,
+        input.transaction.id,
+      ],
+    );
+
+    if (input.session) {
+      await execute(
+        `update deposit_payment_sessions set
+          status = ?,
+          transvoucher_transaction_id = ?,
+          transvoucher_reference_id = ?,
+          payment_url = ?,
+          provider_status = ?,
+          raw_provider_response = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          "completed",
+          input.providerTransactionId,
+          input.providerReferenceId,
+          input.paymentUrl,
+          input.providerStatus,
+          rawProviderResponse,
+          timestamp,
+          input.session.id,
+        ],
+      );
+    }
+
+    revalidatePrivate(input.deposit.userId);
+    revalidateAdmin();
+    return;
+  }
+
+  if (isProviderFailedStatus(input.providerStatus)) {
+    const failureReason =
+      extractProviderFailureReason(input.rawProviderResponse) ??
+      "Payment failed or was declined by TransVoucher.";
+
+    if (input.deposit.status !== "completed" && input.deposit.status !== "failed") {
+      const user = await getUserById(input.deposit.userId);
+      await notifySafely(() =>
+        sendDepositFailureNotification({
+          username: user?.username ?? "collector",
+          telegramUsername: user?.telegramUsername ?? "@unknown",
+          depositId: input.deposit.id,
+          amount: input.deposit.originalAmount ?? input.deposit.amount,
+          currency: input.deposit.originalCurrency ?? "USD",
+          paymentMethod: `${input.deposit.paymentMethod} ${paymentReference}`,
+          provider: "TransVoucher",
+          transactionId: input.providerTransactionId,
+          referenceId: input.providerReferenceId,
+          reason: failureReason,
+          timestamp: input.paidAt ?? timestamp,
+        }),
+      );
+    }
+
+    await execute(
+      `update deposits set
+        payment_provider = ?,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        card_masked = ?,
+        status = ?,
+        balance_after = balance_before,
+        updated_at = ?
+       where id = ?`,
+      [
+        "TransVoucher",
+        input.providerTransactionId,
+        input.providerReferenceId,
+        paymentReference,
+        "failed",
+        timestamp,
+        input.deposit.id,
+      ],
+    );
+
+    await execute(
+      `update transactions set
+        payment_provider = ?,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        payment_url = ?,
+        provider_status = ?,
+        raw_provider_response = ?,
+        status = ?,
+        summary = ?,
+        meta_json = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        "TransVoucher",
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.paymentUrl,
+        input.providerStatus,
+        rawProviderResponse,
+        "failed",
+        "Deposit failed",
+        toJson({
+          ...mergedMeta,
+          reason: failureReason,
+        }),
+        timestamp,
+        input.transaction.id,
+      ],
+    );
+
+    if (input.session) {
+      await execute(
+        `update deposit_payment_sessions set
+          status = ?,
+          transvoucher_transaction_id = ?,
+          transvoucher_reference_id = ?,
+          payment_url = ?,
+          provider_status = ?,
+          raw_provider_response = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          "failed",
+          input.providerTransactionId,
+          input.providerReferenceId,
+          input.paymentUrl,
+          input.providerStatus,
+          rawProviderResponse,
+          timestamp,
+          input.session.id,
+        ],
+      );
+    }
+
+    revalidatePrivate(input.deposit.userId);
+    revalidateAdmin();
+    return;
+  }
+
+  await execute(
+    `update deposits set
+      payment_provider = ?,
+      transvoucher_transaction_id = ?,
+      transvoucher_reference_id = ?,
+      card_masked = ?,
+      status = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      "TransVoucher",
+      input.providerTransactionId,
+      input.providerReferenceId,
+      paymentReference,
+      "processing",
+      timestamp,
+      input.deposit.id,
+    ],
+  );
+
+  await execute(
+    `update transactions set
+      payment_provider = ?,
+      transvoucher_transaction_id = ?,
+      transvoucher_reference_id = ?,
+      payment_url = ?,
+      provider_status = ?,
+      raw_provider_response = ?,
+      status = ?,
+      summary = ?,
+      meta_json = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      "TransVoucher",
+      input.providerTransactionId,
+      input.providerReferenceId,
+      input.paymentUrl,
+      input.providerStatus,
+      rawProviderResponse,
+      mapProviderStatusToTransactionStatus(input.providerStatus),
+      "TransVoucher deposit status updated",
+      toJson(mergedMeta),
+      timestamp,
+      input.transaction.id,
+    ],
+  );
+
+  if (input.session) {
+    await execute(
+      `update deposit_payment_sessions set
+        status = ?,
+        transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?,
+        payment_url = ?,
+        provider_status = ?,
+        raw_provider_response = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        mapProviderStatusToDepositSessionStatus(input.providerStatus),
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.paymentUrl,
+        input.providerStatus,
+        rawProviderResponse,
+        timestamp,
+        input.session.id,
+      ],
+    );
+  }
+}
+
+async function applyTransVoucherPaymentStatus(input: {
+  transactionId?: string | null;
+  providerTransactionId?: string | null;
+  providerReferenceId?: string | null;
+  providerStatus: string;
+  paymentUrl?: string | null;
+  paidAt?: string | null;
+  rawProviderResponse: unknown;
+}) {
+  await ensureDatabase();
+
+  const transactionRow = input.transactionId
+    ? await queryOne("select * from transactions where id = ? limit 1", [
+        input.transactionId,
+      ])
+    : input.providerTransactionId
+      ? await queryOne(
+          "select * from transactions where transvoucher_transaction_id = ? limit 1",
+          [input.providerTransactionId],
+        )
+      : null;
+
+  if (!transactionRow) {
+    return null;
+  }
+
+  const transaction = normalizeTransaction(transactionRow);
+
+  if (transaction.kind === "purchase") {
+    const [orderRow, sessionRow] = await Promise.all([
+      queryOne("select * from orders where id = ? limit 1", [transaction.referenceId]),
+      queryOne("select * from payment_sessions where transaction_id = ? limit 1", [
+        transaction.id,
+      ]),
+    ]);
+
+    if (!orderRow) {
+      return null;
+    }
+
+    await reconcileTransVoucherPurchase({
+      transaction,
+      order: normalizeOrder(orderRow),
+      session: sessionRow ? normalizeCheckoutPaymentSession(sessionRow) : null,
+      providerStatus: normalizeProviderStatus(input.providerStatus),
+      providerTransactionId:
+        input.providerTransactionId ?? transaction.transvoucherTransactionId,
+      providerReferenceId:
+        input.providerReferenceId ?? transaction.transvoucherReferenceId,
+      paymentUrl: input.paymentUrl ?? transaction.paymentUrl,
+      paidAt: input.paidAt ?? transaction.paidAt,
+      rawProviderResponse: input.rawProviderResponse,
+    });
+  } else if (transaction.kind === "deposit") {
+    const [depositRow, sessionRow] = await Promise.all([
+      queryOne("select * from deposits where id = ? limit 1", [transaction.referenceId]),
+      queryOne(
+        "select * from deposit_payment_sessions where transaction_id = ? limit 1",
+        [transaction.id],
+      ),
+    ]);
+
+    if (!depositRow) {
+      return null;
+    }
+
+    await reconcileTransVoucherDeposit({
+      transaction,
+      deposit: normalizeDeposit(depositRow),
+      session: sessionRow ? normalizeDepositPaymentSession(sessionRow) : null,
+      providerStatus: normalizeProviderStatus(input.providerStatus),
+      providerTransactionId:
+        input.providerTransactionId ?? transaction.transvoucherTransactionId,
+      providerReferenceId:
+        input.providerReferenceId ?? transaction.transvoucherReferenceId,
+      paymentUrl: input.paymentUrl ?? transaction.paymentUrl,
+      paidAt: input.paidAt ?? transaction.paidAt,
+      rawProviderResponse: input.rawProviderResponse,
+    });
+  }
+
+  const updatedRow = await queryOne("select * from transactions where id = ? limit 1", [
+    transaction.id,
+  ]);
+
+  return updatedRow ? normalizeTransaction(updatedRow) : transaction;
+}
+
+export async function refreshTransVoucherTransactionStatus(
+  transactionId: string,
+  userId?: string,
+) {
+  await ensureDatabase();
+  const transactionRow = await queryOne(
+    userId
+      ? "select * from transactions where id = ? and user_id = ? limit 1"
+      : "select * from transactions where id = ? limit 1",
+    userId ? [transactionId, userId] : [transactionId],
+  );
+
+  if (!transactionRow) {
+    return null;
+  }
+
+  const transaction = normalizeTransaction(transactionRow);
+
+  if (transaction.paymentProvider !== "TransVoucher") {
+    return transaction;
+  }
+
+  if (!transaction.transvoucherTransactionId) {
+    return transaction;
+  }
+
+  const providerStatus = await getTransVoucherPaymentStatus(
+    transaction.transvoucherTransactionId,
+  );
+
+  return applyTransVoucherPaymentStatus({
+    transactionId: transaction.id,
+    providerTransactionId: providerStatus.transactionId,
+    providerReferenceId: providerStatus.referenceId,
+    providerStatus: providerStatus.status,
+    paymentUrl: providerStatus.paymentUrl,
+    paidAt: providerStatus.paidAt,
+    rawProviderResponse: providerStatus.raw,
+  });
+}
+
+function extractWebhookRecord(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return {} as Record<string, unknown>;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+export async function processTransVoucherWebhookPayload(
+  payload: Record<string, unknown>,
+) {
+  await ensureDatabase();
+
+  const eventType =
+    typeof payload.type === "string"
+      ? payload.type
+      : typeof payload.event === "string"
+        ? payload.event
+        : "";
+  const envelope = extractWebhookRecord(
+    payload.data ?? payload.result ?? payload.payment_intent ?? payload.payment ?? payload,
+  );
+  const metadata = extractWebhookRecord(envelope.metadata ?? payload.metadata);
+  const localTransactionId =
+    typeof metadata.internal_transaction_id === "string"
+      ? metadata.internal_transaction_id
+      : null;
+  const providerTransactionId =
+    typeof envelope.transaction_id === "string"
+      ? envelope.transaction_id
+      : typeof envelope.transactionId === "string"
+        ? envelope.transactionId
+        : null;
+  const providerReferenceId =
+    typeof envelope.reference_id === "string"
+      ? envelope.reference_id
+      : typeof envelope.referenceId === "string"
+        ? envelope.referenceId
+        : null;
+  const providerStatus =
+    typeof envelope.status === "string"
+      ? envelope.status
+      : eventType === "payment_intent.succeeded"
+        ? "succeeded"
+        : eventType === "payment_intent.failed"
+          ? "failed"
+          : eventType === "payment_intent.processing"
+            ? "processing"
+            : eventType === "payment_intent.attempting"
+              ? "attempting"
+              : "pending";
+  const paidAt =
+    typeof envelope.paid_at === "string"
+      ? envelope.paid_at
+      : typeof envelope.paidAt === "string"
+        ? envelope.paidAt
+        : null;
+  const paymentUrl =
+    typeof envelope.payment_url === "string"
+      ? envelope.payment_url
+      : typeof envelope.paymentUrl === "string"
+        ? envelope.paymentUrl
+        : null;
+
+  const transaction = await applyTransVoucherPaymentStatus({
+    transactionId: localTransactionId,
+    providerTransactionId,
+    providerReferenceId,
+    providerStatus,
+    paymentUrl,
+    paidAt,
+    rawProviderResponse: payload,
+  });
+
+  return {
+    ok: true as const,
+    eventType,
+    transactionId: transaction?.id ?? null,
+    status: transaction?.status ?? null,
+    skipped: !transaction,
+  };
+}
+
+export async function getTransVoucherRedirectTarget(
+  transactionId: string,
+  userId?: string,
+) {
+  const transaction = await refreshTransVoucherTransactionStatus(transactionId, userId);
+
+  if (!transaction) {
+    return null;
+  }
+
+  if (transaction.kind === "purchase") {
+    if (transaction.status === "completed") {
+      return `/success?order=${encodeURIComponent(transaction.referenceId)}`;
+    }
+
+    if (transaction.status === "failed") {
+      return `/checkout/declined?order=${encodeURIComponent(transaction.referenceId)}`;
+    }
+
+    return `/checkout?pending=${encodeURIComponent(transaction.referenceId)}`;
+  }
+
+  if (transaction.kind === "deposit") {
+    if (transaction.status === "completed") {
+      return `/dashboard/deposit?receipt=${encodeURIComponent(transaction.referenceId)}`;
+    }
+
+    if (transaction.status === "failed") {
+      return `/dashboard/deposit?failed=${encodeURIComponent(transaction.referenceId)}`;
+    }
+
+    return `/dashboard/deposit?pending=${encodeURIComponent(transaction.referenceId)}`;
+  }
+
+  return null;
+}
+
 export async function replaceUserCartItems(
   userId: string,
   items: Array<{ productId: string; quantity: number; deliveryType: DeliveryType }>,
@@ -3368,8 +5323,8 @@ export async function createCheckoutOrder(input: {
   const checkoutCurrency =
     input.paymentMethod === "Archive Balance" ? "USD" : input.currency;
 
-  if (input.paymentMethod !== "Archive Balance" && input.provider === "OnlinePay" && checkoutCurrency === "EUR") {
-    throw new Error("OnlinePay supports USD only.");
+  if (input.paymentMethod !== "Archive Balance" && input.provider !== "TransVoucher") {
+    throw new Error("TransVoucher is the only active payment provider.");
   }
 
   const { productMap } = await resolveCheckoutProducts(input.items);
@@ -3747,7 +5702,9 @@ export async function getAdminOrders() {
 export async function getAdminProducts() {
   await ensureDatabase();
   const rows = await queryMany(
-    "select * from products where archived = 0 order by title asc, created_at desc",
+    `select * from products
+     where archived = 0
+     order by homepage_featured desc, featured desc, updated_at desc, title asc`,
   );
   return rows.map((row) => normalizeProduct(row));
 }
@@ -3777,6 +5734,129 @@ export async function getAdminUsers() {
       updated_at: row.balance_updated_at,
     }),
   }));
+}
+
+async function getAdminUserEntryById(userId: string) {
+  const row = await queryOne(
+    `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.withdrawal_wallet, profiles.verified,
+      balances.available, balances.pending_withdrawal, balances.total_deposited,
+      balances.total_spent, balances.total_withdrawn, balances.updated_at as balance_updated_at
+     from users
+     inner join profiles on profiles.user_id = users.id
+     inner join balances on balances.user_id = users.id
+     where users.id = ?
+     limit 1`,
+    [userId],
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    user: normalizeUser(row),
+    balance: normalizeBalance({
+      user_id: row.id,
+      available: row.available,
+      pending_withdrawal: row.pending_withdrawal,
+      total_deposited: row.total_deposited,
+      total_spent: row.total_spent,
+      total_withdrawn: row.total_withdrawn,
+      updated_at: row.balance_updated_at,
+    }),
+  };
+}
+
+export async function updateAdminManagedUser(input: {
+  userId: string;
+  adminUserId: string;
+  name: string;
+  role: UserRole;
+  status: UserStatus;
+  telegramUsername: string;
+  telegramId: string;
+  withdrawalWallet: string;
+  verified: boolean;
+}) {
+  await ensureDatabase();
+
+  const currentEntry = await getAdminUserEntryById(input.userId);
+
+  if (!currentEntry) {
+    throw new Error("User not found.");
+  }
+
+  if (
+    input.userId === input.adminUserId &&
+    (input.role !== "admin" || input.status !== "active")
+  ) {
+    throw new Error(
+      "You cannot remove your own admin access or suspend your own account.",
+    );
+  }
+
+  const telegramUsername = normalizeTelegramUsername(input.telegramUsername);
+
+  if (!isValidTelegramUsername(telegramUsername)) {
+    throw new Error("Telegram username must start with @ and use 5-32 valid characters.");
+  }
+
+  const owner = await queryOne(
+    "select user_id from profiles where telegram_username = ? and user_id <> ? limit 1",
+    [telegramUsername, input.userId],
+  );
+
+  if (owner) {
+    throw new Error("Telegram username is already connected to another account.");
+  }
+
+  const timestamp = nowIso();
+
+  await execute("update users set name = ?, status = ?, updated_at = ? where id = ?", [
+    input.name.trim() || currentEntry.user.name || "Collector",
+    input.status,
+    timestamp,
+    input.userId,
+  ]);
+
+  await execute(
+    `update profiles set
+      role = ?, telegram_username = ?, telegram_id = ?, withdrawal_wallet = ?,
+      verified = ?, updated_at = ?
+     where user_id = ?`,
+    [
+      input.role,
+      telegramUsername,
+      input.telegramId.trim() || null,
+      input.withdrawalWallet.trim() || null,
+      input.verified ? 1 : 0,
+      timestamp,
+      input.userId,
+    ],
+  );
+
+  await logAdminAction(
+    input.adminUserId,
+    "update",
+    "user",
+    input.userId,
+    `Updated user ${currentEntry.user.username}`,
+    {
+      metadata: {
+        name: input.name.trim(),
+        role: input.role,
+        status: input.status,
+        telegramUsername,
+        verified: input.verified,
+      },
+    },
+  );
+
+  revalidatePrivate(input.userId);
+  revalidateAdmin();
+
+  return getAdminUserEntryById(input.userId);
 }
 
 export async function getAdminWithdrawalRequests() {
@@ -3863,13 +5943,20 @@ export async function createProduct(
   const palette = input.palette || getPaletteByRarity(input.rarity);
   const timestamp = nowIso();
 
+  if (input.homepageFeatured) {
+    await execute(
+      "update products set homepage_featured = 0, featured_started_at = null where homepage_featured = 1",
+    );
+  }
+
   await execute(
     `insert into products (
       id, title, rarity, price, currency, stock, collection, category, description,
       tagline, default_delivery_type, delivery_digital, delivery_physical, edition,
-      shape, image_url, featured, status, archived, palette_glow, palette_glow_soft,
+      shape, image_url, image_path, image_updated_at, featured, homepage_featured, featured_started_at, showcase_float,
+      showcase_rotation_seconds, status, archived, palette_glow, palette_glow_soft,
       palette_core, palette_ring, created_at, updated_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
     [
       id,
       input.title,
@@ -3887,7 +5974,13 @@ export async function createProduct(
       input.edition,
       input.shape,
       input.imageUrl,
+      input.imagePath ?? null,
+      input.imageUpdatedAt ?? null,
       input.featured ? 1 : 0,
+      input.homepageFeatured ? 1 : 0,
+      input.homepageFeatured ? timestamp : null,
+      1,
+      12,
       input.status,
       0,
       palette.glow,
@@ -3905,13 +5998,18 @@ export async function createProduct(
       "create",
       "product",
       id,
-      `Created product ${input.title}`,
+      input.homepageFeatured
+        ? `Created product ${input.title} and featured it on the homepage`
+        : `Created product ${input.title}`,
     );
   }
 
   revalidateStorefront();
   revalidateAdmin();
-  return id;
+  return {
+    id,
+    title: input.title,
+  };
 }
 
 export async function updateProduct(
@@ -3938,13 +6036,23 @@ export async function updateProduct(
     palette: input.rarity ? getPaletteByRarity(input.rarity) : current.palette,
   };
 
+  const timestamp = nowIso();
+
+  if (next.homepageFeatured) {
+    await execute(
+      "update products set homepage_featured = 0, featured_started_at = null where homepage_featured = 1 and id <> ?",
+      [id],
+    );
+  }
+
   await execute(
     `update products set
       title = ?, rarity = ?, price = ?, currency = ?, stock = ?, collection = ?,
       category = ?, description = ?, tagline = ?, default_delivery_type = ?,
       delivery_digital = ?, delivery_physical = ?, edition = ?, shape = ?, image_url = ?,
-      featured = ?, status = ?, palette_glow = ?, palette_glow_soft = ?, palette_core = ?,
-      palette_ring = ?, updated_at = ?
+      image_path = ?, image_updated_at = ?, featured = ?, homepage_featured = ?, featured_started_at = ?, showcase_float = ?,
+      showcase_rotation_seconds = ?, status = ?, palette_glow = ?, palette_glow_soft = ?,
+      palette_core = ?, palette_ring = ?, updated_at = ?
      where id = ?`,
     [
       next.title,
@@ -3962,16 +6070,38 @@ export async function updateProduct(
       next.edition,
       next.shape,
       next.imageUrl,
+      next.imagePath ?? null,
+      next.imageUpdatedAt ?? null,
       next.featured ? 1 : 0,
+      next.homepageFeatured ? 1 : 0,
+      next.homepageFeatured
+        ? current.homepageFeatured
+          ? current.featuredStartedAt ?? timestamp
+          : timestamp
+        : null,
+      1,
+      12,
       next.status,
       next.palette.glow,
       next.palette.glowSoft,
       next.palette.core,
       next.palette.ring,
-      nowIso(),
+      timestamp,
       id,
     ],
   );
+
+  if (
+    (current.imageUrl && current.imageUrl !== next.imageUrl) ||
+    (current.imagePath && current.imagePath !== next.imagePath)
+  ) {
+    await removeManagedProductImage({
+      imageUrl: current.imageUrl,
+      imagePath: current.imagePath,
+    }).catch((error) => {
+      console.warn("Unable to remove previous product image after replacement.", error);
+    });
+  }
 
   if (input.adminUserId) {
     await logAdminAction(
@@ -3979,20 +6109,96 @@ export async function updateProduct(
       "update",
       "product",
       id,
-      `Updated product ${next.title}`,
+      next.homepageFeatured && !current.homepageFeatured
+        ? `Updated product ${next.title} and featured it on the homepage`
+        : `Updated product ${next.title}`,
     );
   }
 
   revalidateStorefront();
   revalidateAdmin();
+  return {
+    ...next,
+    featuredStartedAt: next.homepageFeatured
+      ? current.homepageFeatured
+        ? current.featuredStartedAt ?? timestamp
+        : timestamp
+      : null,
+    updatedAt: timestamp,
+  };
+}
+
+export async function setHomepageFeaturedProduct(id: string, adminUserId?: string) {
+  await ensureDatabase();
+  const currentRow = await queryOne(
+    "select * from products where id = ? and archived = 0 limit 1",
+    [id],
+  );
+
+  if (!currentRow) {
+    throw new Error("Product not found.");
+  }
+
+  const current = normalizeProduct(currentRow);
+  const timestamp = nowIso();
+
+  await execute(
+    "update products set homepage_featured = 0, featured_started_at = null where homepage_featured = 1",
+  );
+  await execute(
+    "update products set homepage_featured = 1, featured_started_at = ?, updated_at = ? where id = ?",
+    [timestamp, timestamp, id],
+  );
+
+  if (adminUserId) {
+    await logAdminAction(
+      adminUserId,
+      "feature",
+      "product",
+      id,
+      `Featured product ${current.title} on the homepage`,
+    );
+  }
+
+  revalidateStorefront();
+  revalidateAdmin();
+  return {
+    ...current,
+    homepageFeatured: true,
+    featuredStartedAt: timestamp,
+    updatedAt: timestamp,
+  };
 }
 
 export async function deleteProduct(id: string, adminUserId?: string) {
   await ensureDatabase();
-  await execute("update products set archived = 1, updated_at = ? where id = ?", [
-    nowIso(),
-    id,
-  ]);
+  const row = await queryOne("select * from products where id = ? limit 1", [id]);
+
+  if (!row) {
+    throw new Error("Product not found.");
+  }
+
+  const product = normalizeProduct(row);
+
+  await execute(
+    `update products set
+      archived = 1,
+      featured = 0,
+      homepage_featured = 0,
+      featured_started_at = null,
+      updated_at = ?
+     where id = ?`,
+    [nowIso(), id],
+  );
+
+  if (product.imageUrl || product.imagePath) {
+    await removeManagedProductImage({
+      imageUrl: product.imageUrl,
+      imagePath: product.imagePath,
+    }).catch((error) => {
+      console.warn("Unable to remove archived product image.", error);
+    });
+  }
 
   if (adminUserId) {
     await logAdminAction(
@@ -4000,12 +6206,13 @@ export async function deleteProduct(id: string, adminUserId?: string) {
       "archive",
       "product",
       id,
-      `Archived product ${id}`,
+      `Archived product ${product.title}`,
     );
   }
 
   revalidateStorefront();
   revalidateAdmin();
+  return { id };
 }
 
 export async function updateOrderStatus(orderId: string, status: OrderStatus) {
@@ -4274,6 +6481,22 @@ export async function saveUploadedImage(file: File) {
     return null;
   }
 
+  validateProductImageFile(file);
+
+  const isProductionRuntime =
+    process.env.NODE_ENV === "production" ||
+    process.env.VERCEL === "1" ||
+    Boolean(process.env.VERCEL_ENV);
+
+  if (isProductionRuntime || isSupabaseStorageAvailable()) {
+    const uploaded = await uploadImageToSupabaseStorage(file);
+    return {
+      imageUrl: uploaded.publicUrl,
+      imagePath: uploaded.objectPath,
+      imageUpdatedAt: new Date().toISOString(),
+    };
+  }
+
   const uploadsDir = path.join(process.cwd(), "public", "uploads");
   await import("fs/promises").then(({ mkdir }) =>
     mkdir(uploadsDir, { recursive: true }),
@@ -4285,5 +6508,46 @@ export async function saveUploadedImage(file: File) {
   const filePath = path.join(uploadsDir, filename);
   await writeFile(filePath, Buffer.from(bytes));
 
-  return `/uploads/${filename}`;
+  return {
+    imageUrl: `/uploads/${filename}`,
+    imagePath: `uploads/${filename}`,
+    imageUpdatedAt: new Date().toISOString(),
+  };
+}
+
+export async function removeManagedProductImage(input: {
+  imageUrl?: string | null;
+  imagePath?: string | null;
+}) {
+  if (!input.imageUrl && !input.imagePath) {
+    return;
+  }
+
+  if (isSupabaseManagedImageUrl(input.imageUrl) || input.imagePath) {
+    await removeImageFromSupabaseStorage(input);
+    return;
+  }
+
+  const imageUrl = input.imageUrl;
+
+  if (!imageUrl) {
+    return;
+  }
+
+  if (!imageUrl.startsWith("/uploads/")) {
+    return;
+  }
+
+  const uploadsDir = path.join(process.cwd(), "public");
+  const relativePath = imageUrl.replace(/^\/+/, "");
+  const filePath = path.join(uploadsDir, relativePath);
+
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : "";
+    if (!message.includes("no such file") && !message.includes("enoent")) {
+      throw error;
+    }
+  }
 }

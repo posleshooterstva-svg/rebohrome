@@ -3,33 +3,10 @@ import { z } from "zod";
 import { createCheckoutOrder } from "@/lib/db/repository";
 import { getSessionState } from "@/lib/session";
 
-const paymentMethods = [
-  "Archive Balance",
-  "Credit Card",
-  "Apple Pay",
-  "Google Pay",
-  "Crypto",
-] as const;
-
-const paymentProviders = ["Internal Wallet", "OnlinePay", "Stripe Pay"] as const;
-const cryptoNetworks = ["USDT", "BTC", "ETH"] as const;
-const supportedCurrencies = ["USD", "EUR"] as const;
-
 const checkoutSchema = z.object({
-  shippingName: z.string().min(2).optional(),
-  shippingEmail: z.string().email().optional(),
-  shippingAddress: z.string().min(5).optional(),
-  shippingCity: z.string().min(2).optional(),
-  shippingPostalCode: z.string().min(3).optional(),
-  paymentMethod: z.enum(paymentMethods),
-  provider: z.enum(paymentProviders),
-  currency: z.enum(supportedCurrencies),
-  cardholderName: z.string().optional(),
-  cardNumber: z.string().optional(),
-  expiration: z.string().optional(),
-  cvv: z.string().optional(),
-  billingCountry: z.string().optional(),
-  cryptoNetwork: z.enum(cryptoNetworks).optional().nullable(),
+  paymentMethod: z.literal("Archive Balance"),
+  provider: z.literal("Internal Wallet").optional(),
+  currency: z.literal("USD").optional(),
   items: z
     .array(
       z.object({
@@ -52,7 +29,10 @@ export async function POST(request: Request) {
 
     const result = await createCheckoutOrder({
       userId: session.userId,
-      ...payload,
+      provider: "Internal Wallet",
+      currency: "USD",
+      paymentMethod: payload.paymentMethod,
+      items: payload.items,
     });
 
     return NextResponse.json(result);

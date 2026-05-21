@@ -38,9 +38,7 @@ export default async function AdminUploadPage({
         encType="multipart/form-data"
       >
         <div className="rounded-[24px] border border-line bg-panel-strong p-5">
-          <div className="text-lg font-semibold text-foreground">
-            Artwork upload
-          </div>
+          <div className="text-lg font-semibold text-foreground">Artwork upload</div>
           <AdminArtworkUploadField />
         </div>
 
@@ -169,19 +167,19 @@ export default async function AdminUploadPage({
             <textarea
               className="min-h-[160px] w-full rounded-2xl border border-line bg-panel px-4 py-3 text-sm text-foreground outline-none"
               name="description"
-              placeholder="A mysterious guardian from cosmic realms..."
+              placeholder="A rare archive collectible with verified ownership and instant digital delivery."
               required
             />
             <textarea
               className="min-h-[110px] w-full rounded-2xl border border-line bg-panel px-4 py-3 text-sm text-foreground outline-none"
               name="deliveryDigital"
-              placeholder="Unlocks instantly in your digital vault after checkout."
+              placeholder="Unlocks instantly in your private archive after checkout."
               required
             />
             <textarea
               className="min-h-[110px] w-full rounded-2xl border border-line bg-panel px-4 py-3 text-sm text-foreground outline-none"
               name="deliveryPhysical"
-              placeholder="Ships as a serialized collector card in archive packaging."
+              placeholder="Ships in archive presentation packaging when physical fulfillment is enabled."
               required
             />
           </div>

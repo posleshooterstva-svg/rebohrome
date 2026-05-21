@@ -39,10 +39,11 @@ export default async function DashboardDepositPage({
         <DepositSidebarRail
           balance={balance}
           recentTransactions={recentTransactions}
+          userId={session.userId}
         />
       }
     >
-      <DepositPageClient initialOutcome={initialOutcome} />
+      <DepositPageClient initialOutcome={initialOutcome} userId={session.userId} />
     </DashboardShell>
   );
 }

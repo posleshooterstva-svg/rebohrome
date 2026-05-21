@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { LockKeyhole, ShieldCheck } from "lucide-react";
+import { ChevronDown, LockKeyhole, ShieldCheck } from "lucide-react";
 import { CardArtwork } from "@/components/rebohrome/card-artwork";
+import { CinematicLoadingOverlay } from "@/components/rebohrome/cinematic-loading-overlay";
 import { Button } from "@/components/ui/button";
 import { getCartSummary } from "@/lib/cart";
 import { GLOBAL_COLLECTIBLE_DISCLAIMER } from "@/lib/legal-content";
@@ -19,11 +20,13 @@ import {
   type ProductRecord,
   type SupportedCurrency,
 } from "@/lib/rebohrome-data";
+import { useAccountExperienceStore } from "@/lib/stores/account-experience-store";
 import { useCartStore } from "@/lib/stores/cart-store";
 
 const CHECKOUT_DRAFT_KEY = "rebohrome-checkout-draft";
 
 type CheckoutPageClientProps = {
+  userId: string;
   products: ProductRecord[];
   defaultName: string;
   defaultEmail: string;
@@ -35,7 +38,6 @@ type CheckoutDraft = {
   currency: SupportedCurrency;
   provider: PaymentProviderName | "";
   agreedToTerms: boolean;
-  providerStepUnlocked: boolean;
 };
 
 type CheckoutResult =
@@ -48,20 +50,30 @@ type CheckoutResult =
       orderId: string;
     };
 
+type CheckoutSessionResponse =
+  | {
+      sessionId: string;
+      paymentUrl?: string;
+      redirectPath: string;
+    }
+  | { error?: string };
+
 export function CheckoutPageClient({
+  userId,
   products,
   availableBalance,
 }: CheckoutPageClientProps) {
   const router = useRouter();
   const lines = useCartStore((state) => state.lines);
   const clearCart = useCartStore((state) => state.clearCart);
+  const applyPurchase = useAccountExperienceStore((state) => state.applyPurchase);
   const [mounted, setMounted] = useState(false);
   const [paymentMethod, setPaymentMethod] =
     useState<PaymentMethodName>("Archive Balance");
   const [currency, setCurrency] = useState<SupportedCurrency>("USD");
   const [provider, setProvider] = useState<PaymentProviderName | "">("");
   const [agreedToTerms, setAgreedToTerms] = useState(false);
-  const [providerStepUnlocked, setProviderStepUnlocked] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,7 +91,6 @@ export function CheckoutPageClient({
       setCurrency(draft.currency || "USD");
       setProvider(draft.provider || "");
       setAgreedToTerms(Boolean(draft.agreedToTerms));
-      setProviderStepUnlocked(Boolean(draft.providerStepUnlocked));
     } catch {
       window.sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
     }
@@ -97,36 +108,24 @@ export function CheckoutPageClient({
         currency,
         provider,
         agreedToTerms,
-        providerStepUnlocked,
       } satisfies CheckoutDraft),
     );
-  }, [agreedToTerms, currency, mounted, paymentMethod, provider, providerStepUnlocked]);
+  }, [agreedToTerms, currency, mounted, paymentMethod, provider]);
 
   useEffect(() => {
     if (paymentMethod === "Archive Balance") {
       setCurrency("USD");
       setProvider("Internal Wallet");
-      setProviderStepUnlocked(false);
       return;
     }
 
-    if (provider === "Internal Wallet") {
+    if (!currency) {
       setProvider("");
-    }
-  }, [paymentMethod, provider]);
-
-  useEffect(() => {
-    if (paymentMethod === "Archive Balance") {
       return;
     }
 
-    const activeProvider = paymentProviderOptions.find((option) => option.id === provider);
-    if (activeProvider && activeProvider.supportedCurrencies.includes(currency)) {
-      return;
-    }
-
-    setProvider("");
-  }, [currency, paymentMethod, provider]);
+    setProvider("TransVoucher");
+  }, [currency, paymentMethod]);
 
   const summary = getCartSummary(mounted ? lines : [], products);
   const checkoutCurrency = paymentMethod === "Archive Balance" ? "USD" : currency;
@@ -142,10 +141,7 @@ export function CheckoutPageClient({
   );
 
   const externalCheckout = paymentMethod !== "Archive Balance";
-  const canOpenProviderStep =
-    externalCheckout && summary.items.length > 0 && !summary.hasInvalidItems;
-  const providerReady =
-    paymentMethod === "Archive Balance" || (providerStepUnlocked && provider !== "");
+  const providerReady = paymentMethod === "Archive Balance" || provider !== "";
   const canConfirm =
     mounted &&
     !summary.isEmpty &&
@@ -161,19 +157,6 @@ export function CheckoutPageClient({
 
     return Math.max(availableBalance - summary.total, 0);
   }, [availableBalance, paymentMethod, summary.total]);
-
-  async function handleContinue() {
-    if (!canOpenProviderStep) {
-      return;
-    }
-
-    setProviderStepUnlocked(true);
-    setError(null);
-
-    if (!provider) {
-      setProvider(currency === "EUR" ? "Stripe Pay" : "OnlinePay");
-    }
-  }
 
   async function handleConfirm() {
     if (!canConfirm || isSubmitting) {
@@ -213,6 +196,27 @@ export function CheckoutPageClient({
           return;
         }
 
+        applyPurchase(userId, {
+          orderId: payload.orderId,
+          amount: summary.total,
+          currency: "USD",
+          createdAt: new Date().toISOString(),
+          items: summary.items
+            .filter(
+              (
+                item,
+              ): item is typeof item & {
+                product: NonNullable<typeof item.product>;
+              } => item.product !== null,
+            )
+            .map((item) => ({
+              product: item.product,
+              quantity: item.quantity,
+            })),
+          summary: `${summary.items.length} archive item${
+            summary.items.length === 1 ? "" : "s"
+          } secured from balance`,
+        });
         clearCart();
         window.sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
         router.push(`/success?order=${payload.orderId}`);
@@ -237,11 +241,7 @@ export function CheckoutPageClient({
         }),
       });
 
-      const payload = (await response.json()) as
-        | {
-            redirectPath: string;
-          }
-        | { error?: string };
+      const payload = (await response.json()) as CheckoutSessionResponse;
 
       if (!response.ok || !("redirectPath" in payload)) {
         throw new Error(
@@ -249,7 +249,7 @@ export function CheckoutPageClient({
         );
       }
 
-      router.push(payload.redirectPath);
+      window.location.assign(payload.paymentUrl ?? payload.redirectPath);
     } catch (checkoutError) {
       setError(
         checkoutError instanceof Error
@@ -296,7 +296,17 @@ export function CheckoutPageClient({
   }
 
   return (
-    <div className="grid gap-5 lg:grid-cols-[0.88fr_1.12fr]">
+    <>
+      <CinematicLoadingOverlay
+        description={
+          paymentMethod === "Archive Balance"
+            ? "We are securing your archive order, updating ownership, and syncing your balance."
+            : "We are opening the hosted payment route and preparing your secure checkout."
+        }
+        open={isSubmitting}
+        title={paymentMethod === "Archive Balance" ? "Confirming Purchase" : "Preparing Payment"}
+      />
+      <div className="grid gap-5 pb-24 lg:grid-cols-[0.88fr_1.12fr] lg:pb-0">
         <section className="rounded-[18px] border border-line bg-panel px-5 py-6 shadow-panel sm:px-6">
           <h1 className="display-font text-3xl font-semibold tracking-[-0.05em] text-foreground sm:text-4xl">
             Complete Your Purchase
@@ -346,7 +356,6 @@ export function CheckoutPageClient({
                   sublabel={option.sublabel}
                   onClick={() => {
                     setPaymentMethod(option.id);
-                    setProviderStepUnlocked(false);
                     setError(null);
                   }}
                 />
@@ -379,8 +388,6 @@ export function CheckoutPageClient({
                     }
                     onClick={() => {
                       setCurrency(option);
-                      setProviderStepUnlocked(false);
-                      setProvider("");
                       setError(null);
                     }}
                   />
@@ -389,7 +396,7 @@ export function CheckoutPageClient({
             )}
           </div>
 
-          {externalCheckout && providerStepUnlocked ? (
+          {externalCheckout ? (
             <div className="mt-6">
               <div className="text-[11px] uppercase tracking-[0.24em] text-muted">
                 Payment Provider
@@ -409,27 +416,6 @@ export function CheckoutPageClient({
               </div>
             </div>
           ) : null}
-
-          <div className="mt-6">
-            <Button
-              className="w-full"
-              disabled={
-                paymentMethod === "Archive Balance" ||
-                !canOpenProviderStep ||
-                isSubmitting ||
-                providerStepUnlocked
-              }
-              onClick={handleContinue}
-              type="button"
-              variant={externalCheckout ? "default" : "secondary"}
-            >
-              {externalCheckout
-                ? providerStepUnlocked
-                  ? "Payment Route Ready"
-                  : "Continue to Payment Providers"
-                : "Archive Balance Selected"}
-            </Button>
-          </div>
         </section>
 
         <section className="rounded-[18px] border border-line bg-panel px-5 py-6 shadow-panel sm:px-6">
@@ -441,7 +427,25 @@ export function CheckoutPageClient({
             </div>
           </div>
 
-          <div className="mt-6 space-y-3">
+          <button
+            className="mt-5 flex w-full items-center justify-between rounded-[14px] border border-line bg-panel-strong px-4 py-3 text-left transition active:scale-[0.99] lg:hidden"
+            onClick={() => setSummaryOpen((current) => !current)}
+            type="button"
+          >
+            <div>
+              <div className="text-sm font-semibold text-foreground">
+                {summary.items.length} item{summary.items.length === 1 ? "" : "s"}
+              </div>
+              <div className="mt-1 text-sm text-muted">
+                {formatCurrency(summary.total, checkoutCurrency)}
+              </div>
+            </div>
+            <ChevronDown
+              className={`size-4 text-muted transition ${summaryOpen ? "rotate-180" : ""}`}
+            />
+          </button>
+
+          <div className={`${summaryOpen ? "mt-6 block" : "hidden"} space-y-3 lg:mt-6 lg:block`}>
             {summary.items.map((item) => (
               <div
                 key={item.key}
@@ -461,7 +465,7 @@ export function CheckoutPageClient({
                     {item.product?.title ?? "Unavailable"}
                   </div>
                   <div className="mt-1 text-xs text-muted">
-                    Qty {item.quantity} · {item.deliveryType === "digital" ? "Digital" : "Physical"}
+                    Qty {item.quantity} - {item.deliveryType === "digital" ? "Digital" : "Physical"}
                   </div>
                 </div>
                 <div className="text-sm font-medium text-foreground">
@@ -471,7 +475,7 @@ export function CheckoutPageClient({
             ))}
           </div>
 
-          <div className="mt-6 space-y-3 border-t border-line pt-6 text-sm">
+          <div className={`${summaryOpen ? "mt-6 block" : "hidden"} space-y-3 border-t border-line pt-6 text-sm lg:mt-6 lg:block`}>
             <SummaryRow
               label="Subtotal"
               value={formatCurrency(summary.subtotal, checkoutCurrency)}
@@ -487,13 +491,15 @@ export function CheckoutPageClient({
             />
           </div>
 
-          <div className="mt-5 rounded-[14px] border border-line bg-panel-strong px-4 py-4 text-sm">
+          <div
+            className={`${summaryOpen ? "mt-5 block" : "hidden"} rounded-[14px] border border-line bg-panel-strong px-4 py-4 text-sm lg:mt-5 lg:block`}
+          >
             <SummaryRow
               label="Payment Route"
               value={
                 paymentMethod === "Archive Balance"
-                  ? "Archive Balance · Internal Wallet"
-                  : providerStepUnlocked && provider
+                  ? "Archive Balance - Internal Wallet"
+                  : provider
                     ? composePaymentLabel(paymentMethod, provider)
                     : "Select source, currency, and provider"
               }
@@ -544,7 +550,13 @@ export function CheckoutPageClient({
             <p className="mt-4 text-sm leading-6 text-rose-600">{error}</p>
           ) : null}
 
-          <div className="mt-6 space-y-3">
+          <div className="sticky bottom-4 mt-6 space-y-3 rounded-[18px] border border-line bg-[rgba(255,255,255,0.96)] p-3 shadow-[0_18px_48px_rgba(15,23,42,0.08)] backdrop-blur lg:static lg:rounded-none lg:border-0 lg:bg-transparent lg:p-0 lg:shadow-none lg:backdrop-blur-0">
+            <div className="flex items-center justify-between text-sm text-muted lg:hidden">
+              <span>Total</span>
+              <span className="text-base font-semibold text-foreground">
+                {formatCurrency(summary.total, checkoutCurrency)}
+              </span>
+            </div>
             <Button
               className="w-full"
               disabled={!canConfirm || isSubmitting}
@@ -563,6 +575,7 @@ export function CheckoutPageClient({
           </div>
         </section>
       </div>
+    </>
   );
 }
 
@@ -579,7 +592,7 @@ function SelectorCard({
 }) {
   return (
     <button
-      className={`rounded-[14px] border px-4 py-4 text-left transition ${
+      className={`rounded-[14px] border px-4 py-4 text-left transition active:scale-[0.99] ${
         active
           ? "border-[var(--accent)] bg-[var(--accent-soft)]"
           : "border-line bg-panel-strong hover:bg-[var(--foreground-soft)]"
@@ -610,7 +623,7 @@ function ProviderCard({
 }) {
   return (
     <button
-      className={`rounded-[14px] border px-4 py-4 text-left transition ${
+      className={`rounded-[14px] border px-4 py-4 text-left transition active:scale-[0.99] ${
         active && !disabled
           ? "border-[var(--accent)] bg-[var(--accent-soft)]"
           : disabled

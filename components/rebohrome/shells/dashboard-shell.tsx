@@ -9,10 +9,10 @@ import {
 } from "@/lib/db/repository";
 import {
   formatCurrency,
-  formatUsd,
 } from "@/lib/rebohrome-data";
 import { getSessionState } from "@/lib/session";
 import { AppShell } from "./app-shell";
+import { MobileBottomNav } from "../mobile-bottom-nav";
 
 type DashboardShellProps = {
   active:
@@ -115,23 +115,31 @@ export async function DashboardShell({
       notificationHref="/dashboard/transactions"
       quickActionHref={quickActionHref}
       rightRail={
-        rightRail ?? (
+          rightRail ?? (
             <CollectorRail
               activityItems={activityItems}
               balanceNote="Archive funds are available for direct purchases and manual withdrawal review."
-              balanceValue={formatUsd(account?.balance.available ?? 0)}
               emptyActivity="Your deposits, purchases, and withdrawal updates will appear here."
+              initialBalance={{
+                available: account?.balance.available ?? 0,
+                pendingWithdrawal: account?.balance.pendingWithdrawal ?? 0,
+                totalDeposited: account?.balance.totalDeposited ?? 0,
+                totalSpent: account?.balance.totalSpent ?? 0,
+                totalWithdrawn: account?.balance.totalWithdrawn ?? 0,
+              }}
               primaryActionHref="/dashboard/deposit"
               primaryActionLabel="Deposit"
               secondaryActionHref="/withdraw"
               secondaryActionLabel="Withdraw"
               securityItems={securityItems}
+              userId={account?.user.id ?? null}
             />
         )
       }
       searchPlaceholder={searchPlaceholder}
       showCart={showCart}
       showQuickAction={showQuickAction}
+      mobileNavigation={<MobileBottomNav active={active} />}
       sidebar={
         <ArchiveSidebar
           account={account}

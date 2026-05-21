@@ -17,6 +17,15 @@ type AuthenticatedSession = {
   isAdminAuthenticated: boolean;
 };
 
+export type RequestMeta = {
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+};
+
 export async function getSessionState(): Promise<
   AnonymousSession | AuthenticatedSession
 > {
@@ -75,13 +84,68 @@ export async function requireAdminSession(
   return session;
 }
 
-export async function getRequestMeta() {
+function getHeaderValue(
+  headerStore: Awaited<ReturnType<typeof headers>>,
+  keys: string[],
+) {
+  for (const key of keys) {
+    const value = headerStore.get(key);
+    if (value) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function getHeaderRoute(headerStore: Awaited<ReturnType<typeof headers>>) {
+  const directRoute = getHeaderValue(headerStore, [
+    "x-pathname",
+    "x-invoke-path",
+    "next-url",
+    "x-matched-path",
+  ]);
+
+  if (directRoute?.startsWith("/")) {
+    return directRoute;
+  }
+
+  const referer = headerStore.get("referer");
+
+  if (!referer) {
+    return "unknown";
+  }
+
+  try {
+    const refererUrl = new URL(referer);
+    return refererUrl.pathname || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+export async function getRequestMeta(routeOverride?: string): Promise<RequestMeta> {
   const headerStore = await headers();
+  const forwardedFor = getHeaderValue(headerStore, ["cf-connecting-ip", "x-forwarded-for"]);
+  const ipAddress =
+    forwardedFor?.split(",")[0]?.trim() ??
+    getHeaderValue(headerStore, ["x-real-ip"]) ??
+    "unknown";
+  const country =
+    getHeaderValue(headerStore, [
+      "cf-ipcountry",
+      "x-vercel-ip-country",
+      "x-country-code",
+    ]) ?? "Unknown";
+  const userAgent = headerStore.get("user-agent") ?? "Unknown";
+  const language = headerStore.get("accept-language") ?? "Unknown";
 
   return {
-    userAgent: headerStore.get("user-agent"),
-    ipAddress:
-      headerStore.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-      headerStore.get("x-real-ip"),
+    ipAddress,
+    country,
+    userAgent,
+    language,
+    route: routeOverride ?? getHeaderRoute(headerStore),
+    timestamp: new Date().toISOString(),
   };
 }

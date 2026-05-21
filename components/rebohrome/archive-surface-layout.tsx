@@ -5,6 +5,8 @@ type ArchiveSurfaceLayoutProps = {
   children: React.ReactNode;
   rightRail: React.ReactNode;
   className?: string;
+  sidebarClassName?: string;
+  rightRailClassName?: string;
 };
 
 export function ArchiveSurfaceLayout({
@@ -12,6 +14,8 @@ export function ArchiveSurfaceLayout({
   children,
   rightRail,
   className,
+  sidebarClassName,
+  rightRailClassName,
 }: ArchiveSurfaceLayoutProps) {
   return (
     <div
@@ -20,13 +24,23 @@ export function ArchiveSurfaceLayout({
         className,
       )}
     >
-      <aside className="border-b border-line bg-panel-strong xl:border-b-0 xl:border-r">
+      <aside
+        className={cn(
+          "hidden border-b border-line bg-panel-strong xl:block xl:border-b-0 xl:border-r",
+          sidebarClassName,
+        )}
+      >
         {sidebar}
       </aside>
       <section className="min-w-0 border-b border-line bg-[linear-gradient(180deg,#ffffff_0%,#fcfcfa_100%)] xl:border-b-0 xl:border-r">
         {children}
       </section>
-      <aside className="min-w-0 bg-[linear-gradient(180deg,#ffffff_0%,#fbfbf9_100%)]">
+      <aside
+        className={cn(
+          "min-w-0 border-t border-line bg-[linear-gradient(180deg,#ffffff_0%,#fbfbf9_100%)] xl:border-t-0",
+          rightRailClassName,
+        )}
+      >
         {rightRail}
       </aside>
     </div>

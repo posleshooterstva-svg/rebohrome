@@ -1,12 +1,14 @@
 "use server";
 
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import {
   authenticateUser,
   createSessionForUser,
   deleteSessionByToken,
   registerUser,
+  trackUserLogin,
+  trackUserRegistered,
 } from "@/lib/db/repository";
 import { SESSION_COOKIE_NAME } from "@/lib/rebohrome-data";
 import { getRequestMeta } from "@/lib/session";
@@ -23,12 +25,22 @@ function getRedirectPath(formData: FormData, fallback: string) {
 
 async function setSessionCookie(token: string) {
   const cookieStore = await cookies();
+  const headerStore = await headers();
+  const forwardedProto = headerStore.get("x-forwarded-proto");
+  const origin = headerStore.get("origin");
+  const referer = headerStore.get("referer");
+  const secure =
+    forwardedProto === "https" ||
+    origin?.startsWith("https://") ||
+    referer?.startsWith("https://") ||
+    process.env.VERCEL === "1" ||
+    Boolean(process.env.VERCEL_ENV);
 
   cookieStore.set(SESSION_COOKIE_NAME, token, {
     path: "/",
     sameSite: "lax",
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure,
     maxAge: 60 * 60 * 24 * 30,
   });
 }
@@ -48,16 +60,30 @@ export async function registerAction(formData: FormData) {
   }
 
   try {
+    const meta = await getRequestMeta("/register");
     const userId = await registerUser({
       username,
       telegramUsername,
       password,
     });
-    const meta = await getRequestMeta();
     const token = await createSessionForUser({
       userId,
       userAgent: meta.userAgent,
       ipAddress: meta.ipAddress,
+    });
+
+    await trackUserRegistered({
+      eventType: "user_registered",
+      userId,
+      username,
+      telegramUsername,
+      role: "user",
+      ipAddress: meta.ipAddress,
+      country: meta.country,
+      userAgent: meta.userAgent,
+      language: meta.language,
+      route: meta.route,
+      timestamp: meta.timestamp,
     });
 
     await setSessionCookie(token);
@@ -79,11 +105,25 @@ export async function loginAction(formData: FormData) {
     redirect(`/login?error=${encodeURIComponent("Invalid username or password.")}`);
   }
 
-  const meta = await getRequestMeta();
+  const meta = await getRequestMeta("/login");
   const token = await createSessionForUser({
     userId: user.id,
     userAgent: meta.userAgent,
     ipAddress: meta.ipAddress,
+  });
+
+  await trackUserLogin({
+    eventType: "user_login",
+    userId: user.id,
+    username: user.username,
+    telegramUsername: user.telegramUsername,
+    role: user.role,
+    ipAddress: meta.ipAddress,
+    country: meta.country,
+    userAgent: meta.userAgent,
+    language: meta.language,
+    route: meta.route,
+    timestamp: meta.timestamp,
   });
 
   await setSessionCookie(token);

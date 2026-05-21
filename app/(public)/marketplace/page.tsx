@@ -150,8 +150,14 @@ export default async function MarketplacePage({
                 ? "Archive funds stay available for purchases, deposits, and manual withdrawals."
                 : "Sign in to unlock your wallet, balance history, and collector activity."
             }
-            balanceValue={formatUsd(account?.balance.available ?? 0)}
             emptyActivity="Recent checkout activity appears here once your account begins collecting."
+            initialBalance={{
+              available: account?.balance.available ?? 0,
+              pendingWithdrawal: account?.balance.pendingWithdrawal ?? 0,
+              totalDeposited: account?.balance.totalDeposited ?? 0,
+              totalSpent: account?.balance.totalSpent ?? 0,
+              totalWithdrawn: account?.balance.totalWithdrawn ?? 0,
+            }}
             primaryActionHref={
               isAuthenticated ? "/dashboard/deposit" : "/login?redirectTo=/dashboard/deposit"
             }
@@ -159,6 +165,7 @@ export default async function MarketplacePage({
             secondaryActionHref={isAuthenticated ? "/withdraw" : "/login?redirectTo=/withdraw"}
             secondaryActionLabel="Withdraw"
             securityItems={securityItems}
+            userId={account?.user.id ?? null}
           />
         }
         sidebar={

@@ -27,7 +27,7 @@ export function WorkspaceTopbar({
   searchPlaceholder = "Search collectibles, collections...",
 }: WorkspaceTopbarProps) {
   return (
-    <div className="rounded-[16px] border border-line bg-panel px-6 py-4 shadow-panel">
+    <div className="rounded-[16px] border border-line bg-[rgba(255,255,255,0.86)] px-4 py-4 shadow-panel backdrop-blur-xl sm:px-6">
       <div className="flex items-center gap-6">
         {showLogo ? <RebohromeLogo /> : null}
 

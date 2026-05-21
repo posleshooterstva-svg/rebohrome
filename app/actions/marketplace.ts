@@ -5,8 +5,12 @@ import { z } from "zod";
 import {
   createProduct,
   deleteProduct,
+  removeManagedProductImage,
+  refreshTransVoucherTransactionStatus,
   retryWithdrawalTelegramSync,
   saveUploadedImage,
+  setHomepageFeaturedProduct,
+  updateAdminManagedUser,
   updateOrderStatus,
   updateProduct,
   updateUserProfile,
@@ -29,6 +33,7 @@ const productSchema = z.object({
   deliveryPhysical: z.string().min(4),
   edition: z.string().min(2),
   featured: z.boolean(),
+  homepageFeatured: z.boolean().default(false),
   status: z.enum(["active", "inactive"]),
   shape: z.enum(["spire", "void", "halo", "crescent", "shard"]),
 });
@@ -38,6 +43,17 @@ const profileSchema = z.object({
   telegramUsername: z.string().min(2),
   telegramId: z.string().optional(),
   withdrawalWallet: z.string().optional(),
+});
+
+const adminUserSchema = z.object({
+  userId: z.string().min(1),
+  name: z.string().min(2),
+  role: z.enum(["user", "admin"]),
+  status: z.enum(["active", "suspended"]),
+  telegramUsername: z.string().min(2),
+  telegramId: z.string().optional(),
+  withdrawalWallet: z.string().optional(),
+  verified: z.boolean(),
 });
 
 const statusSchema = z.object({
@@ -85,10 +101,56 @@ function parseProductForm(formData: FormData) {
     deliveryPhysical: readString(formData, "deliveryPhysical"),
     edition: readString(formData, "edition"),
     featured: readBoolean(formData, "featured"),
+    homepageFeatured: readBoolean(formData, "homepageFeatured"),
     status: readString(formData, "status"),
     shape: readString(formData, "shape"),
   });
 }
+
+async function resolveProductImageChange(formData: FormData) {
+  const currentImageUrl = readString(formData, "currentImageUrl") || null;
+  const currentImagePath = readString(formData, "currentImagePath") || null;
+  const currentImageUpdatedAt = readString(formData, "currentImageUpdatedAt") || null;
+  const removeImage = readBoolean(formData, "removeImage");
+  const imageValue = formData.get("image");
+  const imageFile =
+    imageValue instanceof File && imageValue.size > 0 ? imageValue : null;
+  const uploadedImage = imageFile ? await saveUploadedImage(imageFile) : null;
+
+  return {
+    currentImageUrl,
+    currentImagePath,
+    uploadedImage,
+    imageUrl: uploadedImage?.imageUrl ?? (removeImage ? null : currentImageUrl),
+    imagePath: uploadedImage?.imagePath ?? (removeImage ? null : currentImagePath),
+    imageUpdatedAt:
+      uploadedImage?.imageUpdatedAt ??
+      (removeImage ? new Date().toISOString() : currentImageUpdatedAt),
+  };
+}
+
+type ProductMutationResult =
+  | {
+      ok: true;
+      message: string;
+      productId?: string;
+      product?: Awaited<ReturnType<typeof updateProduct>>;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
+type AdminUserMutationResult =
+  | {
+      ok: true;
+      message: string;
+      userEntry: Awaited<ReturnType<typeof updateAdminManagedUser>>;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
 
 export async function saveProfileAction(formData: FormData) {
   const session = await requireUserSession("/login");
@@ -112,7 +174,13 @@ export async function saveProfileAction(formData: FormData) {
 
 export async function createProductAction(formData: FormData) {
   const session = await requireAdminSession("/");
-  let imageUrl: string | null = null;
+  let uploadedImage:
+    | {
+        imageUrl: string;
+        imagePath: string;
+        imageUpdatedAt: string;
+      }
+    | null = null;
   let values: ReturnType<typeof parseProductForm>;
 
   try {
@@ -120,7 +188,7 @@ export async function createProductAction(formData: FormData) {
     const imageValue = formData.get("image");
     const imageFile =
       imageValue instanceof File && imageValue.size > 0 ? imageValue : null;
-    imageUrl = imageFile ? await saveUploadedImage(imageFile) : null;
+    uploadedImage = imageFile ? await saveUploadedImage(imageFile) : null;
   } catch (error) {
     redirect(
       `/admin/upload?error=${encodeURIComponent(
@@ -129,11 +197,25 @@ export async function createProductAction(formData: FormData) {
     );
   }
 
-  await createProduct({
-    ...values,
-    imageUrl,
-    adminUserId: session.userId,
-  });
+  try {
+    await createProduct({
+      ...values,
+      imageUrl: uploadedImage?.imageUrl ?? null,
+      imagePath: uploadedImage?.imagePath ?? null,
+      imageUpdatedAt: uploadedImage?.imageUpdatedAt ?? null,
+      adminUserId: session.userId,
+    });
+  } catch (error) {
+    if (uploadedImage) {
+      await removeManagedProductImage(uploadedImage).catch(() => null);
+    }
+
+    redirect(
+      `/admin/upload?error=${encodeURIComponent(
+        getErrorMessage(error, "Unable to publish product."),
+      )}`,
+    );
+  }
 
   redirect("/admin/products?created=1");
 }
@@ -142,10 +224,25 @@ export async function updateProductAction(formData: FormData) {
   const session = await requireAdminSession("/");
   let id = "";
   let values: ReturnType<typeof parseProductForm>;
+  let uploadedImage:
+    | {
+        imageUrl: string;
+        imagePath: string;
+        imageUpdatedAt: string;
+      }
+    | null = null;
+  let imageUrl: string | null = null;
+  let imagePath: string | null = null;
+  let imageUpdatedAt: string | null = null;
 
   try {
     id = readString(formData, "id");
     values = parseProductForm(formData);
+    const imageState = await resolveProductImageChange(formData);
+    uploadedImage = imageState.uploadedImage;
+    imageUrl = imageState.imageUrl;
+    imagePath = imageState.imagePath;
+    imageUpdatedAt = imageState.imageUpdatedAt;
 
     if (!id) {
       throw new Error("Missing product id");
@@ -158,10 +255,26 @@ export async function updateProductAction(formData: FormData) {
     );
   }
 
-  await updateProduct(id, {
-    ...values,
-    adminUserId: session.userId,
-  });
+  try {
+    await updateProduct(id, {
+      ...values,
+      imageUrl,
+      imagePath,
+      imageUpdatedAt,
+      adminUserId: session.userId,
+    });
+  } catch (error) {
+    if (uploadedImage) {
+      await removeManagedProductImage(uploadedImage).catch(() => null);
+    }
+
+    redirect(
+      `/admin/products?error=${encodeURIComponent(
+        getErrorMessage(error, "Unable to update product."),
+      )}`,
+    );
+  }
+
   redirect("/admin/products?updated=1");
 }
 
@@ -178,6 +291,127 @@ export async function deleteProductAction(formData: FormData) {
   redirect("/admin/products?deleted=1");
 }
 
+export async function updateProductInlineAction(
+  formData: FormData,
+): Promise<ProductMutationResult> {
+  const session = await requireAdminSession("/");
+  let id = "";
+  let values: ReturnType<typeof parseProductForm>;
+  let uploadedImage:
+    | {
+        imageUrl: string;
+        imagePath: string;
+        imageUpdatedAt: string;
+      }
+    | null = null;
+  let imageUrl: string | null = null;
+  let imagePath: string | null = null;
+  let imageUpdatedAt: string | null = null;
+
+  try {
+    id = readString(formData, "id");
+    values = parseProductForm(formData);
+
+    if (!id) {
+      throw new Error("Missing product id.");
+    }
+
+    const imageState = await resolveProductImageChange(formData);
+    uploadedImage = imageState.uploadedImage;
+    imageUrl = imageState.imageUrl;
+    imagePath = imageState.imagePath;
+    imageUpdatedAt = imageState.imageUpdatedAt;
+  } catch (error) {
+    return {
+      ok: false,
+      error: getErrorMessage(error, "Unable to update product."),
+    };
+  }
+
+  try {
+    const product = await updateProduct(id, {
+      ...values,
+      imageUrl,
+      imagePath,
+      imageUpdatedAt,
+      adminUserId: session.userId,
+    });
+
+    return {
+      ok: true,
+      message: "Product updated successfully.",
+      product,
+      productId: id,
+    };
+  } catch (error) {
+    if (uploadedImage) {
+      await removeManagedProductImage(uploadedImage).catch(() => null);
+    }
+
+    return {
+      ok: false,
+      error: getErrorMessage(error, "Unable to update product."),
+    };
+  }
+}
+
+export async function featureHomepageProductInlineAction(
+  formData: FormData,
+): Promise<ProductMutationResult> {
+  const session = await requireAdminSession("/");
+  const id = readString(formData, "id");
+
+  if (!id) {
+    return {
+      ok: false,
+      error: "Missing product id.",
+    };
+  }
+
+  try {
+    const product = await setHomepageFeaturedProduct(id, session.userId);
+    return {
+      ok: true,
+      message: "Homepage feature updated successfully.",
+      product,
+      productId: id,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: getErrorMessage(error, "Unable to feature product on the homepage."),
+    };
+  }
+}
+
+export async function deleteProductInlineAction(
+  formData: FormData,
+): Promise<ProductMutationResult> {
+  const session = await requireAdminSession("/");
+  const id = readString(formData, "id");
+
+  if (!id) {
+    return {
+      ok: false,
+      error: "Missing product id.",
+    };
+  }
+
+  try {
+    await deleteProduct(id, session.userId);
+    return {
+      ok: true,
+      message: "Product archived successfully.",
+      productId: id,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: getErrorMessage(error, "Unable to archive product."),
+    };
+  }
+}
+
 export async function updateOrderStatusAction(formData: FormData) {
   await requireAdminSession("/");
 
@@ -188,6 +422,27 @@ export async function updateOrderStatusAction(formData: FormData) {
 
   await updateOrderStatus(values.orderId, values.status);
   redirect("/admin/orders?updated=1");
+}
+
+export async function refreshTransVoucherStatusAction(formData: FormData) {
+  await requireAdminSession("/");
+
+  const transactionId = readString(formData, "transactionId");
+
+  if (!transactionId) {
+    redirect("/admin/analytics?error=Missing%20transaction%20id");
+  }
+
+  try {
+    await refreshTransVoucherTransactionStatus(transactionId);
+    redirect("/admin/analytics?refreshed=1");
+  } catch (error) {
+    redirect(
+      `/admin/analytics?error=${encodeURIComponent(
+        getErrorMessage(error, "Unable to refresh TransVoucher status."),
+      )}`,
+    );
+  }
 }
 
 export async function updateWithdrawalStatusAction(formData: FormData) {
@@ -219,4 +474,55 @@ export async function retryWithdrawalTelegramSyncAction(formData: FormData) {
 
   await retryWithdrawalTelegramSync(withdrawalId, session.userId);
   redirect("/admin/users?telegramSynced=1");
+}
+
+export async function updateAdminUserInlineAction(
+  formData: FormData,
+): Promise<AdminUserMutationResult> {
+  const session = await requireAdminSession("/");
+
+  let values: z.infer<typeof adminUserSchema>;
+
+  try {
+    values = adminUserSchema.parse({
+      userId: readString(formData, "userId"),
+      name: readString(formData, "name"),
+      role: readString(formData, "role"),
+      status: readString(formData, "status"),
+      telegramUsername: readString(formData, "telegramUsername"),
+      telegramId: readString(formData, "telegramId"),
+      withdrawalWallet: readString(formData, "withdrawalWallet"),
+      verified: readBoolean(formData, "verified"),
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: getErrorMessage(error, "Unable to update user."),
+    };
+  }
+
+  try {
+    const userEntry = await updateAdminManagedUser({
+      adminUserId: session.userId,
+      userId: values.userId,
+      name: values.name,
+      role: values.role,
+      status: values.status,
+      telegramUsername: values.telegramUsername,
+      telegramId: values.telegramId ?? "",
+      withdrawalWallet: values.withdrawalWallet ?? "",
+      verified: values.verified,
+    });
+
+    return {
+      ok: true,
+      message: "User updated successfully.",
+      userEntry,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: getErrorMessage(error, "Unable to update user."),
+    };
+  }
 }

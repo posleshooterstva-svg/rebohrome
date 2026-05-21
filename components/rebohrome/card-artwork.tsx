@@ -23,6 +23,7 @@ export function CardArtwork({
   const topOffset = compact ? "top-[31%]" : "top-[29%]";
   const bottomFade = compact ? "h-16" : "h-24";
   const imageIsUploadedAsset = card.imageUrl?.startsWith("/uploads/") ?? false;
+  const imageIsRemoteAsset = /^https?:\/\//.test(card.imageUrl ?? "");
 
   useEffect(() => {
     setImageUnavailable(false);
@@ -43,7 +44,7 @@ export function CardArtwork({
           onError={() => setImageUnavailable(true)}
           sizes={compact ? "160px" : "320px"}
           src={card.imageUrl}
-          unoptimized={imageIsUploadedAsset}
+          unoptimized={imageIsUploadedAsset || imageIsRemoteAsset}
         />
       ) : null}
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.96),transparent_44%)] opacity-95" />

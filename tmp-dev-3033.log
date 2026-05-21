@@ -1,0 +1,56 @@
+
+> rebohrome-site@0.1.0 dev
+> next dev --turbopack --port 3033
+
+   ▲ Next.js 15.5.18 (Turbopack)
+   - Local:        http://localhost:3033
+   - Network:      http://100.87.193.112:3033
+   - Environments: .env.local
+
+ ✓ Starting...
+Creating turbopack project { dir: 'd:\\etsy_parser\\rebohrome-site', testMode: true }
+ ✓ Ready in 1935ms
+ ○ Compiling / ...
+ ✓ Compiled / in 4.2s
+ ○ Compiling /api/cart ...
+ GET / 200 in 7173ms
+ ✓ Compiled /api/cart in 1681ms
+ GET /api/cart 200 in 2255ms
+ GET / 200 in 934ms
+ GET /api/cart 200 in 508ms
+ ○ Compiling /login ...
+ ✓ Compiled /login in 600ms
+ ⨯ [Error: ENOENT: no such file or directory, open 'd:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.8l2k3b5x4pf'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'd:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.8l2k3b5x4pf'
+}
+ ○ Compiling /_error ...
+ ✓ Compiled /_error in 1371ms
+ ⨯ [Error: ENOENT: no such file or directory, open 'd:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.kuhbi5neto8'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'd:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.kuhbi5neto8'
+}
+[Error: ENOENT: no such file or directory, open 'd:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.8l2k3b5x4pf'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'd:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.8l2k3b5x4pf'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'd:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.unyzt35wrji'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'd:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.unyzt35wrji'
+}
+[Error: ENOENT: no such file or directory, open 'd:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.2gjx5ut59l2'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'd:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.2gjx5ut59l2'
+}
+ ✓ Compiled in 166ms
+ ✓ Compiled in 208ms

@@ -28,6 +28,7 @@ export default async function WithdrawPage() {
         recentWithdrawals={recentWithdrawals}
         telegramId={user?.telegramId ?? null}
         telegramUsername={user?.telegramUsername ?? ""}
+        userId={session.userId}
         walletAddress={user?.withdrawalWallet ?? null}
       />
     </DashboardShell>

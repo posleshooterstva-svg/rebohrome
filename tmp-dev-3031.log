@@ -1,0 +1,21 @@
+
+> rebohrome-site@0.1.0 dev
+> next dev --turbopack --port 3031
+
+   ▲ Next.js 15.5.18 (Turbopack)
+   - Local:        http://localhost:3031
+   - Network:      http://100.87.193.112:3031
+   - Environments: .env.local
+
+ ✓ Starting...
+Creating turbopack project { dir: 'd:\\etsy_parser\\rebohrome-site', testMode: true }
+ ✓ Ready in 1933ms
+ ○ Compiling / ...
+ ✓ Compiled / in 4.4s
+ ○ Compiling /api/cart ...
+ ✓ Compiled /api/cart in 959ms
+ GET /api/cart 200 in 1469ms
+ GET / 200 in 7938ms
+ GET /api/cart 200 in 432ms
+ GET / 200 in 2249ms
+[?25h

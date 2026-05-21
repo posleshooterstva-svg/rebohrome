@@ -141,7 +141,7 @@ async function runDeposit(page, user) {
   await saveScreenshot(page, "deposit-page");
   await page.getByRole("button", { name: /1,?000/i }).click();
   await page.getByRole("button", { name: /Credit Card/i }).first().click();
-  await page.getByRole("button", { name: /Stripe Pay/i }).click();
+  await page.getByRole("button", { name: /TransVoucher/i }).click();
   await fillIfVisible(page.getByLabel("Cardholder"), user.fullName);
   await fillIfVisible(page.getByLabel("Card Number"), "4242 4242 4242 4242");
   await fillIfVisible(page.getByLabel("Expiration"), "12/28");
@@ -191,7 +191,7 @@ async function openCheckout(page) {
 async function completeDirectPurchase(page, user) {
   await openCheckout(page);
   await page.getByRole("button", { name: /Credit Card/i }).first().click();
-  await page.getByRole("button", { name: /Stripe Pay/i }).click();
+  await page.getByRole("button", { name: /TransVoucher/i }).click();
   await fillIfVisible(page.getByLabel("Cardholder Name"), user.fullName);
   await fillIfVisible(page.getByLabel("Card Number"), "4242 4242 4242 4242");
   await fillIfVisible(page.getByLabel("Expiration"), "12/28");
@@ -213,7 +213,7 @@ async function completeDeclinedThenBalanceRetry(page, user) {
   await shortPause(page, 1500);
   await openCheckout(page);
   await page.getByRole("button", { name: /Credit Card/i }).first().click();
-  await page.getByRole("button", { name: /OnlinePay/i }).click();
+  await page.getByRole("button", { name: /TransVoucher/i }).click();
   await fillIfVisible(page.getByLabel("Cardholder Name"), user.fullName);
   await fillIfVisible(page.getByLabel("Card Number"), "4242 4242 4242 0000");
   await fillIfVisible(page.getByLabel("Expiration"), "12/28");

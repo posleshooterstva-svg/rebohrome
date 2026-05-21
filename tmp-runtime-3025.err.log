@@ -1,0 +1,48 @@
+ ⨯ Error: Cannot find module '../chunks/ssr/[turbopack]_runtime.js'
+Require stack:
+- D:\etsy_parser\rebohrome-site\.next\server\pages\_document.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\require.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\load-components.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\utils.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\options.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\index.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\next-config-ts\transpile-config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\cli\next-test.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\bin\next
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\pages\_document.js:1:7) {
+  code: 'MODULE_NOT_FOUND',
+  requireStack: [Array]
+}
+ ⨯ Error: Cannot find module '../../../chunks/ssr/[turbopack]_runtime.js'
+Require stack:
+- D:\etsy_parser\rebohrome-site\.next\server\app\(dashboard)\dashboard\page.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\require.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\load-components.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\utils.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\options.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\index.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\next-config-ts\transpile-config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\cli\next-test.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\bin\next
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(dashboard)\dashboard\page.js:1:7) {
+  code: 'MODULE_NOT_FOUND',
+  requireStack: [Array]
+}
+ ⨯ Error: Cannot find module '../chunks/ssr/[turbopack]_runtime.js'
+Require stack:
+- D:\etsy_parser\rebohrome-site\.next\server\pages\_document.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\require.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\load-components.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\utils.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\options.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\index.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\next-config-ts\transpile-config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\cli\next-test.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\bin\next
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\pages\_document.js:1:7) {
+  code: 'MODULE_NOT_FOUND',
+  requireStack: [Array]
+}

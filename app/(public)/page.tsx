@@ -4,10 +4,12 @@ import { ArchiveSidebar } from "@/components/rebohrome/archive-sidebar";
 import { ArchiveSurfaceLayout } from "@/components/rebohrome/archive-surface-layout";
 import { CardArtwork } from "@/components/rebohrome/card-artwork";
 import { CollectorRail } from "@/components/rebohrome/collector-rail";
+import { FeaturedHeroProduct } from "@/components/rebohrome/featured-hero-product";
 import { RarityBadge } from "@/components/rebohrome/rarity-badge";
 import { Button } from "@/components/ui/button";
 import {
   getFinancialOverview,
+  getHomepageFeaturedProduct,
   getHeaderAccount,
   getMarketplaceProducts,
   getUserById,
@@ -39,6 +41,7 @@ export default async function HomePage() {
     user,
     inventory,
     orders,
+    homepageFeaturedProduct,
     latestProducts,
   ] = await Promise.all([
     isAuthenticated && session.userId
@@ -56,26 +59,12 @@ export default async function HomePage() {
     isAuthenticated && session.userId
       ? getUserOrders(session.userId)
       : Promise.resolve([]),
+    getHomepageFeaturedProduct(),
     getMarketplaceProducts({ sort: "newest" }),
   ]);
 
-  const heroCard = latestProducts[0] ?? null;
+  const heroCard = homepageFeaturedProduct ?? latestProducts[0] ?? null;
   const newDropCards = latestProducts.slice(0, 4);
-
-  if (!heroCard) {
-    return (
-      <main className="mx-auto w-full max-w-[1540px] px-4 py-6 sm:px-6 lg:px-8">
-        <div className="rounded-[16px] border border-line bg-panel px-6 py-10 text-center shadow-panel">
-          <h1 className="display-font text-4xl font-semibold tracking-[-0.04em] text-foreground">
-            The archive is preparing its first drop.
-          </h1>
-          <p className="mt-4 text-sm leading-7 text-muted">
-            Product inventory will appear here as soon as the first release is published.
-          </p>
-        </div>
-      </main>
-    );
-  }
 
   const totalCollectionValue = inventory.reduce(
     (sum, item) => sum + item.product.price * item.quantity,
@@ -198,8 +187,14 @@ export default async function HomePage() {
                 ? "Available balance is synced with your archive wallet."
                 : "Sign in to fund your archive balance and preserve purchases in your private vault."
             }
-            balanceValue={formatUsd(account?.balance.available ?? 0)}
             emptyActivity="Sign in to track deposits, purchases, and withdrawal review from one private rail."
+            initialBalance={{
+              available: account?.balance.available ?? 0,
+              pendingWithdrawal: account?.balance.pendingWithdrawal ?? 0,
+              totalDeposited: account?.balance.totalDeposited ?? 0,
+              totalSpent: account?.balance.totalSpent ?? 0,
+              totalWithdrawn: account?.balance.totalWithdrawn ?? 0,
+            }}
             primaryActionHref={
               isAuthenticated ? "/dashboard/deposit" : "/login?redirectTo=/dashboard/deposit"
             }
@@ -207,6 +202,7 @@ export default async function HomePage() {
             secondaryActionHref={isAuthenticated ? "/withdraw" : "/login?redirectTo=/withdraw"}
             secondaryActionLabel="Withdraw"
             securityItems={securityItems}
+            userId={account?.user.id ?? null}
           />
         }
         sidebar={
@@ -218,7 +214,7 @@ export default async function HomePage() {
         }
       >
         <div className="p-6 sm:p-8">
-          <div className="grid gap-8 xl:grid-cols-[1.02fr_0.98fr]">
+          <div className="grid gap-8 xl:grid-cols-[0.98fr_1.02fr]">
             <section className="pt-4">
               <div className="text-[11px] uppercase tracking-[0.28em] text-muted">
                 Welcome to ReboHrome
@@ -242,18 +238,8 @@ export default async function HomePage() {
               </div>
             </section>
 
-            <section className="rounded-[14px] border border-line bg-[linear-gradient(180deg,#ffffff_0%,#f7f8fb_100%)] p-6">
-              <div className="relative mx-auto flex min-h-[360px] max-w-[420px] items-center justify-center">
-                <div className="absolute inset-x-10 bottom-6 h-10 rounded-full bg-[radial-gradient(circle_at_center,rgba(153,167,212,0.32),transparent_72%)] blur-xl" />
-                <div className="relative w-full max-w-[320px]">
-                  <div className="rounded-[8px] border border-[rgba(15,23,42,0.16)] bg-[rgba(255,255,255,0.48)] p-3 shadow-[0_18px_38px_rgba(15,23,42,0.07)] backdrop-blur">
-                    <div className="rounded-[6px] border border-[rgba(255,255,255,0.84)] bg-[rgba(255,255,255,0.58)] p-3">
-                      <CardArtwork card={heroCard} className="aspect-[4/5] w-full" />
-                    </div>
-                  </div>
-                  <div className="mx-auto h-8 w-[88%] rounded-b-[6px] border border-line bg-[linear-gradient(180deg,#ffffff_0%,#eceef3_100%)]" />
-                </div>
-              </div>
+            <section className="rounded-[18px] border border-line bg-[linear-gradient(180deg,#ffffff_0%,#f7f8fb_100%)] p-4 shadow-[0_24px_52px_rgba(15,23,42,0.05)] sm:p-6">
+              <FeaturedHeroProduct product={heroCard} />
             </section>
           </div>
 

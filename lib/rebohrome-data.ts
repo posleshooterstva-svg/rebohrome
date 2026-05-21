@@ -15,20 +15,28 @@ export type PaymentMethodName =
 export type SupportedCurrency = "USD" | "EUR";
 export type PaymentProviderName =
   | "Internal Wallet"
-  | "OnlinePay"
-  | "Stripe Pay";
-export type PaymentProviderSlug = "internal-wallet" | "onlinepay" | "stripe";
+  | "TransVoucher";
+export type PaymentProviderSlug = "internal-wallet" | "transvoucher";
 export type CryptoNetwork = "USDT" | "BTC" | "ETH";
 export type TransactionKind = "deposit" | "purchase" | "withdrawal" | "refund";
-export type TransactionStatus = "completed" | "pending" | "failed";
+export type TransactionStatus =
+  | "completed"
+  | "pending"
+  | "attempting"
+  | "processing"
+  | "failed";
 export type DepositStatus = "processing" | "completed" | "failed";
 export type CheckoutPaymentSessionStatus =
   | "pending"
+  | "attempting"
+  | "processing"
   | "completed"
   | "failed"
   | "expired";
 export type DepositPaymentSessionStatus =
   | "pending"
+  | "attempting"
+  | "processing"
   | "completed"
   | "failed"
   | "expired";
@@ -67,7 +75,11 @@ export type ProductRecord = {
   edition: string;
   shape: CardShape;
   imageUrl: string | null;
+  imagePath: string | null;
+  imageUpdatedAt: string | null;
   featured: boolean;
+  homepageFeatured: boolean;
+  featuredStartedAt: string | null;
   status: ProductStatus;
   archived?: boolean;
   palette: {
@@ -80,7 +92,18 @@ export type ProductRecord = {
   updatedAt: string;
 };
 
-export type ProductInput = Omit<ProductRecord, "createdAt" | "updatedAt">;
+export type ProductInput = Omit<
+  ProductRecord,
+  | "createdAt"
+  | "updatedAt"
+  | "featuredStartedAt"
+  | "imagePath"
+  | "imageUpdatedAt"
+> & {
+  featuredStartedAt?: string | null;
+  imagePath?: string | null;
+  imageUpdatedAt?: string | null;
+};
 
 export type CollectionSummary = {
   id: string;
@@ -135,12 +158,18 @@ export type TransactionRecord = {
   exchangeRate: number | null;
   paymentMethod: string | null;
   paymentProvider: string | null;
+  transvoucherTransactionId: string | null;
+  transvoucherReferenceId: string | null;
+  paymentUrl: string | null;
+  providerStatus: string | null;
+  rawProviderResponse: string | null;
   status: TransactionStatus;
   referenceId: string;
   summary: string;
   metaJson: string | null;
   createdAt: string;
   updatedAt: string;
+  paidAt: string | null;
 };
 
 export type DepositRecord = {
@@ -153,6 +182,8 @@ export type DepositRecord = {
   exchangeRate: number | null;
   paymentMethod: string;
   paymentProvider: string | null;
+  transvoucherTransactionId: string | null;
+  transvoucherReferenceId: string | null;
   cardholderName: string;
   cardMasked: string;
   status: DepositStatus;
@@ -160,6 +191,7 @@ export type DepositRecord = {
   balanceAfter: number;
   createdAt: string;
   completedAt: string | null;
+  paidAt: string | null;
 };
 
 export type WithdrawalRecord = {
@@ -208,6 +240,9 @@ export type OrderRecord = {
   total: number;
   currency: SupportedCurrency;
   paymentProvider: string | null;
+  transvoucherTransactionId: string | null;
+  transvoucherReferenceId: string | null;
+  providerStatus: string | null;
   shippingName: string;
   shippingEmail: string;
   shippingAddress: string;
@@ -218,6 +253,7 @@ export type OrderRecord = {
   remainingBalance: number | null;
   createdAt: string;
   updatedAt: string;
+  paidAt: string | null;
   itemCount?: number;
 };
 
@@ -285,6 +321,11 @@ export type CheckoutPaymentSessionRecord = {
   metaJson: string | null;
   orderId: string | null;
   transactionId: string | null;
+  transvoucherTransactionId: string | null;
+  transvoucherReferenceId: string | null;
+  paymentUrl: string | null;
+  providerStatus: string | null;
+  rawProviderResponse: string | null;
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
@@ -303,6 +344,11 @@ export type DepositPaymentSessionRecord = {
   metaJson: string | null;
   depositId: string | null;
   transactionId: string | null;
+  transvoucherTransactionId: string | null;
+  transvoucherReferenceId: string | null;
+  paymentUrl: string | null;
+  providerStatus: string | null;
+  rawProviderResponse: string | null;
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
@@ -392,11 +438,6 @@ export const checkoutPaymentOptions: PaymentMethodOption[] = [
     label: "Google Pay",
     sublabel: "Fast browser wallet payment with secure authorization",
   },
-  {
-    id: "Crypto",
-    label: "Crypto",
-    sublabel: "USDT, BTC, and ETH settlement",
-  },
 ];
 
 export const depositPaymentOptions: PaymentMethodOption[] = checkoutPaymentOptions.filter(
@@ -405,17 +446,10 @@ export const depositPaymentOptions: PaymentMethodOption[] = checkoutPaymentOptio
 
 export const paymentProviderOptions: PaymentProviderOption[] = [
   {
-    id: "OnlinePay",
-    label: "OnlinePay",
-    secureLabel: "Secure checkout",
-    speedLabel: "Instant processing",
-    supportedCurrencies: ["USD"],
-  },
-  {
-    id: "Stripe Pay",
-    label: "Stripe Pay",
-    secureLabel: "Premium encrypted gateway",
-    speedLabel: "PCI-ready",
+    id: "TransVoucher",
+    label: "TransVoucher",
+    secureLabel: "Card / Apple Pay / Google Pay",
+    speedLabel: "Secure hosted payment",
     supportedCurrencies: ["USD", "EUR"],
   },
 ];
@@ -425,8 +459,7 @@ export const paymentProviderRouteMap: Record<
   PaymentProviderSlug
 > = {
   "Internal Wallet": "internal-wallet",
-  OnlinePay: "onlinepay",
-  "Stripe Pay": "stripe",
+  TransVoucher: "transvoucher",
 };
 
 export const paymentProviderSlugMap: Record<
@@ -434,8 +467,7 @@ export const paymentProviderSlugMap: Record<
   PaymentProviderName
 > = {
   "internal-wallet": "Internal Wallet",
-  onlinepay: "OnlinePay",
-  stripe: "Stripe Pay",
+  transvoucher: "TransVoucher",
 };
 
 export const cryptoNetworkOptions: CryptoNetwork[] = ["USDT", "BTC", "ETH"];
@@ -463,31 +495,31 @@ export const withdrawalStatusMeta: Record<
 > = {
   pending: {
     label: "Pending",
-    emoji: "🟡",
+    emoji: "рџџЎ",
     toneClass: "text-amber-600",
     softClass: "bg-amber-100 text-amber-700",
   },
   approved: {
     label: "Approved",
-    emoji: "🟣",
+    emoji: "рџџЈ",
     toneClass: "text-violet-600",
     softClass: "bg-violet-100 text-violet-700",
   },
   processing: {
     label: "Processing",
-    emoji: "🔵",
+    emoji: "рџ”µ",
     toneClass: "text-sky-600",
     softClass: "bg-sky-100 text-sky-700",
   },
   completed: {
     label: "Completed",
-    emoji: "🟢",
+    emoji: "рџџў",
     toneClass: "text-emerald-600",
     softClass: "bg-emerald-100 text-emerald-700",
   },
   declined: {
     label: "Declined",
-    emoji: "🔴",
+    emoji: "рџ”ґ",
     toneClass: "text-rose-600",
     softClass: "bg-rose-100 text-rose-700",
   },
@@ -621,7 +653,7 @@ export function composePaymentLabel(
   method: PaymentMethodName | string,
   provider?: PaymentProviderName | string | null,
 ) {
-  return provider ? `${method} · ${provider}` : method;
+  return provider ? `${method} - ${provider}` : method;
 }
 
 export function formatUtcDateTime(value: string) {

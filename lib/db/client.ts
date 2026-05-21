@@ -154,3 +154,7 @@ export function getDbClient() {
 
   return client;
 }
+
+export function resetDbClient() {
+  client = null;
+}

@@ -63,6 +63,21 @@ body::before {
   opacity: 0.7;
 }
 
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.16;
+  background-image:
+    radial-gradient(rgba(26, 33, 52, 0.08) 0.45px, transparent 0.45px),
+    radial-gradient(rgba(120, 112, 241, 0.05) 0.45px, transparent 0.45px);
+  background-position: 0 0, 12px 12px;
+  background-size: 24px 24px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 82%);
+}
+
 ::selection {
   background: rgba(124, 108, 255, 0.16);
 }
@@ -75,4 +90,28 @@ body::before {
   box-shadow:
     0 18px 42px rgba(15, 23, 42, 0.05),
     0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+.glass-panel {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  box-shadow:
+    0 16px 34px rgba(15, 23, 42, 0.08),
+    0 1px 0 rgba(255, 255, 255, 0.85) inset;
+  backdrop-filter: blur(20px);
+}
+
+@keyframes ambientFloat {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -8px, 0);
+  }
+}
+
+.ambient-float {
+  animation: ambientFloat 7.2s ease-in-out infinite;
+  will-change: transform;
 }

@@ -1,0 +1,16 @@
+{
+  "depositUrl": "https://trans-voucher.com/pay/019e4bf2-bd83-73e4-8312-e2ba3586bcd5",
+  "checkoutUrl": "https://trans-voucher.com/pay/019e4bf2-dc00-7007-b317-108a7a23d372",
+  "apiResponses": [
+    {
+      "url": "http://127.0.0.1:3035/api/deposit/session",
+      "status": 200,
+      "body": "{\"sessionId\":\"e170f056-f8fe-45ad-8da0-161301577cae\",\"paymentUrl\":\"https://trans-voucher.com/pay/019e4bf2-bd83-73e4-8312-e2ba3586bcd5\",\"redirectPath\":\"https://trans-voucher.com/pay/019e4bf2-bd83-73e4-8312-e2ba3586bcd5\"}"
+    },
+    {
+      "url": "http://127.0.0.1:3035/api/checkout/session",
+      "status": 200,
+      "body": ""
+    }
+  ]
+}

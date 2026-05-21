@@ -14,11 +14,10 @@ function mergeLines(serverLines: CartLine[], localLines: CartLine[]) {
 
   for (const line of [...serverLines, ...localLines]) {
     const key = `${line.productId}:${line.deliveryType}`;
-    const existing = quantities.get(key);
     quantities.set(key, {
       productId: line.productId,
       deliveryType: line.deliveryType,
-      quantity: (existing?.quantity ?? 0) + line.quantity,
+      quantity: Math.max(quantities.get(key)?.quantity ?? 0, line.quantity),
     });
   }
 

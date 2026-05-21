@@ -1,0 +1,66 @@
+{
+  "baseline": {
+    "stock": 17,
+    "balance": 251,
+    "totalDeposited": 500,
+    "totalSpent": 378,
+    "ownedCount": 2
+  },
+  "deposit": {
+    "session": {
+      "status": 200,
+      "body": {
+        "sessionId": "eb0fff93-fecc-4e5f-bc86-f0b1d1057480",
+        "paymentUrl": "https://trans-voucher.com/pay/019e4c12-a5e1-701c-a977-a8fe5cae6680",
+        "redirectPath": "https://trans-voucher.com/pay/019e4c12-a5e1-701c-a977-a8fe5cae6680"
+      }
+    },
+    "webhookFirst": {
+      "status": 200,
+      "body": "{\"ok\":true,\"eventType\":\"payment_intent.succeeded\",\"transactionId\":\"TXN-2026-YR6WD\",\"status\":\"completed\",\"skipped\":false}"
+    },
+    "webhookDuplicate": {
+      "status": 200,
+      "body": "{\"ok\":true,\"eventType\":\"payment_intent.succeeded\",\"transactionId\":\"TXN-2026-YR6WD\",\"status\":\"completed\",\"skipped\":false}"
+    },
+    "db": {
+      "status": "completed",
+      "balance_after": 301,
+      "paid_at": "2026-05-21T19:45:52.669Z"
+    },
+    "balance": {
+      "available": 301,
+      "total_deposited": 550
+    }
+  },
+  "purchase": {
+    "session": {
+      "sessionId": "a0d067b4-28f7-4162-b51e-e35f4f9243d0",
+      "paymentUrl": "https://trans-voucher.com/pay/019e4c12-c13c-724b-9211-cb90736e5613",
+      "redirectPath": "https://trans-voucher.com/pay/019e4c12-c13c-724b-9211-cb90736e5613"
+    },
+    "webhookFirst": {
+      "status": 200,
+      "body": "{\"ok\":true,\"eventType\":\"payment_intent.succeeded\",\"transactionId\":\"TXN-2026-X26QR\",\"status\":\"completed\",\"skipped\":false}"
+    },
+    "webhookDuplicate": {
+      "status": 200,
+      "body": "{\"ok\":true,\"eventType\":\"payment_intent.succeeded\",\"transactionId\":\"TXN-2026-X26QR\",\"status\":\"completed\",\"skipped\":false}"
+    },
+    "order": {
+      "payment_state": "completed",
+      "status": "Completed",
+      "paid_at": "2026-05-21T19:45:59.774Z"
+    },
+    "transaction": {
+      "status": "completed",
+      "paid_at": "2026-05-21T19:45:59.774Z"
+    },
+    "stockAfterPurchase": {
+      "stock": 16
+    },
+    "ownedRowsForOrder": {
+      "value": 1
+    }
+  }
+}

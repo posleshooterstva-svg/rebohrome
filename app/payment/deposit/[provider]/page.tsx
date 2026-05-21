@@ -1,9 +1,7 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
-import { DepositHostedPageClient } from "@/components/payment/deposit-hosted-page-client";
+import { notFound, redirect } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
-  getBalanceByUserId,
   getDepositPaymentSessionBundle,
 } from "@/lib/db/repository";
 import { paymentProviderSlugMap, type PaymentProviderSlug } from "@/lib/rebohrome-data";
@@ -43,16 +41,20 @@ export default async function DepositPaymentProviderPage({
   const session = await requireUserSession(
     `/login?redirectTo=/payment/deposit/${providerSlug}?session=${sessionId}`,
   );
-  const [paymentBundle, balance] = await Promise.all([
-    getDepositPaymentSessionBundle(sessionId, session.userId),
-    getBalanceByUserId(session.userId),
-  ]);
+  const paymentBundle = await getDepositPaymentSessionBundle(sessionId, session.userId);
 
   if (!paymentBundle || paymentBundle.session.paymentProvider !== providerName) {
     notFound();
   }
 
-  if (paymentBundle.session.status !== "pending") {
+  if (
+    ["pending", "attempting", "processing"].includes(paymentBundle.session.status) &&
+    paymentBundle.session.paymentUrl
+  ) {
+    redirect(paymentBundle.session.paymentUrl);
+  }
+
+  if (paymentBundle.session.status !== "completed") {
     return (
       <main className="min-h-screen bg-[#f3f4f8] px-4 py-10 sm:px-6 lg:px-8">
         <section className="mx-auto w-full max-w-3xl rounded-[20px] border border-line bg-white px-6 py-10 shadow-panel sm:px-8">
@@ -74,9 +76,9 @@ export default async function DepositPaymentProviderPage({
               <Button asChild variant="secondary">
                 <Link
                   href={
-                    paymentBundle.session.status === "completed"
-                      ? `/dashboard/deposit?receipt=${paymentBundle.session.depositId}`
-                      : `/dashboard/deposit?failed=${paymentBundle.session.depositId}`
+                    paymentBundle.session.status === "failed"
+                      ? `/dashboard/deposit?failed=${paymentBundle.session.depositId}`
+                      : `/dashboard/deposit?pending=${paymentBundle.session.depositId}`
                   }
                 >
                   Open receipt
@@ -89,16 +91,7 @@ export default async function DepositPaymentProviderPage({
     );
   }
 
-  return (
-    <DepositHostedPageClient
-      creditedAmountUsd={paymentBundle.session.creditedAmountUsd}
-      currency={paymentBundle.session.currency}
-      currentBalance={balance?.available ?? 0}
-      exchangeRate={paymentBundle.session.exchangeRate}
-      originalAmount={paymentBundle.session.originalAmount}
-      paymentMethod={paymentBundle.session.paymentMethod}
-      provider={paymentBundle.session.paymentProvider}
-      sessionId={paymentBundle.session.id}
-    />
+  redirect(
+    `/dashboard/deposit?receipt=${encodeURIComponent(paymentBundle.session.depositId ?? "")}`,
   );
 }

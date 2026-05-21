@@ -3,13 +3,12 @@ import { z } from "zod";
 import { createCheckoutPaymentSession } from "@/lib/db/repository";
 import { getSessionState } from "@/lib/session";
 
-const paymentMethods = ["Credit Card", "Apple Pay", "Google Pay", "Crypto"] as const;
-const paymentProviders = ["OnlinePay", "Stripe Pay"] as const;
+const paymentMethods = ["Credit Card", "Apple Pay", "Google Pay"] as const;
 const supportedCurrencies = ["USD", "EUR"] as const;
 
 const sessionSchema = z.object({
   paymentMethod: z.enum(paymentMethods),
-  provider: z.enum(paymentProviders),
+  provider: z.literal("TransVoucher").optional(),
   currency: z.enum(supportedCurrencies),
   items: z
     .array(
@@ -25,6 +24,11 @@ const sessionSchema = z.object({
 export async function POST(request: Request) {
   try {
     const payload = sessionSchema.parse(await request.json());
+    const sessionInput = {
+      paymentMethod: payload.paymentMethod,
+      currency: payload.currency,
+      items: payload.items,
+    };
     const session = await getSessionState();
 
     if (!session.userId) {
@@ -33,7 +37,8 @@ export async function POST(request: Request) {
 
     const result = await createCheckoutPaymentSession({
       userId: session.userId,
-      ...payload,
+      provider: "TransVoucher",
+      ...sessionInput,
     });
 
     return NextResponse.json(result);
