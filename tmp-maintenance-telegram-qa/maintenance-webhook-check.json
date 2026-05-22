@@ -1,0 +1,14 @@
+{
+  "contactUrl": "http://127.0.0.1:3038/contact",
+  "loginUrl": "http://127.0.0.1:3038/login",
+  "telegramRes": {
+    "ok": true,
+    "skipped": false,
+    "event": "start-linked"
+  },
+  "transvoucherRes": {
+    "ok": true,
+    "skipped": true,
+    "reason": "invalid-signature"
+  }
+}

@@ -1,0 +1,32 @@
+
+> rebohrome-site@0.1.0 start
+> next start --hostname 127.0.0.1 --port 3037
+
+   ▲ Next.js 15.5.18
+   - Local:        http://127.0.0.1:3037
+   - Network:      http://127.0.0.1:3037
+
+ ✓ Starting...
+ ✓ Ready in 1019ms
+[telegram-registration] Send code requested. {
+  username: 'qa_reg_687244',
+  email: 'qa_reg_687244@example.com',
+  enteredTelegramUsername: '@qa_bind_24687244',
+  normalizedTelegramUsername: '@qa_bind_24687244'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@qa_bind_24687244',
+  identityFound: true,
+  hasChatId: true
+}
+[telegram-registration] Send code requested. {
+  username: 'qa_reg_788699',
+  email: 'qa_reg_788699@example.com',
+  enteredTelegramUsername: '@qa_bind_24788699',
+  normalizedTelegramUsername: '@qa_bind_24788699'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@qa_bind_24788699',
+  identityFound: true,
+  hasChatId: true
+}

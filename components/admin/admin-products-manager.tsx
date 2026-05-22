@@ -77,6 +77,12 @@ type ToastState = {
   message: string;
 } | null;
 
+type UploadedProductImage = {
+  imageUrl: string;
+  imagePath: string;
+  imageUpdatedAt: string;
+};
+
 function createDraft(product: ProductRecord): ProductDraft {
   return {
     title: product.title,
@@ -554,17 +560,24 @@ function ProductEditDrawer({
 }) {
   const [draft, setDraft] = useState<ProductDraft>(() => createDraft(product));
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const [uploadedImage, setUploadedImage] = useState<UploadedProductImage | null>(null);
   const [removeImage, setRemoveImage] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [imageUploadError, setImageUploadError] = useState<string | null>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [isPending, startTransition] = useTransition();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadSequenceRef = useRef(0);
 
   useEffect(() => {
     setDraft(createDraft(product));
     setImageFile(null);
+    setUploadedImage(null);
     setRemoveImage(false);
     setPreviewUrl(null);
+    setImageUploadError(null);
+    setIsUploadingImage(false);
   }, [product]);
 
   useEffect(() => {
@@ -583,7 +596,8 @@ function ProductEditDrawer({
     Boolean(imageFile) ||
     (removeImage && Boolean(product.imageUrl));
 
-  const displayedImageUrl = previewUrl ?? (removeImage ? null : product.imageUrl);
+  const displayedImageUrl =
+    previewUrl ?? uploadedImage?.imageUrl ?? (removeImage ? null : product.imageUrl);
   const previewProduct: ProductRecord = {
     ...product,
     title: draft.title,
@@ -630,11 +644,73 @@ function ProductEditDrawer({
     }
 
     setRemoveImage(false);
+    setUploadedImage(null);
+    setImageUploadError(null);
     setImageFile(file);
+    setIsUploadingImage(true);
+    const nextUploadSequence = uploadSequenceRef.current + 1;
+    uploadSequenceRef.current = nextUploadSequence;
+
+    void (async () => {
+      try {
+        const formData = new FormData();
+        formData.append("image", file);
+
+        const response = await fetch("/api/admin/products/upload-image", {
+          method: "POST",
+          body: formData,
+        });
+        const payload = (await response.json()) as
+          | ({ ok: true } & UploadedProductImage)
+          | { ok: false; error?: string };
+
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.ok ? "Unable to upload artwork." : payload.error);
+        }
+
+        if (uploadSequenceRef.current !== nextUploadSequence) {
+          return;
+        }
+
+        setUploadedImage({
+          imageUrl: payload.imageUrl,
+          imagePath: payload.imagePath,
+          imageUpdatedAt: payload.imageUpdatedAt,
+        });
+      } catch (error) {
+        if (uploadSequenceRef.current !== nextUploadSequence) {
+          return;
+        }
+
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Unable to upload artwork right now.";
+        setUploadedImage(null);
+        setImageUploadError(message);
+        onNotify({
+          tone: "error",
+          message,
+        });
+      } finally {
+        if (uploadSequenceRef.current === nextUploadSequence) {
+          setIsUploadingImage(false);
+        }
+      }
+    })();
   }
 
   function handleSubmit() {
-    if (!isDirty || isPending) {
+    if (!isDirty || isPending || isUploadingImage) {
+      return;
+    }
+
+    if (previewUrl && !uploadedImage) {
+      onNotify({
+        tone: "error",
+        message:
+          imageUploadError ?? "Wait for the artwork upload to finish before saving.",
+      });
       return;
     }
 
@@ -661,14 +737,23 @@ function ProductEditDrawer({
         "homepageFeatured",
         draft.homepageFeatured ? "true" : "false",
       );
+      formData.append(
+        "imageUploadState",
+        isUploadingImage
+          ? "uploading"
+          : imageUploadError
+            ? "error"
+            : uploadedImage
+              ? "uploaded"
+              : "idle",
+      );
+      formData.append("imageUrl", uploadedImage?.imageUrl ?? "");
+      formData.append("imagePath", uploadedImage?.imagePath ?? "");
+      formData.append("imageUpdatedAt", uploadedImage?.imageUpdatedAt ?? "");
       formData.append("currentImageUrl", product.imageUrl ?? "");
       formData.append("currentImagePath", product.imagePath ?? "");
       formData.append("currentImageUpdatedAt", product.imageUpdatedAt ?? "");
       formData.append("removeImage", removeImage ? "true" : "false");
-
-      if (imageFile) {
-        formData.append("image", imageFile);
-      }
 
       const result = await updateProductInlineAction(formData);
 
@@ -813,6 +898,15 @@ function ProductEditDrawer({
                   <div className="mt-3 text-sm leading-6 text-muted">
                     PNG, JPG, JPEG, or WEBP up to 5 MB. The archive preview updates before saving.
                   </div>
+                  {isUploadingImage ? (
+                    <div className="mt-3 rounded-[14px] border border-[rgba(120,112,241,0.16)] bg-[rgba(120,112,241,0.06)] px-3 py-2 text-sm text-[var(--accent)]">
+                      Uploading artwork…
+                    </div>
+                  ) : imageUploadError ? (
+                    <div className="mt-3 rounded-[14px] border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                      {imageUploadError}
+                    </div>
+                  ) : null}
                   <div className="mt-5 flex flex-wrap gap-3">
                     <Button
                       onClick={() => fileInputRef.current?.click()}
@@ -824,6 +918,8 @@ function ProductEditDrawer({
                     <Button
                       onClick={() => {
                         setImageFile(null);
+                        setUploadedImage(null);
+                        setImageUploadError(null);
                         setRemoveImage(Boolean(product.imageUrl));
                       }}
                       type="button"
@@ -968,7 +1064,11 @@ function ProductEditDrawer({
               <Button onClick={onClose} type="button" variant="secondary">
                 Cancel
               </Button>
-              <Button disabled={!isDirty || isPending} onClick={handleSubmit} type="button">
+              <Button
+                disabled={!isDirty || isPending || isUploadingImage}
+                onClick={handleSubmit}
+                type="button"
+              >
                 {isPending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
                 {isPending ? "Saving..." : "Save Changes"}
               </Button>

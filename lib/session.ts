@@ -98,6 +98,23 @@ function getHeaderValue(
   return null;
 }
 
+function normalizeHeaderRouteValue(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  if (value.startsWith("/")) {
+    return value.split("?")[0] || value;
+  }
+
+  try {
+    const url = new URL(value, "http://localhost");
+    return url.pathname || null;
+  } catch {
+    return null;
+  }
+}
+
 function getHeaderRoute(headerStore: Awaited<ReturnType<typeof headers>>) {
   const directRoute = getHeaderValue(headerStore, [
     "x-pathname",
@@ -106,8 +123,10 @@ function getHeaderRoute(headerStore: Awaited<ReturnType<typeof headers>>) {
     "x-matched-path",
   ]);
 
-  if (directRoute?.startsWith("/")) {
-    return directRoute;
+  const normalizedDirectRoute = normalizeHeaderRouteValue(directRoute);
+
+  if (normalizedDirectRoute) {
+    return normalizedDirectRoute;
   }
 
   const referer = headerStore.get("referer");
@@ -122,6 +141,12 @@ function getHeaderRoute(headerStore: Awaited<ReturnType<typeof headers>>) {
   } catch {
     return "unknown";
   }
+}
+
+export async function getCurrentRequestPath() {
+  const headerStore = await headers();
+  const route = getHeaderRoute(headerStore);
+  return route === "unknown" ? null : route;
 }
 
 export async function getRequestMeta(routeOverride?: string): Promise<RequestMeta> {

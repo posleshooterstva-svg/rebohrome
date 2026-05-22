@@ -4,6 +4,7 @@ import {
   Boxes,
   LayoutDashboard,
   ReceiptText,
+  Settings2,
   ShieldCheck,
   Upload,
   Users,
@@ -24,6 +25,7 @@ const adminNav = [
   { href: "/admin/users", label: "Users", icon: Users, id: "users" },
   { href: "/admin/analytics", label: "Analytics", icon: BarChart3, id: "analytics" },
   { href: "/admin/upload", label: "Upload", icon: Upload, id: "upload" },
+  { href: "/admin/settings", label: "System", icon: Settings2, id: "settings" },
 ] as const;
 
 type AdminShellProps = {

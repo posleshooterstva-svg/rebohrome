@@ -74,10 +74,12 @@ async function main() {
   const env = await loadEnv();
   const dbConfig = resolveDatabaseConfig(env);
   const baseUrl = env.APP_BASE_URL || "http://127.0.0.1:3003";
+  const adminChatId = env.ADMIN_TELEGRAM_CHAT_ID || env.TELEGRAM_CHAT_ID || "";
   const secret =
+    env.TELEGRAM_WEBHOOK_SECRET ||
     env.TELEGRAM_CALLBACK_SECRET ||
     createHash("sha256")
-      .update(`${env.TELEGRAM_BOT_TOKEN || ""}:${env.TELEGRAM_CHAT_ID || ""}:rebohrome-callback`)
+      .update(`${env.TELEGRAM_BOT_TOKEN || ""}:${adminChatId}:rebohrome-callback`)
       .digest("hex");
   const action = readArg("--action", "approve");
   const explicitWithdrawalId = readArg("--withdrawal", "");
@@ -134,7 +136,7 @@ async function main() {
       message: {
         message_id: Number(row.id.length),
         chat: {
-          id: Number(env.TELEGRAM_CHAT_ID || 0),
+          id: Number(adminChatId || 0),
           type: "group",
           title: "ReboHrome Ops",
         },

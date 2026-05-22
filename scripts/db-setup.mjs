@@ -133,10 +133,79 @@ const CREATE_STATEMENTS = [
     role text not null,
     telegram_username text not null unique,
     telegram_id text,
+    telegram_chat_id text,
+    telegram_verified integer not null default 0,
+    telegram_verified_at text,
+    telegram_linked_at text,
     withdrawal_wallet text,
     verified integer not null default 1,
     created_at text not null,
     updated_at text not null
+  )`,
+  `create table if not exists telegram_identities (
+    id text primary key,
+    telegram_id text not null unique,
+    telegram_username text,
+    chat_id text not null,
+    first_name text,
+    last_name text,
+    language_code text,
+    linked_user_id text unique,
+    is_linked integer not null default 0,
+    first_seen_at text not null,
+    last_seen_at text not null,
+    created_at text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists telegram_verification_codes (
+    id text primary key,
+    telegram_id text not null,
+    telegram_username text,
+    telegram_chat_id text not null,
+    purpose text not null,
+    username text not null,
+    email text not null,
+    password_hash_temp text not null,
+    code_hash text not null,
+    expires_at text not null,
+    attempts integer not null default 0,
+    resend_count integer not null default 0,
+    last_sent_at text not null,
+    resend_window_started_at text not null,
+    verified_at text,
+    consumed_at text,
+    ip text not null,
+    country text,
+    user_agent text,
+    created_at text not null
+  )`,
+  `create table if not exists telegram_users (
+    telegram_username text primary key,
+    telegram_chat_id text not null,
+    first_name text,
+    last_name text,
+    last_seen_at text not null,
+    created_at text not null
+  )`,
+  `create table if not exists telegram_verifications (
+    id text primary key,
+    username text not null,
+    email text not null,
+    password_hash_temp text not null,
+    telegram_username text not null,
+    telegram_chat_id text not null,
+    code_hash text not null,
+    expires_at text not null,
+    attempts integer not null default 0,
+    resend_count integer not null default 0,
+    last_sent_at text not null,
+    resend_window_started_at text not null,
+    verified_at text,
+    consumed_at text,
+    ip text not null,
+    country text,
+    user_agent text,
+    created_at text not null
   )`,
   `create table if not exists balances (
     user_id text primary key,
@@ -403,6 +472,12 @@ const CREATE_STATEMENTS = [
     created_at text not null,
     read_at text
   )`,
+  `create table if not exists system_settings (
+    key text primary key,
+    value text not null,
+    updated_by text,
+    updated_at text not null
+  )`,
   `create table if not exists security_audit_events (
     id text primary key,
     event_type text not null,
@@ -420,6 +495,10 @@ const CREATE_STATEMENTS = [
 ];
 
 const COLUMN_PATCHES = [
+  ["profiles", "telegram_chat_id text"],
+  ["profiles", "telegram_verified integer not null default 0"],
+  ["profiles", "telegram_verified_at text"],
+  ["profiles", "telegram_linked_at text"],
   ["withdrawal_requests", "telegram_chat_id text"],
   ["withdrawal_requests", "telegram_message_id text"],
   ["withdrawal_requests", "telegram_sync_status text not null default 'pending'"],
@@ -539,6 +618,10 @@ async function main() {
     await execute(statement);
   }
 
+  await execute(
+    "create unique index if not exists idx_profiles_telegram_id on profiles(telegram_id) where telegram_id is not null",
+  );
+
   if (shouldSeed) {
     const productsRow = await queryOne("select count(*) as count from products");
     if (Number(productsRow?.count ?? 0) === 0) {
@@ -623,9 +706,11 @@ async function main() {
       );
 
       await execute(
-        `insert into profiles (
-          user_id, role, telegram_username, telegram_id, withdrawal_wallet, verified, created_at, updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `insert into profiles (
+      user_id, role, telegram_username, telegram_id, telegram_chat_id,
+      telegram_verified, telegram_verified_at, telegram_linked_at, withdrawal_wallet,
+      verified, created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           userId,
           "admin",
@@ -633,6 +718,10 @@ async function main() {
             env.ADMIN_SEED_TELEGRAM_USERNAME || "@monohrome_admin",
           ),
           null,
+          null,
+          1,
+          timestamp,
+          timestamp,
           null,
           1,
           timestamp,

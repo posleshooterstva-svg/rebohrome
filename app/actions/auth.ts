@@ -6,10 +6,9 @@ import {
   authenticateUser,
   createSessionForUser,
   deleteSessionByToken,
-  registerUser,
   trackUserLogin,
-  trackUserRegistered,
 } from "@/lib/db/repository";
+import { buildSessionCookieDescriptor } from "@/lib/auth/session-cookie";
 import { SESSION_COOKIE_NAME } from "@/lib/rebohrome-data";
 import { getRequestMeta } from "@/lib/session";
 
@@ -26,76 +25,17 @@ function getRedirectPath(formData: FormData, fallback: string) {
 async function setSessionCookie(token: string) {
   const cookieStore = await cookies();
   const headerStore = await headers();
-  const forwardedProto = headerStore.get("x-forwarded-proto");
-  const origin = headerStore.get("origin");
-  const referer = headerStore.get("referer");
-  const secure =
-    forwardedProto === "https" ||
-    origin?.startsWith("https://") ||
-    referer?.startsWith("https://") ||
-    process.env.VERCEL === "1" ||
-    Boolean(process.env.VERCEL_ENV);
-
-  cookieStore.set(SESSION_COOKIE_NAME, token, {
-    path: "/",
-    sameSite: "lax",
-    httpOnly: true,
-    secure,
-    maxAge: 60 * 60 * 24 * 30,
-  });
+  const descriptor = buildSessionCookieDescriptor(token, headerStore);
+  cookieStore.set(descriptor.name, descriptor.value, descriptor.options);
 }
 
 export async function registerAction(formData: FormData) {
-  const username = String(formData.get("username") ?? "");
-  const email = String(formData.get("email") ?? "");
-  const telegramUsername = String(formData.get("telegram_username") ?? "");
-  const password = String(formData.get("password") ?? "");
-  const confirmPassword = String(formData.get("confirm_password") ?? "");
-
-  if (password.length < 8) {
-    redirect(`/register?error=${encodeURIComponent("Password must be at least 8 characters.")}`);
-  }
-
-  if (password !== confirmPassword) {
-    redirect(`/register?error=${encodeURIComponent("Passwords do not match.")}`);
-  }
-
-  try {
-    const meta = await getRequestMeta("/register");
-    const userId = await registerUser({
-      username,
-      email,
-      telegramUsername,
-      password,
-    });
-    const token = await createSessionForUser({
-      userId,
-      userAgent: meta.userAgent,
-      ipAddress: meta.ipAddress,
-    });
-
-    await trackUserRegistered({
-      eventType: "user_registered",
-      userId,
-      username,
-      telegramUsername,
-      role: "user",
-      ipAddress: meta.ipAddress,
-      country: meta.country,
-      userAgent: meta.userAgent,
-      language: meta.language,
-      route: meta.route,
-      timestamp: meta.timestamp,
-    });
-
-    await setSessionCookie(token);
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unable to create account.";
-    redirect(`/register?error=${encodeURIComponent(message)}`);
-  }
-
-  redirect("/dashboard");
+  void formData;
+  redirect(
+    `/register?error=${encodeURIComponent(
+      "Telegram verification is required before creating an account.",
+    )}`,
+  );
 }
 
 export async function loginAction(formData: FormData) {

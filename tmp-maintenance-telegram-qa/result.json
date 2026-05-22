@@ -1,0 +1,19 @@
+{
+  "publicHomeUrl": "http://127.0.0.1:3038/maintenance",
+  "publicMarketplaceUrl": "http://127.0.0.1:3038/maintenance",
+  "userAfterLoginUrl": "http://127.0.0.1:3038/maintenance",
+  "adminBannerVisible": true,
+  "healthPayload": {
+    "ok": true,
+    "maintenance": true,
+    "timestamp": "2026-05-22T04:47:26.586Z"
+  },
+  "telegramWebhookPayload": {
+    "ok": true,
+    "skipped": false,
+    "event": "start-linked"
+  },
+  "identitySaved": true,
+  "verificationCreated": true,
+  "publicAfterDisableUrl": "http://127.0.0.1:3038/"
+}

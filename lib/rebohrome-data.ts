@@ -129,6 +129,9 @@ export type UserRecord = {
   status: UserStatus;
   telegramUsername: string;
   telegramId: string | null;
+  telegramChatId: string | null;
+  telegramVerified: boolean;
+  telegramVerifiedAt: string | null;
   withdrawalWallet: string | null;
   verified: boolean;
   createdAt: string;

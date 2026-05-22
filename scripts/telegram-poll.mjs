@@ -108,7 +108,7 @@ async function runCycle(config) {
   const updates = await callTelegram("getUpdates", config.token, {
     offset: currentOffset ?? undefined,
     timeout: 5,
-    allowed_updates: ["callback_query"],
+    allowed_updates: ["message", "callback_query"],
   });
 
   if (!Array.isArray(updates) || updates.length === 0) {
@@ -128,10 +128,12 @@ async function runCycle(config) {
 async function main() {
   const env = await loadEnv();
   const token = env.TELEGRAM_BOT_TOKEN;
+  const adminChatId = env.ADMIN_TELEGRAM_CHAT_ID || env.TELEGRAM_CHAT_ID || "";
   const secret =
+    env.TELEGRAM_WEBHOOK_SECRET ||
     env.TELEGRAM_CALLBACK_SECRET ||
     createHash("sha256")
-      .update(`${env.TELEGRAM_BOT_TOKEN || ""}:${env.TELEGRAM_CHAT_ID || ""}:rebohrome-callback`)
+      .update(`${env.TELEGRAM_BOT_TOKEN || ""}:${adminChatId}:rebohrome-callback`)
       .digest("hex");
   const baseUrl = env.APP_BASE_URL || "http://127.0.0.1:3003";
   const watch = process.argv.includes("--watch");

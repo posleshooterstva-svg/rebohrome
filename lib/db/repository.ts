@@ -1,22 +1,24 @@
 import { readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
-import { createHash, randomBytes, randomUUID } from "crypto";
+import { createHash, randomBytes, randomInt, randomUUID } from "crypto";
 import { revalidatePath } from "next/cache";
 import {
   ADMIN_SEED_PASSWORD,
   ADMIN_SEED_TELEGRAM,
   ADMIN_SEED_USERNAME,
+  ADMIN_TELEGRAM_CHAT_ID,
   TELEGRAM_CALLBACK_SECRET,
   TELEGRAM_BOT_TOKEN,
-  TELEGRAM_CHAT_ID,
+  TELEGRAM_BOT_USERNAME,
 } from "@/lib/server-config";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { convertAmount } from "@/lib/currency-service";
 import {
   answerTelegramCallbackQuery,
   editTelegramMessage,
+  sendTelegramAdminMessage,
   sendTelegramMessage,
-  sendTelegramNotification,
+  sendTelegramUserMessage,
   type TelegramReplyMarkup,
   type TelegramUpdate,
 } from "@/lib/telegram";
@@ -86,6 +88,22 @@ import {
 
 type SqlValue = string | number | null;
 type DbRow = Record<string, SqlValue>;
+type MaintenanceModeConfig = {
+  enabled: boolean;
+  title: string;
+  message: string;
+  estimatedReturnAt: string | null;
+  internalNote: string | null;
+  updatedAt: string | null;
+  updatedByUserId: string | null;
+  updatedByUsername: string | null;
+  lastEnabledAt: string | null;
+  lastEnabledByUserId: string | null;
+  lastEnabledByUsername: string | null;
+  lastDisabledAt: string | null;
+  lastDisabledByUserId: string | null;
+  lastDisabledByUsername: string | null;
+};
 
 let initialized = false;
 let initializationPromise: Promise<void> | null = null;
@@ -93,6 +111,10 @@ let initializationPromise: Promise<void> | null = null;
 const REQUIRED_TABLES = [
   "users",
   "profiles",
+  "telegram_identities",
+  "telegram_verification_codes",
+  "telegram_users",
+  "telegram_verifications",
   "balances",
   "sessions",
   "products",
@@ -117,6 +139,7 @@ type SecurityAuditEventType =
   | "users_page_visit"
   | "user_registered"
   | "user_login"
+  | "user_email_changed"
   | "transvoucher_invalid_signature";
 
 type SecurityAuditEventInput = {
@@ -134,9 +157,37 @@ type SecurityAuditEventInput = {
 };
 
 let missingSecurityTelegramWarningLogged = false;
+const TELEGRAM_VERIFICATION_TTL_MINUTES = 10;
+const TELEGRAM_VERIFICATION_MAX_ATTEMPTS = 5;
+const TELEGRAM_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60;
+const TELEGRAM_VERIFICATION_MAX_RESENDS_PER_HOUR = 5;
+const TELEGRAM_VERIFICATION_PURPOSE_REGISTRATION = "registration";
+const SYSTEM_SETTING_KEY_MAINTENANCE_MODE = "maintenance_mode";
+const DEFAULT_MAINTENANCE_TITLE = "We'll be back soon.";
+const DEFAULT_MAINTENANCE_MESSAGE =
+  "ReboHrome is currently undergoing scheduled maintenance. Our archive will reopen shortly.";
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function getDefaultMaintenanceModeConfig(): MaintenanceModeConfig {
+  return {
+    enabled: false,
+    title: DEFAULT_MAINTENANCE_TITLE,
+    message: DEFAULT_MAINTENANCE_MESSAGE,
+    estimatedReturnAt: null,
+    internalNote: null,
+    updatedAt: null,
+    updatedByUserId: null,
+    updatedByUsername: null,
+    lastEnabledAt: null,
+    lastEnabledByUserId: null,
+    lastEnabledByUsername: null,
+    lastDisabledAt: null,
+    lastDisabledByUserId: null,
+    lastDisabledByUsername: null,
+  };
 }
 
 function isFinalWithdrawalStatus(status: WithdrawalStatus) {
@@ -168,6 +219,23 @@ function hashSessionToken(token: string) {
 
 function createSessionToken() {
   return randomBytes(32).toString("hex");
+}
+
+function hashVerificationCode(code: string) {
+  return createHash("sha256").update(code).digest("hex");
+}
+
+function createVerificationCode() {
+  return randomInt(0, 1_000_000).toString().padStart(6, "0");
+}
+
+function normalizeEmail(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function normalizeTelegramNumericId(value: string | number | null | undefined) {
+  const next = String(value ?? "").trim();
+  return /^\d+$/.test(next) ? next : "";
 }
 
 function addDays(date: Date, days: number) {
@@ -205,6 +273,41 @@ function fromJson<T>(value: SqlValue) {
   }
 
   return JSON.parse(value) as T;
+}
+
+function normalizeMaintenanceModeConfig(
+  value: Partial<MaintenanceModeConfig> | null | undefined,
+): MaintenanceModeConfig {
+  const defaults = getDefaultMaintenanceModeConfig();
+
+  return {
+    ...defaults,
+    ...value,
+    enabled: Boolean(value?.enabled),
+    title: String(value?.title ?? defaults.title).trim() || defaults.title,
+    message: String(value?.message ?? defaults.message).trim() || defaults.message,
+    estimatedReturnAt: value?.estimatedReturnAt
+      ? String(value.estimatedReturnAt)
+      : null,
+    internalNote: value?.internalNote ? String(value.internalNote) : null,
+    updatedAt: value?.updatedAt ? String(value.updatedAt) : null,
+    updatedByUserId: value?.updatedByUserId ? String(value.updatedByUserId) : null,
+    updatedByUsername: value?.updatedByUsername ? String(value.updatedByUsername) : null,
+    lastEnabledAt: value?.lastEnabledAt ? String(value.lastEnabledAt) : null,
+    lastEnabledByUserId: value?.lastEnabledByUserId
+      ? String(value.lastEnabledByUserId)
+      : null,
+    lastEnabledByUsername: value?.lastEnabledByUsername
+      ? String(value.lastEnabledByUsername)
+      : null,
+    lastDisabledAt: value?.lastDisabledAt ? String(value.lastDisabledAt) : null,
+    lastDisabledByUserId: value?.lastDisabledByUserId
+      ? String(value.lastDisabledByUserId)
+      : null,
+    lastDisabledByUsername: value?.lastDisabledByUsername
+      ? String(value.lastDisabledByUsername)
+      : null,
+  };
 }
 
 function normalizeProduct(row: DbRow): ProductRecord {
@@ -255,6 +358,9 @@ function normalizeUser(row: DbRow): UserRecord {
     status: String(row.status) as UserRecord["status"],
     telegramUsername: String(row.telegram_username),
     telegramId: row.telegram_id ? String(row.telegram_id) : null,
+    telegramChatId: row.telegram_chat_id ? String(row.telegram_chat_id) : null,
+    telegramVerified: asBoolean(row.telegram_verified ?? row.verified ?? 0),
+    telegramVerifiedAt: row.telegram_verified_at ? String(row.telegram_verified_at) : null,
     withdrawalWallet: row.withdrawal_wallet ? String(row.withdrawal_wallet) : null,
     verified: asBoolean(row.verified ?? 0),
     createdAt: String(row.created_at),
@@ -588,6 +694,18 @@ async function queryMany(sql: string, args: SqlValue[] = []) {
   return result.rows as DbRow[];
 }
 
+async function tableExists(tableName: string) {
+  const row = await queryOne(
+    `select name from sqlite_master
+     where type = 'table'
+       and name = ?
+     limit 1`,
+    [tableName],
+  );
+
+  return Boolean(row);
+}
+
 async function ensureColumn(table: string, definition: string) {
   try {
     await execute(`alter table ${table} add column ${definition}`);
@@ -602,6 +720,17 @@ async function ensureColumn(table: string, definition: string) {
 
     throw error;
   }
+}
+
+async function ensureSystemSettingsTable() {
+  await execute(
+    `create table if not exists system_settings (
+      key text primary key,
+      value text not null,
+      updated_by text,
+      updated_at text not null
+    )`,
+  );
 }
 
 async function insertSecurityAuditEvent(input: SecurityAuditEventInput) {
@@ -738,6 +867,7 @@ async function seedAdminAccount() {
   const username = normalizeUsername(ADMIN_SEED_USERNAME);
   const existing = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
       profiles.withdrawal_wallet, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
@@ -773,9 +903,24 @@ async function seedAdminAccount() {
 
   await execute(
     `insert into profiles (
-      user_id, role, telegram_username, telegram_id, withdrawal_wallet, verified, created_at, updated_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [userId, "admin", normalizeTelegramUsername(ADMIN_SEED_TELEGRAM), null, null, 1, timestamp, timestamp],
+      user_id, role, telegram_username, telegram_id, telegram_chat_id,
+      telegram_verified, telegram_verified_at, telegram_linked_at, withdrawal_wallet,
+      verified, created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      userId,
+      "admin",
+      normalizeTelegramUsername(ADMIN_SEED_TELEGRAM),
+      null,
+      null,
+      1,
+      timestamp,
+      timestamp,
+      null,
+      1,
+      timestamp,
+      timestamp,
+    ],
   );
 
   await execute(
@@ -855,6 +1000,7 @@ async function insertWithdrawalHistory(input: {
 async function getUserRowById(userId: string) {
   return queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
       profiles.withdrawal_wallet, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
@@ -867,6 +1013,7 @@ async function getUserRowById(userId: string) {
 async function getUserRowByTelegramUsername(telegramUsername: string) {
   return queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
       profiles.withdrawal_wallet, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
@@ -874,6 +1021,109 @@ async function getUserRowByTelegramUsername(telegramUsername: string) {
      limit 1`,
     [normalizeTelegramUsername(telegramUsername)],
   );
+}
+
+async function getTelegramIdentityRowByUsername(telegramUsername: string) {
+  return queryOne(
+    `select * from telegram_identities
+     where telegram_username = ?
+     order by updated_at desc
+     limit 1`,
+    [normalizeTelegramUsername(telegramUsername)],
+  );
+}
+
+async function getTelegramIdentityRowByTelegramId(telegramId: string) {
+  return queryOne(
+    "select * from telegram_identities where telegram_id = ? limit 1",
+    [normalizeTelegramNumericId(telegramId)],
+  );
+}
+
+async function getTelegramVerificationCodeRowById(verificationId: string) {
+  return queryOne(
+    "select * from telegram_verification_codes where id = ? limit 1",
+    [verificationId],
+  );
+}
+
+async function assertRegistrationAvailability(input: {
+  username: string;
+  email: string;
+  telegramUsername: string;
+  telegramId?: string | null;
+  ignoreVerificationId?: string | null;
+}) {
+  const [existingUser, existingEmail, existingTelegram] = await Promise.all([
+    queryOne("select id from users where username = ? limit 1", [input.username]),
+    queryOne("select id from users where email = ? limit 1", [input.email]),
+    queryOne("select user_id from profiles where telegram_username = ? limit 1", [
+      input.telegramUsername,
+    ]),
+  ]);
+
+  if (existingUser) {
+    throw new Error("This username is already taken.");
+  }
+
+  if (existingEmail) {
+    throw new Error("This email is already connected to another account.");
+  }
+
+  if (existingTelegram) {
+    throw new Error("This Telegram username is already connected to another account.");
+  }
+
+  if (input.telegramId) {
+    const existingTelegramId = await queryOne(
+      "select user_id from profiles where telegram_id = ? limit 1",
+      [input.telegramId],
+    );
+
+    if (existingTelegramId) {
+      throw new Error("This Telegram account is already connected to another account.");
+    }
+  }
+
+  const pendingVerification = await queryOne(
+    `select id, username, email
+     from telegram_verification_codes
+     where purpose = ?
+       and telegram_username = ?
+       and consumed_at is null
+       and verified_at is null
+       and expires_at >= ?
+       and (? is null or id <> ?)
+     order by created_at desc
+     limit 1`,
+    [
+      TELEGRAM_VERIFICATION_PURPOSE_REGISTRATION,
+      input.telegramUsername,
+      nowIso(),
+      input.ignoreVerificationId ?? null,
+      input.ignoreVerificationId ?? null,
+    ],
+  );
+
+  if (
+    pendingVerification &&
+    (String(pendingVerification.username) !== input.username ||
+      String(pendingVerification.email) !== input.email)
+  ) {
+    throw new Error(
+      "A verification is already in progress for this Telegram username. Please finish it or wait for it to expire.",
+    );
+  }
+}
+
+function assertPasswordStrength(password: string) {
+  if (password.length < 8) {
+    throw new Error("Password must be at least 8 characters.");
+  }
+
+  if (!/[a-zA-Z]/.test(password) || !/\d/.test(password)) {
+    throw new Error("Password must include at least one letter and one number.");
+  }
 }
 
 async function getBalanceRowByUserId(userId: string) {
@@ -1420,7 +1670,7 @@ async function sendDepositNotification(params: {
   referenceId?: string | null;
   timestamp: string;
 }) {
-  await sendTelegramNotification(
+  await sendTelegramAdminMessage(
     [
       "<b>New Deposit Completed</b>",
       "",
@@ -1460,7 +1710,7 @@ async function sendPurchaseNotification(params: {
 }) {
   const lines = params.items.map((item) => `- ${item.title} x${item.quantity}`);
 
-  await sendTelegramNotification(
+  await sendTelegramAdminMessage(
     [
       "<b>New Card Purchase</b>",
       "",
@@ -1497,7 +1747,7 @@ async function sendDepositFailureNotification(params: {
   reason: string;
   timestamp: string;
 }) {
-  await sendTelegramNotification(
+  await sendTelegramAdminMessage(
     buildTelegramFailureMessage({
       title: "Payment Failed",
       username: params.username,
@@ -1529,7 +1779,7 @@ async function sendPurchaseFailureNotification(params: {
   reason: string;
   timestamp: string;
 }) {
-  await sendTelegramNotification(
+  await sendTelegramAdminMessage(
     buildTelegramFailureMessage({
       title: "Payment Failed",
       username: params.username,
@@ -1557,7 +1807,7 @@ async function sendWithdrawalFailureNotification(params: {
   reason: string;
   timestamp: string;
 }) {
-  await sendTelegramNotification(
+  await sendTelegramAdminMessage(
     [
       "<b>Withdrawal Rejected</b>",
       "",
@@ -1591,13 +1841,13 @@ async function notifySafely(task: () => Promise<unknown>) {
 }
 
 function canSendSecurityTelegramNotification() {
-  if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+  if (TELEGRAM_BOT_TOKEN && ADMIN_TELEGRAM_CHAT_ID) {
     return true;
   }
 
   if (!missingSecurityTelegramWarningLogged) {
     console.warn(
-      "Telegram security notifications are disabled because TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.",
+      "Telegram security notifications are disabled because TELEGRAM_BOT_TOKEN or ADMIN_TELEGRAM_CHAT_ID is missing.",
     );
     missingSecurityTelegramWarningLogged = true;
   }
@@ -1610,7 +1860,7 @@ async function sendSecurityTelegramNotification(message: string) {
     return;
   }
 
-  await notifySafely(() => sendTelegramNotification(message));
+  await notifySafely(() => sendTelegramAdminMessage(message));
 }
 
 function buildUsersPageVisitTelegramMessage(input: SecurityAuditEventInput) {
@@ -1654,6 +1904,92 @@ function buildUserLoginTelegramMessage(input: SecurityAuditEventInput) {
     `Language: ${escapeTelegramHtml(getSecurityFieldValue(input.language))}`,
     `Time: ${escapeTelegramHtml(formatTelegramTimestamp(input.timestamp))}`,
   ].join("\n");
+}
+
+function buildVerificationCodeTelegramMessage(code: string) {
+  return [
+    "<b>Your ReboHrome verification code:</b>",
+    "",
+    `<code>${escapeTelegramHtml(code)}</code>`,
+    "",
+    "This code expires in 10 minutes.",
+    "If you did not request this, ignore this message.",
+    "",
+    "Do not share this code with anyone.",
+  ].join("\n");
+}
+
+function buildUserEmailChangedAdminTelegramMessage(input: {
+  username: string;
+  telegramUsername: string;
+  oldEmail: string;
+  newEmail: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  timestamp: string;
+}) {
+  return [
+    "<b>User Email Changed</b>",
+    "",
+    `Username: ${escapeTelegramHtml(getSecurityFieldValue(input.username))}`,
+    `Telegram: ${escapeTelegramHtml(getSecurityFieldValue(input.telegramUsername))}`,
+    `Old email: ${escapeTelegramHtml(getSecurityFieldValue(input.oldEmail))}`,
+    `New email: ${escapeTelegramHtml(getSecurityFieldValue(input.newEmail))}`,
+    `IP: ${escapeTelegramHtml(getSecurityFieldValue(input.ipAddress))}`,
+    `Country: ${escapeTelegramHtml(getSecurityFieldValue(input.country))}`,
+    `User Agent: ${escapeTelegramHtml(truncateForTelegram(input.userAgent, 280))}`,
+    `Language: ${escapeTelegramHtml(getSecurityFieldValue(input.language))}`,
+    `Time: ${escapeTelegramHtml(formatTelegramTimestamp(input.timestamp))}`,
+  ].join("\n");
+}
+
+function buildUserEmailChangedTelegramMessage(input: {
+  oldEmail: string;
+  newEmail: string;
+}) {
+  return [
+    "<b>Your ReboHrome account email was changed.</b>",
+    "",
+    `Old email: ${escapeTelegramHtml(input.oldEmail)}`,
+    `New email: ${escapeTelegramHtml(input.newEmail)}`,
+    "",
+    "If this was not you, contact support immediately.",
+  ].join("\n");
+}
+
+function buildMaintenanceModeTelegramMessage(input: {
+  enabled: boolean;
+  adminUsername: string;
+  estimatedReturnAt?: string | null;
+  internalNote?: string | null;
+  timestamp: string;
+}) {
+  const lines = [
+    input.enabled
+      ? "<b>Maintenance Mode Enabled</b>"
+      : "<b>Maintenance Mode Disabled</b>",
+    "",
+    `${input.enabled ? "Enabled" : "Disabled"} by: ${escapeTelegramHtml(
+      getSecurityFieldValue(input.adminUsername),
+    )}`,
+  ];
+
+  if (input.enabled && input.estimatedReturnAt) {
+    lines.push(
+      `Estimated return: ${escapeTelegramHtml(
+        formatTelegramTimestamp(input.estimatedReturnAt),
+      )}`,
+    );
+  }
+
+  if (input.enabled && input.internalNote) {
+    lines.push(`Reason: ${escapeTelegramHtml(input.internalNote)}`);
+  }
+
+  lines.push(`Time: ${escapeTelegramHtml(formatTelegramTimestamp(input.timestamp))}`);
+  return lines.join("\n");
 }
 
 export async function trackUsersPageVisit(input: SecurityAuditEventInput) {
@@ -1728,6 +2064,177 @@ export async function trackUserLogin(input: SecurityAuditEventInput) {
       }),
     );
   }
+}
+
+export async function trackUserEmailChanged(input: SecurityAuditEventInput) {
+  await ensureDatabase();
+  await insertSecurityAuditEvent({
+    ...input,
+    eventType: "user_email_changed",
+  });
+}
+
+async function resolveMaintenanceAdminUsername(userId: string | null) {
+  if (!userId) {
+    return null;
+  }
+
+  const row = await queryOne("select username from users where id = ? limit 1", [userId]);
+  return row?.username ? String(row.username) : null;
+}
+
+async function getMaintenanceModeSettingRow() {
+  if (!(await tableExists("system_settings"))) {
+    return null;
+  }
+
+  return queryOne(
+    "select * from system_settings where key = ? limit 1",
+    [SYSTEM_SETTING_KEY_MAINTENANCE_MODE],
+  );
+}
+
+export async function getMaintenanceModeConfig() {
+  await ensureDatabase();
+  const defaults = getDefaultMaintenanceModeConfig();
+  const row = await getMaintenanceModeSettingRow();
+
+  if (!row?.value) {
+    return defaults;
+  }
+
+  const parsed = fromJson<Partial<MaintenanceModeConfig>>(row.value) ?? {};
+  const base = normalizeMaintenanceModeConfig({
+    ...parsed,
+    updatedByUserId: row.updated_by ? String(row.updated_by) : parsed.updatedByUserId,
+    updatedAt: row.updated_at ? String(row.updated_at) : parsed.updatedAt,
+  });
+
+  const [updatedByUsername, lastEnabledByUsername, lastDisabledByUsername] =
+    await Promise.all([
+      resolveMaintenanceAdminUsername(base.updatedByUserId),
+      resolveMaintenanceAdminUsername(base.lastEnabledByUserId),
+      resolveMaintenanceAdminUsername(base.lastDisabledByUserId),
+    ]);
+
+  return normalizeMaintenanceModeConfig({
+    ...base,
+    updatedByUsername,
+    lastEnabledByUsername,
+    lastDisabledByUsername,
+  });
+}
+
+export async function updateMaintenanceModeConfig(input: {
+  adminUserId: string;
+  adminUsername: string;
+  enabled: boolean;
+  title?: string | null;
+  message?: string | null;
+  estimatedReturnAt?: string | null;
+  internalNote?: string | null;
+  ipAddress?: string | null;
+  route?: string | null;
+}) {
+  await ensureDatabase();
+  await ensureSystemSettingsTable();
+
+  const previous = await getMaintenanceModeConfig();
+  const timestamp = nowIso();
+  const next = normalizeMaintenanceModeConfig({
+    ...previous,
+    enabled: input.enabled,
+    title: input.title ?? previous.title,
+    message: input.message ?? previous.message,
+    estimatedReturnAt: input.estimatedReturnAt ?? null,
+    internalNote: input.internalNote ?? null,
+    updatedAt: timestamp,
+    updatedByUserId: input.adminUserId,
+    updatedByUsername: input.adminUsername,
+    lastEnabledAt:
+      input.enabled && !previous.enabled ? timestamp : previous.lastEnabledAt,
+    lastEnabledByUserId:
+      input.enabled && !previous.enabled
+        ? input.adminUserId
+        : previous.lastEnabledByUserId,
+    lastEnabledByUsername:
+      input.enabled && !previous.enabled
+        ? input.adminUsername
+        : previous.lastEnabledByUsername,
+    lastDisabledAt:
+      !input.enabled && previous.enabled ? timestamp : previous.lastDisabledAt,
+    lastDisabledByUserId:
+      !input.enabled && previous.enabled
+        ? input.adminUserId
+        : previous.lastDisabledByUserId,
+    lastDisabledByUsername:
+      !input.enabled && previous.enabled
+        ? input.adminUsername
+        : previous.lastDisabledByUsername,
+  });
+
+  await execute(
+    `insert into system_settings (
+      key, value, updated_by, updated_at
+    ) values (?, ?, ?, ?)
+    on conflict(key) do update set
+      value = excluded.value,
+      updated_by = excluded.updated_by,
+      updated_at = excluded.updated_at`,
+    [
+      SYSTEM_SETTING_KEY_MAINTENANCE_MODE,
+      toJson(next),
+      input.adminUserId,
+      timestamp,
+    ],
+  );
+
+  const stateChanged = previous.enabled !== next.enabled;
+  const action = stateChanged
+    ? next.enabled
+      ? "maintenance_enabled"
+      : "maintenance_disabled"
+    : "maintenance_updated";
+  const message = stateChanged
+    ? next.enabled
+      ? "Enabled maintenance mode."
+      : "Disabled maintenance mode."
+    : "Updated maintenance mode settings.";
+
+  await logAdminAction(
+    input.adminUserId,
+    action,
+    "system_setting",
+    SYSTEM_SETTING_KEY_MAINTENANCE_MODE,
+    message,
+    {
+      metadata: {
+        ipAddress: input.ipAddress ?? null,
+        route: input.route ?? null,
+        previousState: previous,
+        nextState: next,
+      },
+    },
+  );
+
+  await sendSecurityTelegramNotification(
+    buildMaintenanceModeTelegramMessage({
+      enabled: next.enabled,
+      adminUsername: input.adminUsername,
+      estimatedReturnAt: next.estimatedReturnAt,
+      internalNote: next.internalNote,
+      timestamp,
+    }),
+  );
+
+  revalidatePath("/maintenance");
+  revalidatePath("/login");
+  revalidatePath("/contact");
+  revalidateStorefront();
+  revalidatePrivate();
+  revalidateAdmin();
+
+  return next;
 }
 
 async function answerTelegramCallbackSafely(input: {
@@ -1934,11 +2441,11 @@ export async function syncWithdrawalTelegramMessage(withdrawalId: string) {
     throw new Error("Withdrawal request not found.");
   }
 
-  if (!TELEGRAM_CHAT_ID) {
+  if (!ADMIN_TELEGRAM_CHAT_ID) {
     await updateWithdrawalTelegramSyncState({
       withdrawalId,
       syncStatus: "error",
-      lastError: "Missing TELEGRAM_CHAT_ID configuration.",
+      lastError: "Missing ADMIN_TELEGRAM_CHAT_ID configuration.",
     });
     return { ok: false as const, skipped: true as const };
   }
@@ -1987,7 +2494,7 @@ export async function syncWithdrawalTelegramMessage(withdrawalId: string) {
 
     if (!messageResult) {
       const sendResult = await sendTelegramMessage({
-        chatId: TELEGRAM_CHAT_ID,
+        chatId: ADMIN_TELEGRAM_CHAT_ID,
         text,
         replyMarkup,
       });
@@ -2110,6 +2617,123 @@ export async function setTelegramRuntimeState(stateKey: string, stateValue: stri
   );
 }
 
+async function upsertTelegramUserFromStart(input: {
+  telegramId: string;
+  telegramUsername: string;
+  chatId: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  languageCode?: string | null;
+}) {
+  const timestamp = nowIso();
+  const telegramId = normalizeTelegramNumericId(input.telegramId);
+
+  if (!telegramId) {
+    throw new Error("Telegram /start payload is missing a valid numeric Telegram ID.");
+  }
+
+  const existingIdentity = await getTelegramIdentityRowByTelegramId(telegramId);
+  const matchingProfile =
+    (await queryOne(
+      `select user_id from profiles
+       where telegram_id = ? or telegram_username = ?
+       limit 1`,
+      [telegramId, input.telegramUsername],
+    )) ?? null;
+  const linkedUserId = existingIdentity?.linked_user_id
+    ? String(existingIdentity.linked_user_id)
+    : matchingProfile?.user_id
+      ? String(matchingProfile.user_id)
+      : null;
+
+  await execute(
+    `insert into telegram_identities (
+      id, telegram_id, telegram_username, chat_id, first_name, last_name,
+      language_code, linked_user_id, is_linked, first_seen_at, last_seen_at,
+      created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    on conflict(telegram_id) do update set
+      telegram_username = excluded.telegram_username,
+      chat_id = excluded.chat_id,
+      first_name = excluded.first_name,
+      last_name = excluded.last_name,
+      language_code = excluded.language_code,
+      last_seen_at = excluded.last_seen_at,
+      updated_at = excluded.updated_at`,
+    [
+      existingIdentity?.id ? String(existingIdentity.id) : randomUUID(),
+      telegramId,
+      input.telegramUsername,
+      input.chatId,
+      input.firstName ?? null,
+      input.lastName ?? null,
+      input.languageCode ?? null,
+      linkedUserId,
+      linkedUserId ? 1 : 0,
+      existingIdentity?.first_seen_at ? String(existingIdentity.first_seen_at) : timestamp,
+      timestamp,
+      existingIdentity?.created_at ? String(existingIdentity.created_at) : timestamp,
+      timestamp,
+    ],
+  );
+
+  await execute(
+    `insert into telegram_users (
+      telegram_username, telegram_chat_id, first_name, last_name, last_seen_at, created_at
+    ) values (?, ?, ?, ?, ?, ?)
+    on conflict(telegram_username) do update set
+      telegram_chat_id = excluded.telegram_chat_id,
+      first_name = excluded.first_name,
+      last_name = excluded.last_name,
+      last_seen_at = excluded.last_seen_at`,
+    [
+      input.telegramUsername,
+      input.chatId,
+      input.firstName ?? null,
+      input.lastName ?? null,
+      timestamp,
+      timestamp,
+    ],
+  );
+
+  await execute(
+    `update profiles set
+      telegram_id = ?,
+      telegram_chat_id = ?,
+      telegram_verified = 1,
+      telegram_verified_at = coalesce(telegram_verified_at, ?),
+      telegram_linked_at = coalesce(telegram_linked_at, ?),
+      verified = 1,
+      updated_at = ?
+     where telegram_username = ? or telegram_id = ?`,
+    [telegramId, input.chatId, timestamp, timestamp, timestamp, input.telegramUsername, telegramId],
+  );
+
+  if (linkedUserId) {
+    await execute(
+      `update profiles set
+        telegram_username = ?,
+        telegram_id = ?,
+        telegram_chat_id = ?,
+        telegram_verified = 1,
+        telegram_verified_at = coalesce(telegram_verified_at, ?),
+        telegram_linked_at = coalesce(telegram_linked_at, ?),
+        verified = 1,
+        updated_at = ?
+       where user_id = ?`,
+      [
+        input.telegramUsername,
+        telegramId,
+        input.chatId,
+        timestamp,
+        timestamp,
+        timestamp,
+        linkedUserId,
+      ],
+    );
+  }
+}
+
 export async function getAdminByTelegramUsername(telegramUsername: string) {
   await ensureDatabase();
   const row = await getUserRowByTelegramUsername(telegramUsername);
@@ -2124,6 +2748,51 @@ export async function getAdminByTelegramUsername(telegramUsername: string) {
 
 export async function processTelegramUpdate(update: TelegramUpdate) {
   await ensureDatabase();
+
+  const message = update.message;
+
+  if (message?.text?.startsWith("/start")) {
+    const telegramUsername = message.from?.username
+      ? normalizeTelegramUsername(message.from.username)
+      : null;
+
+    if (!telegramUsername) {
+      await notifySafely(() =>
+        sendTelegramUserMessage(
+          message.chat.id,
+          [
+            "<b>ReboHrome verification needs a Telegram username.</b>",
+            "",
+            "Please set a public Telegram username in Telegram settings, then press Start again.",
+          ].join("\n"),
+        ),
+      );
+
+      return { ok: true as const, skipped: false as const, event: "start-missing-username" };
+    }
+
+    await upsertTelegramUserFromStart({
+      telegramId: String(message.from?.id ?? ""),
+      telegramUsername,
+      chatId: String(message.chat.id),
+      firstName: message.from?.first_name ?? null,
+      lastName: message.from?.last_name ?? null,
+      languageCode: message.from?.language_code ?? null,
+    });
+
+    await notifySafely(() =>
+      sendTelegramUserMessage(
+        message.chat.id,
+        [
+          "<b>ReboHrome verification is active.</b>",
+          "",
+          "You can now return to the website and request your 6-digit code.",
+        ].join("\n"),
+      ),
+    );
+
+    return { ok: true as const, skipped: false as const, event: "start-linked" };
+  }
 
   const callback = update.callback_query;
 
@@ -2202,7 +2871,7 @@ export async function processTelegramUpdate(update: TelegramUpdate) {
     callbackUsername ? await getAdminByTelegramUsername(callbackUsername) : null;
   const chatId = String(callback.message?.chat.id ?? "");
 
-  if (!admin || (TELEGRAM_CHAT_ID && chatId !== String(TELEGRAM_CHAT_ID))) {
+  if (!admin || (ADMIN_TELEGRAM_CHAT_ID && chatId !== String(ADMIN_TELEGRAM_CHAT_ID))) {
     await insertWithdrawalHistory({
       withdrawalId,
       actionType: `unauthorized-${actionType}`,
@@ -2300,6 +2969,7 @@ function revalidateAdmin() {
   revalidatePath("/admin/upload");
   revalidatePath("/admin/users");
   revalidatePath("/admin/analytics");
+  revalidatePath("/admin/settings");
 }
 
 export async function ensureDatabase() {
@@ -2335,10 +3005,91 @@ export async function ensureDatabase() {
           role text not null,
           telegram_username text not null unique,
           telegram_id text,
+          telegram_chat_id text,
+          telegram_verified integer not null default 0,
+          telegram_verified_at text,
+          telegram_linked_at text,
           withdrawal_wallet text,
           verified integer not null default 1,
           created_at text not null,
           updated_at text not null
+        )`,
+      );
+
+      await execute(
+        `create table if not exists telegram_identities (
+          id text primary key,
+          telegram_id text not null unique,
+          telegram_username text,
+          chat_id text not null,
+          first_name text,
+          last_name text,
+          language_code text,
+          linked_user_id text unique,
+          is_linked integer not null default 0,
+          first_seen_at text not null,
+          last_seen_at text not null,
+          created_at text not null,
+          updated_at text not null
+        )`,
+      );
+
+      await execute(
+        `create table if not exists telegram_verification_codes (
+          id text primary key,
+          telegram_id text not null,
+          telegram_username text,
+          telegram_chat_id text not null,
+          purpose text not null,
+          username text not null,
+          email text not null,
+          password_hash_temp text not null,
+          code_hash text not null,
+          expires_at text not null,
+          attempts integer not null default 0,
+          resend_count integer not null default 0,
+          last_sent_at text not null,
+          resend_window_started_at text not null,
+          verified_at text,
+          consumed_at text,
+          ip text not null,
+          country text,
+          user_agent text,
+          created_at text not null
+        )`,
+      );
+
+      await execute(
+        `create table if not exists telegram_users (
+          telegram_username text primary key,
+          telegram_chat_id text not null,
+          first_name text,
+          last_name text,
+          last_seen_at text not null,
+          created_at text not null
+        )`,
+      );
+
+      await execute(
+        `create table if not exists telegram_verifications (
+          id text primary key,
+          username text not null,
+          email text not null,
+          password_hash_temp text not null,
+          telegram_username text not null,
+          telegram_chat_id text not null,
+          code_hash text not null,
+          expires_at text not null,
+          attempts integer not null default 0,
+          resend_count integer not null default 0,
+          last_sent_at text not null,
+          resend_window_started_at text not null,
+          verified_at text,
+          consumed_at text,
+          ip text not null,
+          country text,
+          user_agent text,
+          created_at text not null
         )`,
       );
 
@@ -2659,6 +3410,15 @@ export async function ensureDatabase() {
       );
 
       await execute(
+        `create table if not exists system_settings (
+          key text primary key,
+          value text not null,
+          updated_by text,
+          updated_at text not null
+        )`,
+      );
+
+      await execute(
         `create table if not exists security_audit_events (
           id text primary key,
           event_type text not null,
@@ -2676,6 +3436,10 @@ export async function ensureDatabase() {
       );
 
       await ensureColumn("withdrawal_requests", "telegram_chat_id text");
+      await ensureColumn("profiles", "telegram_chat_id text");
+      await ensureColumn("profiles", "telegram_verified integer not null default 0");
+      await ensureColumn("profiles", "telegram_verified_at text");
+      await ensureColumn("profiles", "telegram_linked_at text");
       await ensureColumn("withdrawal_requests", "telegram_message_id text");
       await ensureColumn(
         "withdrawal_requests",
@@ -2782,6 +3546,12 @@ export async function ensureDatabase() {
       );
       await execute(
         "update products set showcase_rotation_seconds = 12 where showcase_rotation_seconds is null or showcase_rotation_seconds <= 0",
+      );
+      await execute(
+        "update profiles set telegram_verified = coalesce(verified, 0) where telegram_verified is null",
+      );
+      await execute(
+        "create unique index if not exists idx_profiles_telegram_id on profiles(telegram_id) where telegram_id is not null",
       );
 
       if (shouldAutoSeedDatabase()) {
@@ -2951,17 +3721,27 @@ export async function getMarketplaceFacets() {
   };
 }
 
-export async function registerUser(input: {
+export async function createTelegramVerificationChallenge(input: {
   username: string;
   email: string;
   telegramUsername: string;
   password: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
 }) {
   await ensureDatabase();
 
   const username = normalizeUsername(input.username);
-  const email = input.email.trim().toLowerCase();
+  const email = normalizeEmail(input.email);
   const telegramUsername = normalizeTelegramUsername(input.telegramUsername);
+
+  console.info("[telegram-registration] Send code requested.", {
+    username,
+    email,
+    enteredTelegramUsername: input.telegramUsername,
+    normalizedTelegramUsername: telegramUsername,
+  });
 
   if (username.length < 3) {
     throw new Error("Username must be at least 3 characters.");
@@ -2975,29 +3755,352 @@ export async function registerUser(input: {
     throw new Error("Telegram username must start with @ and use 5-32 valid characters.");
   }
 
-  const [existingUser, existingEmail, existingTelegram] = await Promise.all([
-    queryOne("select id from users where username = ? limit 1", [username]),
-    queryOne("select id from users where email = ? limit 1", [email]),
-    queryOne("select user_id from profiles where telegram_username = ? limit 1", [
+  assertPasswordStrength(input.password);
+  const telegramIdentity = await getTelegramIdentityRowByUsername(telegramUsername);
+
+  console.info("[telegram-registration] Telegram identity lookup finished.", {
+    normalizedTelegramUsername: telegramUsername,
+    identityFound: Boolean(telegramIdentity),
+    hasChatId: Boolean(telegramIdentity?.chat_id),
+  });
+
+  if (!telegramIdentity?.chat_id) {
+    throw new Error(
+      `Please open @${TELEGRAM_BOT_USERNAME.replace(/^@/, "")} and press Start before requesting a code.`,
+    );
+  }
+
+  const telegramId = normalizeTelegramNumericId(telegramIdentity.telegram_id);
+
+  if (!telegramId) {
+    throw new Error("Telegram verification is missing a valid Telegram identity.");
+  }
+
+  if (telegramIdentity.linked_user_id || Number(telegramIdentity.is_linked ?? 0) === 1) {
+    throw new Error("This Telegram account is already connected to another account.");
+  }
+
+  await assertRegistrationAvailability({
+    username,
+    email,
+    telegramUsername,
+    telegramId,
+  });
+
+  const timestamp = nowIso();
+  const nowMs = Date.now();
+  const chatId = String(telegramIdentity.chat_id);
+  const passwordHashTemp = hashPassword(input.password);
+  const code = createVerificationCode();
+  const codeHash = hashVerificationCode(code);
+  const expiresAt = new Date(
+    nowMs + TELEGRAM_VERIFICATION_TTL_MINUTES * 60 * 1000,
+  ).toISOString();
+  const existingVerification = await queryOne(
+    `select * from telegram_verification_codes
+     where username = ?
+       and email = ?
+       and purpose = ?
+       and telegram_id = ?
+       and telegram_username = ?
+       and consumed_at is null
+       and verified_at is null
+     order by created_at desc
+     limit 1`,
+    [
+      username,
+      email,
+      TELEGRAM_VERIFICATION_PURPOSE_REGISTRATION,
+      telegramId,
       telegramUsername,
-    ]),
-  ]);
+    ],
+  );
 
-  if (existingUser) {
-    throw new Error("This username is already taken.");
+  let verificationId: string = randomUUID();
+  let resendCount = 0;
+  let resendWindowStartedAt = timestamp;
+
+  if (existingVerification) {
+    verificationId = String(existingVerification.id);
+    const lastSentAtMs = new Date(String(existingVerification.last_sent_at)).getTime();
+    const cooldownEndsAtMs =
+      lastSentAtMs + TELEGRAM_VERIFICATION_RESEND_COOLDOWN_SECONDS * 1000;
+
+    if (Number.isFinite(cooldownEndsAtMs) && cooldownEndsAtMs > nowMs) {
+      const retryAfter = Math.max(
+        1,
+        Math.ceil((cooldownEndsAtMs - nowMs) / 1000),
+      );
+      throw new Error(`Please wait ${retryAfter} seconds before requesting a new code.`);
+    }
+
+    const existingWindowStart = existingVerification.resend_window_started_at
+      ? new Date(String(existingVerification.resend_window_started_at)).getTime()
+      : Number.NaN;
+    const windowStillActive =
+      Number.isFinite(existingWindowStart) &&
+      existingWindowStart + 60 * 60 * 1000 > nowMs;
+
+    resendWindowStartedAt = windowStillActive
+      ? String(existingVerification.resend_window_started_at)
+      : timestamp;
+    resendCount = windowStillActive ? Number(existingVerification.resend_count ?? 0) : 0;
+
+    if (resendCount >= TELEGRAM_VERIFICATION_MAX_RESENDS_PER_HOUR) {
+      throw new Error("Too many verification sends. Please wait before trying again.");
+    }
+
+    resendCount += 1;
+
+    await execute(
+      `update telegram_verification_codes set
+        password_hash_temp = ?,
+        telegram_id = ?,
+        telegram_username = ?,
+        telegram_chat_id = ?,
+        code_hash = ?,
+        expires_at = ?,
+        attempts = 0,
+        resend_count = ?,
+        last_sent_at = ?,
+        resend_window_started_at = ?,
+        verified_at = null,
+        consumed_at = null,
+        ip = ?,
+        country = ?,
+        user_agent = ?,
+        created_at = ?
+       where id = ?`,
+      [
+        passwordHashTemp,
+        telegramId,
+        telegramUsername,
+        chatId,
+        codeHash,
+        expiresAt,
+        resendCount,
+        timestamp,
+        resendWindowStartedAt,
+        input.ipAddress,
+        input.country,
+        input.userAgent,
+        timestamp,
+        verificationId,
+      ],
+    );
+  } else {
+    await execute(
+      `insert into telegram_verification_codes (
+        id, telegram_id, telegram_username, telegram_chat_id, purpose,
+        username, email, password_hash_temp, code_hash, expires_at, attempts, resend_count,
+        last_sent_at, resend_window_started_at, verified_at, consumed_at,
+        ip, country, user_agent, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        verificationId,
+        telegramId,
+        telegramUsername,
+        chatId,
+        TELEGRAM_VERIFICATION_PURPOSE_REGISTRATION,
+        username,
+        email,
+        passwordHashTemp,
+        codeHash,
+        expiresAt,
+        0,
+        1,
+        timestamp,
+        timestamp,
+        null,
+        null,
+        input.ipAddress,
+        input.country,
+        input.userAgent,
+        timestamp,
+      ],
+    );
   }
 
-  if (existingEmail) {
-    throw new Error("This email is already connected to another account.");
+  try {
+    await sendTelegramUserMessage(
+      chatId,
+      buildVerificationCodeTelegramMessage(code),
+    );
+  } catch (error) {
+    console.error("[telegram-registration] Telegram sendMessage failed.", {
+      normalizedTelegramUsername: telegramUsername,
+      identityFound: true,
+      hasChatId: Boolean(chatId),
+      chatId,
+      error:
+        error instanceof Error ? error.message : "Unknown Telegram sendMessage error.",
+    });
+    throw new Error(
+      error instanceof Error
+        ? "Unable to send a Telegram code right now. Please check that you started the bot and try again."
+        : "Unable to send a Telegram code right now.",
+    );
   }
 
-  if (existingTelegram) {
-    throw new Error("This Telegram username is already connected to another account.");
+  return {
+    verificationId,
+    expiresAt,
+    resendCooldownSeconds: TELEGRAM_VERIFICATION_RESEND_COOLDOWN_SECONDS,
+  };
+}
+
+export async function completeTelegramRegistrationVerification(input: {
+  verificationId: string;
+  code: string;
+}) {
+  await ensureDatabase();
+
+  const verification = await getTelegramVerificationCodeRowById(input.verificationId);
+
+  if (!verification) {
+    throw new Error("Verification request not found. Request a new code.");
   }
+
+  if (verification.consumed_at || verification.verified_at) {
+    throw new Error("This verification code has already been used.");
+  }
+
+  if (new Date(String(verification.expires_at)).getTime() <= Date.now()) {
+    throw new Error("This verification code has expired. Request a new one.");
+  }
+
+  const attempts = Number(verification.attempts ?? 0);
+
+  if (attempts >= TELEGRAM_VERIFICATION_MAX_ATTEMPTS) {
+    throw new Error("Too many invalid attempts. Request a new verification code.");
+  }
+
+  const normalizedCode = String(input.code ?? "").trim();
+
+  if (!/^\d{6}$/.test(normalizedCode)) {
+    throw new Error("Enter the 6-digit verification code.");
+  }
+
+  const codeHash = hashVerificationCode(normalizedCode);
+
+  if (codeHash !== String(verification.code_hash)) {
+    await execute(
+      "update telegram_verification_codes set attempts = attempts + 1 where id = ?",
+      [input.verificationId],
+    );
+    throw new Error("Invalid verification code.");
+  }
+
+  const username = String(verification.username);
+  const email = String(verification.email);
+  const telegramUsername = String(verification.telegram_username);
+  const telegramId = normalizeTelegramNumericId(verification.telegram_id);
+  const telegramChatId = String(verification.telegram_chat_id);
+  const verifiedAt = nowIso();
+
+  const identity = await getTelegramIdentityRowByTelegramId(telegramId);
+
+  if (!identity?.chat_id) {
+    throw new Error("Telegram identity is no longer linked. Press Start in the bot again.");
+  }
+
+  if (identity.linked_user_id || Number(identity.is_linked ?? 0) === 1) {
+    throw new Error("This Telegram account is already connected to another account.");
+  }
+
+  await assertRegistrationAvailability({
+    username,
+    email,
+    telegramUsername,
+    telegramId,
+    ignoreVerificationId: input.verificationId,
+  });
+
+  const userId = await registerUser({
+    username,
+    email,
+    telegramUsername,
+    passwordHash: String(verification.password_hash_temp),
+    telegramId,
+    telegramChatId,
+    telegramVerifiedAt: verifiedAt,
+    telegramLinkedAt: verifiedAt,
+  });
+
+  await execute(
+    `update telegram_verification_codes set
+      verified_at = ?,
+      consumed_at = ?
+     where id = ?`,
+    [verifiedAt, verifiedAt, input.verificationId],
+  );
+
+  await execute(
+    `update telegram_identities set
+      linked_user_id = ?,
+      is_linked = 1,
+      telegram_username = ?,
+      chat_id = ?,
+      last_seen_at = ?,
+      updated_at = ?
+     where telegram_id = ?`,
+    [userId, telegramUsername, telegramChatId, verifiedAt, verifiedAt, telegramId],
+  );
+
+  return {
+    userId,
+    username,
+    email,
+    telegramUsername,
+  };
+}
+
+export async function registerUser(input: {
+  username: string;
+  email: string;
+  telegramUsername: string;
+  password?: string;
+  passwordHash?: string;
+  telegramId?: string | null;
+  telegramChatId?: string | null;
+  telegramVerifiedAt?: string | null;
+  telegramLinkedAt?: string | null;
+}) {
+  await ensureDatabase();
+
+  const username = normalizeUsername(input.username);
+  const email = normalizeEmail(input.email);
+  const telegramUsername = normalizeTelegramUsername(input.telegramUsername);
+  const telegramId = normalizeTelegramNumericId(input.telegramId);
+
+  if (username.length < 3) {
+    throw new Error("Username must be at least 3 characters.");
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error("Enter a valid email address.");
+  }
+
+  if (!isValidTelegramUsername(telegramUsername)) {
+    throw new Error("Telegram username must start with @ and use 5-32 valid characters.");
+  }
+
+  await assertRegistrationAvailability({
+    username,
+    email,
+    telegramUsername,
+    telegramId: telegramId || null,
+  });
 
   const userId = randomUUID();
   const timestamp = nowIso();
-  const passwordHash = hashPassword(input.password);
+  const passwordHash =
+    input.passwordHash ??
+    (input.password ? hashPassword(input.password) : null);
+
+  if (!passwordHash) {
+    throw new Error("Password is required.");
+  }
 
   await execute(
     `insert into users (
@@ -3018,9 +4121,24 @@ export async function registerUser(input: {
 
   await execute(
     `insert into profiles (
-      user_id, role, telegram_username, telegram_id, withdrawal_wallet, verified, created_at, updated_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [userId, "user", telegramUsername, null, null, 1, timestamp, timestamp],
+      user_id, role, telegram_username, telegram_id, telegram_chat_id,
+      telegram_verified, telegram_verified_at, telegram_linked_at, withdrawal_wallet,
+      verified, created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      userId,
+      "user",
+      telegramUsername,
+      telegramId || null,
+      input.telegramChatId ?? null,
+      1,
+      input.telegramVerifiedAt ?? timestamp,
+      input.telegramLinkedAt ?? input.telegramVerifiedAt ?? timestamp,
+      null,
+      1,
+      timestamp,
+      timestamp,
+    ],
   );
 
   await execute(
@@ -3041,6 +4159,7 @@ export async function authenticateUser(input: {
 
   const row = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
       profiles.withdrawal_wallet, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
@@ -3106,6 +4225,7 @@ export async function getUserBySessionToken(token: string) {
   await ensureDatabase();
   const row = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
       profiles.withdrawal_wallet, profiles.verified, sessions.expires_at
      from sessions
      inner join users on users.id = sessions.user_id
@@ -3155,6 +4275,13 @@ export async function updateUserProfile(
   await ensureDatabase();
 
   const telegramUsername = normalizeTelegramUsername(input.telegramUsername);
+  const currentUserRow = await getUserRowById(userId);
+
+  if (!currentUserRow) {
+    throw new Error("User not found.");
+  }
+
+  const currentUser = normalizeUser(currentUserRow);
 
   if (!isValidTelegramUsername(telegramUsername)) {
     throw new Error("Telegram username must start with @ and use 5-32 valid characters.");
@@ -3170,6 +4297,60 @@ export async function updateUserProfile(
   }
 
   const timestamp = nowIso();
+  const linkedTelegramIdentity = await getTelegramIdentityRowByUsername(telegramUsername);
+  const telegramIdentityChanged = currentUser.telegramUsername !== telegramUsername;
+
+  if (
+    linkedTelegramIdentity?.linked_user_id &&
+    String(linkedTelegramIdentity.linked_user_id) !== userId
+  ) {
+    throw new Error("This Telegram account is already connected to another account.");
+  }
+
+  if (
+    currentUser.telegramId &&
+    linkedTelegramIdentity?.telegram_id &&
+    normalizeTelegramNumericId(linkedTelegramIdentity.telegram_id) &&
+    normalizeTelegramNumericId(linkedTelegramIdentity.telegram_id) !== currentUser.telegramId
+  ) {
+    throw new Error(
+      "This Telegram account is already linked elsewhere. Press Start in the bot with your original Telegram account.",
+    );
+  }
+
+  if (telegramIdentityChanged && currentUser.telegramVerified && !linkedTelegramIdentity) {
+    throw new Error(
+      "Press Start in @rebohrome_bot from your Telegram account before changing the Telegram binding.",
+    );
+  }
+
+  const telegramChatId = linkedTelegramIdentity?.chat_id
+    ? String(linkedTelegramIdentity.chat_id)
+    : telegramIdentityChanged
+      ? null
+      : currentUser.telegramChatId;
+  const telegramId = linkedTelegramIdentity?.telegram_id
+    ? normalizeTelegramNumericId(linkedTelegramIdentity.telegram_id)
+    : telegramIdentityChanged
+      ? null
+      : currentUser.telegramId;
+  const telegramVerified = linkedTelegramIdentity
+    ? 1
+    : telegramIdentityChanged
+      ? 0
+      : currentUser.telegramVerified
+        ? 1
+        : 0;
+  const telegramVerifiedAt = linkedTelegramIdentity
+    ? timestamp
+    : telegramIdentityChanged
+      ? null
+      : currentUser.telegramVerifiedAt;
+  const telegramLinkedAt = linkedTelegramIdentity
+    ? timestamp
+    : telegramIdentityChanged
+      ? null
+      : null;
 
   await execute("update users set name = ?, updated_at = ? where id = ?", [
     input.name.trim() || "Collector",
@@ -3179,18 +4360,151 @@ export async function updateUserProfile(
 
   await execute(
     `update profiles set
-      telegram_username = ?, telegram_id = ?, withdrawal_wallet = ?, updated_at = ?
+      telegram_username = ?, telegram_id = ?, telegram_chat_id = ?, telegram_verified = ?,
+      telegram_verified_at = ?, telegram_linked_at = ?,
+      withdrawal_wallet = ?, verified = ?, updated_at = ?
      where user_id = ?`,
     [
       telegramUsername,
-      input.telegramId.trim() || null,
+      telegramId,
+      telegramChatId,
+      telegramVerified,
+      telegramVerifiedAt,
+      telegramLinkedAt,
       input.withdrawalWallet.trim() || null,
+      telegramVerified,
       timestamp,
       userId,
     ],
   );
 
+  if (linkedTelegramIdentity) {
+    await execute(
+      `update telegram_identities set
+        linked_user_id = ?,
+        is_linked = ?,
+        telegram_username = ?,
+        chat_id = ?,
+        updated_at = ?
+       where telegram_id = ?`,
+      [
+        userId,
+        telegramVerified,
+        telegramUsername,
+        telegramChatId ?? String(linkedTelegramIdentity.chat_id),
+        timestamp,
+        normalizeTelegramNumericId(linkedTelegramIdentity.telegram_id),
+      ],
+    );
+  }
+
   revalidatePrivate(userId);
+}
+
+export async function updateUserEmailAddress(input: {
+  userId: string;
+  currentPassword: string;
+  newEmail: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+
+  const userRow = await queryOne(
+    `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
+      profiles.withdrawal_wallet, profiles.verified
+     from users
+     inner join profiles on profiles.user_id = users.id
+     where users.id = ?
+     limit 1`,
+    [input.userId],
+  );
+
+  if (!userRow) {
+    throw new Error("User not found.");
+  }
+
+  if (!verifyPassword(input.currentPassword, String(userRow.password_hash))) {
+    throw new Error("Current password is incorrect.");
+  }
+
+  const nextEmail = normalizeEmail(input.newEmail);
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmail)) {
+    throw new Error("Enter a valid email address.");
+  }
+
+  const currentUser = normalizeUser(userRow);
+
+  if (nextEmail === currentUser.email) {
+    throw new Error("Enter a new email address.");
+  }
+
+  const existingOwner = await queryOne(
+    "select id from users where email = ? and id <> ? limit 1",
+    [nextEmail, input.userId],
+  );
+
+  if (existingOwner) {
+    throw new Error("This email is already connected to another account.");
+  }
+
+  await execute("update users set email = ?, updated_at = ? where id = ?", [
+    nextEmail,
+    input.timestamp,
+    input.userId,
+  ]);
+
+  await trackUserEmailChanged({
+    eventType: "user_email_changed",
+    userId: currentUser.id,
+    username: currentUser.username,
+    telegramUsername: currentUser.telegramUsername,
+    role: currentUser.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp: input.timestamp,
+  });
+
+  if (currentUser.telegramChatId) {
+    const chatId = currentUser.telegramChatId;
+    await notifySafely(() =>
+      sendTelegramUserMessage(
+        chatId,
+        buildUserEmailChangedTelegramMessage({
+          oldEmail: currentUser.email,
+          newEmail: nextEmail,
+        }),
+      ),
+    );
+  }
+
+  await sendSecurityTelegramNotification(
+    buildUserEmailChangedAdminTelegramMessage({
+      username: currentUser.username,
+      telegramUsername: currentUser.telegramUsername,
+      oldEmail: currentUser.email,
+      newEmail: nextEmail,
+      ipAddress: input.ipAddress,
+      country: input.country,
+      userAgent: input.userAgent,
+      language: input.language,
+      timestamp: input.timestamp,
+    }),
+  );
+
+  revalidatePrivate(input.userId);
+
+  const refreshedUserRow = await getUserRowById(input.userId);
+  return refreshedUserRow ? normalizeUser(refreshedUserRow) : null;
 }
 
 export async function getDashboardStats(userId: string): Promise<DashboardStat[]> {
@@ -3579,7 +4893,7 @@ export async function createWithdrawalRequest(input: {
 
   if (account.balance.available < input.amount) {
     await notifySafely(() =>
-      sendTelegramNotification(
+      sendTelegramAdminMessage(
         buildTelegramFailureMessage({
           title: "Balance Validation Failed",
           username: account.user.username,
@@ -5739,6 +7053,7 @@ export async function getAdminUsers() {
   await ensureDatabase();
   const rows = await queryMany(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
       profiles.withdrawal_wallet, profiles.verified,
       balances.available, balances.pending_withdrawal, balances.total_deposited,
       balances.total_spent, balances.total_withdrawn, balances.updated_at as balance_updated_at
@@ -5765,6 +7080,7 @@ export async function getAdminUsers() {
 async function getAdminUserEntryById(userId: string) {
   const row = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
       profiles.withdrawal_wallet, profiles.verified,
       balances.available, balances.pending_withdrawal, balances.total_deposited,
       balances.total_spent, balances.total_withdrawn, balances.updated_at as balance_updated_at
@@ -5838,6 +7154,33 @@ export async function updateAdminManagedUser(input: {
   }
 
   const timestamp = nowIso();
+  const linkedTelegramIdentity = await getTelegramIdentityRowByUsername(telegramUsername);
+  const telegramIdentityChanged =
+    currentEntry.user.telegramUsername !== telegramUsername;
+
+  if (
+    linkedTelegramIdentity?.linked_user_id &&
+    String(linkedTelegramIdentity.linked_user_id) !== input.userId
+  ) {
+    throw new Error("This Telegram account is already connected to another account.");
+  }
+
+  const nextTelegramChatId = linkedTelegramIdentity?.chat_id
+    ? String(linkedTelegramIdentity.chat_id)
+    : telegramIdentityChanged
+      ? null
+      : currentEntry.user.telegramChatId;
+  const nextTelegramId = linkedTelegramIdentity?.telegram_id
+    ? normalizeTelegramNumericId(linkedTelegramIdentity.telegram_id)
+    : telegramIdentityChanged
+      ? null
+      : currentEntry.user.telegramId;
+  const nextTelegramVerifiedAt = input.verified
+    ? currentEntry.user.telegramVerifiedAt ?? timestamp
+    : null;
+  const nextTelegramLinkedAt = input.verified
+    ? currentEntry.user.telegramVerifiedAt ?? timestamp
+    : null;
 
   await execute("update users set name = ?, status = ?, updated_at = ? where id = ?", [
     input.name.trim() || currentEntry.user.name || "Collector",
@@ -5848,19 +7191,44 @@ export async function updateAdminManagedUser(input: {
 
   await execute(
     `update profiles set
-      role = ?, telegram_username = ?, telegram_id = ?, withdrawal_wallet = ?,
+      role = ?, telegram_username = ?, telegram_id = ?, telegram_chat_id = ?,
+      telegram_verified = ?, telegram_verified_at = ?, telegram_linked_at = ?, withdrawal_wallet = ?,
       verified = ?, updated_at = ?
      where user_id = ?`,
     [
       input.role,
       telegramUsername,
-      input.telegramId.trim() || null,
+      nextTelegramId,
+      nextTelegramChatId,
+      input.verified ? 1 : 0,
+      nextTelegramVerifiedAt,
+      nextTelegramLinkedAt,
       input.withdrawalWallet.trim() || null,
       input.verified ? 1 : 0,
       timestamp,
       input.userId,
     ],
   );
+
+  if (linkedTelegramIdentity) {
+    await execute(
+      `update telegram_identities set
+        linked_user_id = ?,
+        is_linked = ?,
+        telegram_username = ?,
+        chat_id = ?,
+        updated_at = ?
+       where telegram_id = ?`,
+      [
+        input.userId,
+        input.verified ? 1 : 0,
+        telegramUsername,
+        nextTelegramChatId ?? String(linkedTelegramIdentity.chat_id),
+        timestamp,
+        normalizeTelegramNumericId(linkedTelegramIdentity.telegram_id),
+      ],
+    );
+  }
 
   await logAdminAction(
     input.adminUserId,

@@ -1,0 +1,22 @@
+
+> rebohrome-site@0.1.0 start
+> next start --hostname 127.0.0.1 --port 3038
+
+   ▲ Next.js 15.5.18
+   - Local:        http://127.0.0.1:3038
+   - Network:      http://127.0.0.1:3038
+
+ ✓ Starting...
+ ✓ Ready in 946ms
+[telegram-registration] Send code requested. {
+  username: 'qa_reg_227685',
+  email: 'qa_reg_227685@example.com',
+  enteredTelegramUsername: '@qa_bind_25227685',
+  normalizedTelegramUsername: '@qa_bind_25227685'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@qa_bind_25227685',
+  identityFound: true,
+  hasChatId: true
+}
+Skipped TransVoucher webhook with invalid signature.

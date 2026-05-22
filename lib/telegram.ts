@@ -1,6 +1,9 @@
 import "server-only";
 
-import { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID } from "@/lib/server-config";
+import {
+  ADMIN_TELEGRAM_CHAT_ID,
+  TELEGRAM_BOT_TOKEN,
+} from "@/lib/server-config";
 
 export type TelegramInlineButton = {
   text: string;
@@ -23,6 +26,22 @@ export type TelegramMessageResult = {
 
 export type TelegramUpdate = {
   update_id: number;
+  message?: {
+    message_id: number;
+    text?: string;
+    chat: {
+      id: number;
+      title?: string;
+      type?: string;
+    };
+    from?: {
+      id: number;
+      username?: string;
+      first_name?: string;
+      last_name?: string;
+      language_code?: string;
+    };
+  };
   callback_query?: {
     id: string;
     from: {
@@ -83,15 +102,29 @@ async function callTelegramApi<T>(method: string, body: Record<string, unknown>)
 
 export async function sendTelegramMessage(input: {
   text: string;
-  chatId?: string | number;
+  chatId: string | number;
   replyMarkup?: TelegramReplyMarkup;
 }) {
   return callTelegramApi<TelegramMessageResult>("sendMessage", {
-    chat_id: input.chatId ?? TELEGRAM_CHAT_ID,
+    chat_id: input.chatId,
     text: input.text,
     parse_mode: "HTML",
     disable_web_page_preview: true,
     reply_markup: input.replyMarkup,
+  });
+}
+
+export async function sendTelegramUserMessage(
+  chatId: string | number,
+  text: string,
+  options?: {
+    replyMarkup?: TelegramReplyMarkup;
+  },
+) {
+  return sendTelegramMessage({
+    chatId,
+    text,
+    replyMarkup: options?.replyMarkup,
   });
 }
 
@@ -130,7 +163,28 @@ export async function getTelegramUpdates(input?: {
   return callTelegramApi<TelegramUpdate[]>("getUpdates", {
     offset: input?.offset,
     timeout: input?.timeoutSeconds ?? 10,
-    allowed_updates: ["callback_query"],
+    allowed_updates: ["message", "callback_query"],
+  });
+}
+
+export async function sendTelegramAdminMessage(
+  message: string,
+  options?: {
+    replyMarkup?: TelegramReplyMarkup;
+  },
+) {
+  if (!ADMIN_TELEGRAM_CHAT_ID) {
+    return {
+      ok: false as const,
+      skipped: true as const,
+      result: null as TelegramMessageResult | null,
+    };
+  }
+
+  return sendTelegramMessage({
+    chatId: ADMIN_TELEGRAM_CHAT_ID,
+    text: message,
+    replyMarkup: options?.replyMarkup,
   });
 }
 
@@ -138,12 +192,7 @@ export async function sendTelegramNotification(
   message: string,
   options?: {
     replyMarkup?: TelegramReplyMarkup;
-    chatId?: string | number;
   },
 ) {
-  return sendTelegramMessage({
-    text: message,
-    replyMarkup: options?.replyMarkup,
-    chatId: options?.chatId,
-  });
+  return sendTelegramAdminMessage(message, options);
 }

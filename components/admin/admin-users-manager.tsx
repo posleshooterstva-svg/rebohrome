@@ -48,7 +48,7 @@ function createDraft(entry: AdminUserEntry): UserDraft {
     telegramUsername: entry.user.telegramUsername,
     telegramId: entry.user.telegramId ?? "",
     withdrawalWallet: entry.user.withdrawalWallet ?? "",
-    verified: entry.user.verified,
+    verified: entry.user.telegramVerified,
   };
 }
 
@@ -89,12 +89,15 @@ export function AdminUsersManager({ initialUsers }: AdminUsersManagerProps) {
         !normalizedQuery ||
         entry.user.username.toLowerCase().includes(normalizedQuery) ||
         entry.user.name.toLowerCase().includes(normalizedQuery) ||
+        entry.user.email.toLowerCase().includes(normalizedQuery) ||
         entry.user.telegramUsername.toLowerCase().includes(normalizedQuery);
       const roleMatch = roleFilter === "all" || entry.user.role === roleFilter;
       const statusMatch = statusFilter === "all" || entry.user.status === statusFilter;
       const verifiedMatch =
         verifiedFilter === "all" ||
-        (verifiedFilter === "verified" ? entry.user.verified : !entry.user.verified);
+        (verifiedFilter === "verified"
+          ? entry.user.telegramVerified
+          : !entry.user.telegramVerified);
 
       return queryMatch && roleMatch && statusMatch && verifiedMatch;
     });
@@ -197,11 +200,22 @@ export function AdminUsersManager({ initialUsers }: AdminUsersManagerProps) {
                       {entry.user.username}
                     </h3>
                     {entry.user.role === "admin" ? <Badge tone="sky">Admin</Badge> : <Badge tone="violet">Collector</Badge>}
-                    {entry.user.verified ? <Badge tone="emerald">Verified</Badge> : <Badge tone="amber">Pending</Badge>}
+                    {entry.user.telegramVerified ? <Badge tone="emerald">Telegram Verified</Badge> : <Badge tone="amber">Telegram Pending</Badge>}
                     {entry.user.status === "active" ? null : <Badge tone="rose">Suspended</Badge>}
                   </div>
                   <div className="mt-1 text-sm text-muted">{entry.user.name}</div>
-                  <div className="mt-2 text-sm text-muted">{entry.user.telegramUsername}</div>
+                  <div className="mt-2 text-sm text-muted">{entry.user.email}</div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-sm text-muted">
+                    <span>{entry.user.telegramUsername}</span>
+                    <span>·</span>
+                    <span>
+                      {entry.user.telegramVerified ? "Telegram verified" : "Telegram pending"}
+                    </span>
+                    <span>·</span>
+                    <span>
+                      {entry.user.telegramChatId ? "Chat linked" : "Chat not linked"}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="grid gap-2 text-sm text-muted sm:grid-cols-2">
@@ -218,6 +232,10 @@ export function AdminUsersManager({ initialUsers }: AdminUsersManagerProps) {
                         ? formatDisplayDateTime(entry.user.lastLoginAt)
                         : "No logins yet"
                     }
+                  />
+                  <InlineMeta
+                    label="Registered"
+                    value={formatDisplayDateTime(entry.user.createdAt)}
                   />
                 </div>
 
@@ -355,6 +373,7 @@ function AdminUserDrawer({
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <Field label="Profile Name" onChange={(value) => updateField("name", value)} value={draft.name} />
               <ReadOnlyField label="Username" value={entry.user.username} />
+              <ReadOnlyField label="Email" value={entry.user.email} />
               <SelectField
                 label="Role"
                 onChange={(value) => updateField("role", value as UserRecord["role"])}
@@ -396,11 +415,35 @@ function AdminUserDrawer({
             <div className="mt-4 space-y-3">
               <ToggleField
                 checked={draft.verified}
-                description="Use verification to signal trusted collector status across archive surfaces."
-                label="Verified Collector"
+                description="Telegram verification can be reviewed here, while bot chat linkage is displayed read-only below."
+                label="Telegram verified"
                 onChange={(value) => updateField("verified", value)}
               />
               <div className="grid gap-3 md:grid-cols-2">
+                <ReadOnlyField
+                  label="Telegram chat linked"
+                  value={entry.user.telegramChatId ? "Linked" : "Missing"}
+                />
+                <ReadOnlyField
+                  label="Telegram verified at"
+                  value={
+                    entry.user.telegramVerifiedAt
+                      ? formatDisplayDateTime(entry.user.telegramVerifiedAt)
+                      : "Not verified yet"
+                  }
+                />
+                <ReadOnlyField
+                  label="Registered"
+                  value={formatDisplayDateTime(entry.user.createdAt)}
+                />
+                <ReadOnlyField
+                  label="Last login"
+                  value={
+                    entry.user.lastLoginAt
+                      ? formatDisplayDateTime(entry.user.lastLoginAt)
+                      : "No logins yet"
+                  }
+                />
                 <ReadOnlyField label="Available balance" value={formatUsd(entry.balance.available)} />
                 <ReadOnlyField
                   label="Pending withdrawals"

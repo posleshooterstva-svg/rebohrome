@@ -5,18 +5,20 @@ import { z } from "zod";
 import {
   createProduct,
   deleteProduct,
+  getMaintenanceModeConfig,
   removeManagedProductImage,
   refreshTransVoucherTransactionStatus,
   retryWithdrawalTelegramSync,
-  saveUploadedImage,
   setHomepageFeaturedProduct,
+  updateMaintenanceModeConfig,
   updateAdminManagedUser,
   updateOrderStatus,
   updateProduct,
+  updateUserEmailAddress,
   updateUserProfile,
   updateWithdrawalStatus,
 } from "@/lib/db/repository";
-import { requireAdminSession, requireUserSession } from "@/lib/session";
+import { getRequestMeta, requireAdminSession, requireUserSession } from "@/lib/session";
 
 const productSchema = z.object({
   title: z.string().min(2),
@@ -45,6 +47,17 @@ const profileSchema = z.object({
   withdrawalWallet: z.string().optional(),
 });
 
+const emailUpdateSchema = z
+  .object({
+    email: z.string().email(),
+    confirmEmail: z.string().email(),
+    currentPassword: z.string().min(1),
+  })
+  .refine((value) => value.email === value.confirmEmail, {
+    message: "Email addresses do not match.",
+    path: ["confirmEmail"],
+  });
+
 const adminUserSchema = z.object({
   userId: z.string().min(1),
   name: z.string().min(2),
@@ -54,6 +67,15 @@ const adminUserSchema = z.object({
   telegramId: z.string().optional(),
   withdrawalWallet: z.string().optional(),
   verified: z.boolean(),
+});
+
+const maintenanceModeSchema = z.object({
+  enabled: z.boolean(),
+  title: z.string().max(120).optional(),
+  message: z.string().max(600).optional(),
+  estimatedReturnAt: z.string().optional(),
+  internalNote: z.string().max(300).optional(),
+  redirectTo: z.string().optional(),
 });
 
 const statusSchema = z.object({
@@ -85,6 +107,27 @@ function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
+function normalizeOptionalText(value: string) {
+  const next = value.trim();
+  return next.length > 0 ? next : undefined;
+}
+
+function normalizeDateTimeInput(value: string) {
+  const next = value.trim();
+
+  if (!next) {
+    return null;
+  }
+
+  const parsed = new Date(next);
+
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("Enter a valid estimated return time.");
+  }
+
+  return parsed.toISOString();
+}
+
 function parseProductForm(formData: FormData) {
   return productSchema.parse({
     title: readString(formData, "title"),
@@ -112,20 +155,39 @@ async function resolveProductImageChange(formData: FormData) {
   const currentImagePath = readString(formData, "currentImagePath") || null;
   const currentImageUpdatedAt = readString(formData, "currentImageUpdatedAt") || null;
   const removeImage = readBoolean(formData, "removeImage");
-  const imageValue = formData.get("image");
-  const imageFile =
-    imageValue instanceof File && imageValue.size > 0 ? imageValue : null;
-  const uploadedImage = imageFile ? await saveUploadedImage(imageFile) : null;
+  const nextImageUrl = readString(formData, "imageUrl") || null;
+  const nextImagePath = readString(formData, "imagePath") || null;
+  const nextImageUpdatedAt = readString(formData, "imageUpdatedAt") || null;
+  const imageUploadState = readString(formData, "imageUploadState");
+
+  if (imageUploadState === "uploading") {
+    throw new Error("Wait for the image upload to finish before saving.");
+  }
+
+  if (imageUploadState === "error") {
+    throw new Error("Fix the image upload before saving this product.");
+  }
+
+  const hasReplacementImage = Boolean(nextImageUrl || nextImagePath);
 
   return {
     currentImageUrl,
     currentImagePath,
-    uploadedImage,
-    imageUrl: uploadedImage?.imageUrl ?? (removeImage ? null : currentImageUrl),
-    imagePath: uploadedImage?.imagePath ?? (removeImage ? null : currentImagePath),
-    imageUpdatedAt:
-      uploadedImage?.imageUpdatedAt ??
-      (removeImage ? new Date().toISOString() : currentImageUpdatedAt),
+    uploadedImage:
+      hasReplacementImage && nextImagePath && nextImagePath !== currentImagePath
+        ? {
+            imageUrl: nextImageUrl ?? "",
+            imagePath: nextImagePath,
+            imageUpdatedAt: nextImageUpdatedAt ?? new Date().toISOString(),
+          }
+        : null,
+    imageUrl: hasReplacementImage ? nextImageUrl : removeImage ? null : currentImageUrl,
+    imagePath: hasReplacementImage ? nextImagePath : removeImage ? null : currentImagePath,
+    imageUpdatedAt: hasReplacementImage
+      ? nextImageUpdatedAt ?? new Date().toISOString()
+      : removeImage
+        ? new Date().toISOString()
+        : currentImageUpdatedAt,
   };
 }
 
@@ -172,8 +234,52 @@ export async function saveProfileAction(formData: FormData) {
   redirect("/dashboard/settings?saved=1");
 }
 
+export async function changeEmailAction(formData: FormData) {
+  const session = await requireUserSession("/login");
+
+  let values: z.infer<typeof emailUpdateSchema>;
+
+  try {
+    values = emailUpdateSchema.parse({
+      email: readString(formData, "email"),
+      confirmEmail: readString(formData, "confirmEmail"),
+      currentPassword: readString(formData, "currentPassword"),
+    });
+  } catch (error) {
+    redirect(
+      `/dashboard/settings?emailError=${encodeURIComponent(
+        getErrorMessage(error, "Unable to update email."),
+      )}`,
+    );
+  }
+
+  try {
+    const meta = await getRequestMeta("/dashboard/settings");
+    await updateUserEmailAddress({
+      userId: session.userId,
+      currentPassword: values.currentPassword,
+      newEmail: values.email,
+      ipAddress: meta.ipAddress,
+      country: meta.country,
+      userAgent: meta.userAgent,
+      language: meta.language,
+      route: meta.route,
+      timestamp: meta.timestamp,
+    });
+  } catch (error) {
+    redirect(
+      `/dashboard/settings?emailError=${encodeURIComponent(
+        getErrorMessage(error, "Unable to update email."),
+      )}`,
+    );
+  }
+
+  redirect("/dashboard/settings?emailUpdated=1");
+}
+
 export async function createProductAction(formData: FormData) {
   const session = await requireAdminSession("/");
+  let values: ReturnType<typeof parseProductForm>;
   let uploadedImage:
     | {
         imageUrl: string;
@@ -181,14 +287,31 @@ export async function createProductAction(formData: FormData) {
         imageUpdatedAt: string;
       }
     | null = null;
-  let values: ReturnType<typeof parseProductForm>;
 
   try {
     values = parseProductForm(formData);
-    const imageValue = formData.get("image");
-    const imageFile =
-      imageValue instanceof File && imageValue.size > 0 ? imageValue : null;
-    uploadedImage = imageFile ? await saveUploadedImage(imageFile) : null;
+    const imageUploadState = readString(formData, "imageUploadState");
+
+    if (imageUploadState === "uploading") {
+      throw new Error("Wait for the image upload to finish before publishing.");
+    }
+
+    if (imageUploadState === "error") {
+      throw new Error("Fix the artwork upload before publishing.");
+    }
+
+    const imageUrl = readString(formData, "imageUrl");
+    const imagePath = readString(formData, "imagePath");
+    const imageUpdatedAt = readString(formData, "imageUpdatedAt");
+
+    uploadedImage =
+      imageUrl || imagePath
+        ? {
+            imageUrl,
+            imagePath,
+            imageUpdatedAt: imageUpdatedAt || new Date().toISOString(),
+          }
+        : null;
   } catch (error) {
     redirect(
       `/admin/upload?error=${encodeURIComponent(
@@ -474,6 +597,82 @@ export async function retryWithdrawalTelegramSyncAction(formData: FormData) {
 
   await retryWithdrawalTelegramSync(withdrawalId, session.userId);
   redirect("/admin/users?telegramSynced=1");
+}
+
+export async function saveMaintenanceModeAction(formData: FormData) {
+  const session = await requireAdminSession("/");
+
+  let values: z.infer<typeof maintenanceModeSchema>;
+
+  try {
+    values = maintenanceModeSchema.parse({
+      enabled: readBoolean(formData, "enabled"),
+      title: readString(formData, "title"),
+      message: readString(formData, "message"),
+      estimatedReturnAt: readString(formData, "estimatedReturnAt"),
+      internalNote: readString(formData, "internalNote"),
+      redirectTo: readString(formData, "redirectTo"),
+    });
+  } catch (error) {
+    redirect(
+      `/admin/settings?error=${encodeURIComponent(
+        getErrorMessage(error, "Unable to update maintenance mode."),
+      )}`,
+    );
+  }
+
+  try {
+    const meta = await getRequestMeta("/admin/settings");
+    await updateMaintenanceModeConfig({
+      adminUserId: session.userId,
+      adminUsername: session.user.username,
+      enabled: values.enabled,
+      title: normalizeOptionalText(values.title ?? ""),
+      message: normalizeOptionalText(values.message ?? ""),
+      estimatedReturnAt: normalizeDateTimeInput(values.estimatedReturnAt ?? ""),
+      internalNote: normalizeOptionalText(values.internalNote ?? ""),
+      ipAddress: meta.ipAddress,
+      route: meta.route,
+    });
+  } catch (error) {
+    redirect(
+      `/admin/settings?error=${encodeURIComponent(
+        getErrorMessage(error, "Unable to update maintenance mode."),
+      )}`,
+    );
+  }
+
+  redirect("/admin/settings?saved=1");
+}
+
+export async function disableMaintenanceModeQuickAction(formData: FormData) {
+  const session = await requireAdminSession("/");
+  const redirectTo = readString(formData, "redirectTo") || "/";
+
+  try {
+    const meta = await getRequestMeta(redirectTo);
+    const currentConfig = await getMaintenanceModeConfig();
+
+    await updateMaintenanceModeConfig({
+      adminUserId: session.userId,
+      adminUsername: session.user.username,
+      enabled: false,
+      title: currentConfig.title,
+      message: currentConfig.message,
+      estimatedReturnAt: null,
+      internalNote: currentConfig.internalNote,
+      ipAddress: meta.ipAddress,
+      route: meta.route,
+    });
+  } catch (error) {
+    redirect(
+      `/admin/settings?error=${encodeURIComponent(
+        getErrorMessage(error, "Unable to disable maintenance mode."),
+      )}`,
+    );
+  }
+
+  redirect(redirectTo === "/maintenance" ? "/" : redirectTo);
 }
 
 export async function updateAdminUserInlineAction(

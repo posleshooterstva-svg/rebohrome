@@ -82,14 +82,14 @@ export async function DashboardShell({
     {
       id: "verification",
       label: "Verification",
-      status: user?.verified ? "Verified" : "Pending",
-      tone: user?.verified ? ("positive" as const) : ("warning" as const),
+      status: user?.telegramVerified ? "Verified" : "Pending",
+      tone: user?.telegramVerified ? ("positive" as const) : ("warning" as const),
     },
     {
       id: "telegram",
       label: "Telegram",
-      status: user?.telegramUsername || "Missing",
-      tone: user?.telegramUsername ? ("positive" as const) : ("warning" as const),
+      status: user?.telegramChatId ? "Chat Linked" : user?.telegramUsername ? "Awaiting Link" : "Missing",
+      tone: user?.telegramChatId ? ("positive" as const) : ("warning" as const),
     },
     {
       id: "wallet",
