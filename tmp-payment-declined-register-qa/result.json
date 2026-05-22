@@ -1,0 +1,19 @@
+{
+  "noTx": {
+    "url": "http://127.0.0.1:3035/payment/declined",
+    "statusText": "PAYMENT STATUS\n\nMissing payment reference.\n\nOpen this page from a failed or canceled payment attempt to review the payment state.\n\nReturn to checkout\nReturn to marketplace\nSign in to check status\nCookies & analytics\n\nReboHrome uses cookies, session storage, analytics, and security signals to protect accounts, improve authentication, and maintain platform performance. Review the full policy in Privacy Policy.\n\nAccept"
+  },
+  "invalidTxLoggedOut": {
+    "url": "http://127.0.0.1:3035/payment/declined?tx=invalid-tx",
+    "statusText": "PAYMENT STATUS\n\nPayment lookup unavailable.\n\nWe could not load a finalized payment record for this reference. You can return to checkout or sign in and refresh the status safely.\n\nTransaction ID\ninvalid-tx\nCurrent status\nUNKNOWN\nPayment kind\nunavailable\nRefresh payment status\nReturn to checkout\nReturn to marketplace\nSign in to check status\nCookies & analytics\n\nReboHrome uses cookies, session storage, analytics, and security signals to protect accounts, improve authentication, and maintain platform performance. Review the full policy in Privacy Policy.\n\nAccept"
+  },
+  "pendingTxLoggedIn": {
+    "url": "http://127.0.0.1:3035/payment/declined?tx=TXN-2026-SCDMX",
+    "statusText": "PAYMENT STATUS\n\nPayment status pending.\n\nWe have not finalized this payment yet. Refresh the payment status after a few moments if the provider has already shown a result.\n\nTransaction ID\nTXN-2026-SCDMX\nCurrent status\nPENDING\nPayment kind\ndeposit\nRefresh payment status\nReturn to checkout\nOpen dashboard\nCookies & analytics\n\nReboHrome uses cookies, session storage, analytics, and security signals to protect accounts, improve authentication, and maintain platform performance. Review the full policy in Privacy Policy.\n\nAccept"
+  },
+  "registerHasEmailField": 1,
+  "registeredUser": {
+    "id": "7a602ea0-63d9-405d-958d-d54ba6bce773",
+    "email": "qa_email_1779404287887@example.com"
+  }
+}

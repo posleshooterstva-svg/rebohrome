@@ -84,6 +84,18 @@ export default async function RegisterPage({
               </label>
               <label className="block">
                 <span className="mb-2 block text-sm font-medium text-foreground">
+                  Email
+                </span>
+                <input
+                  className="w-full rounded-2xl border border-line bg-panel px-4 py-3 text-sm text-foreground outline-none transition focus:border-[var(--accent)]"
+                  name="email"
+                  placeholder="collector@example.com"
+                  required
+                  type="email"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-foreground">
                   Telegram username
                 </span>
                 <input

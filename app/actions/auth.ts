@@ -47,6 +47,7 @@ async function setSessionCookie(token: string) {
 
 export async function registerAction(formData: FormData) {
   const username = String(formData.get("username") ?? "");
+  const email = String(formData.get("email") ?? "");
   const telegramUsername = String(formData.get("telegram_username") ?? "");
   const password = String(formData.get("password") ?? "");
   const confirmPassword = String(formData.get("confirm_password") ?? "");
@@ -63,6 +64,7 @@ export async function registerAction(formData: FormData) {
     const meta = await getRequestMeta("/register");
     const userId = await registerUser({
       username,
+      email,
       telegramUsername,
       password,
     });

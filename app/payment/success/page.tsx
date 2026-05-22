@@ -1,6 +1,4 @@
-import { redirect } from "next/navigation";
-import { getTransVoucherRedirectTarget } from "@/lib/db/repository";
-import { requireUserSession } from "@/lib/session";
+import { PaymentStatusRedirect } from "@/components/payment/payment-status-redirect";
 
 type PaymentSuccessRedirectPageProps = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -19,13 +17,24 @@ export default async function PaymentSuccessRedirectPage({
   const tx = getQueryValue(params.tx);
 
   if (!tx) {
-    redirect("/checkout");
+    return (
+      <PaymentStatusRedirect
+        description="We could not verify a payment reference from this return URL."
+        fallbackHref="/checkout"
+        fallbackLabel="Return to checkout"
+        title="Payment reference missing."
+        tx=""
+      />
+    );
   }
 
-  const session = await requireUserSession(
-    `/login?redirectTo=/payment/success?tx=${encodeURIComponent(tx)}`,
+  return (
+    <PaymentStatusRedirect
+      description="We are verifying the payment result and preparing your archive receipt."
+      fallbackHref="/dashboard"
+      fallbackLabel="Open dashboard"
+      title="Finalizing secure payment"
+      tx={tx}
+    />
   );
-  const target = await getTransVoucherRedirectTarget(tx, session.userId);
-
-  redirect(target ?? "/dashboard");
 }

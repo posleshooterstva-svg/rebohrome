@@ -2953,24 +2953,31 @@ export async function getMarketplaceFacets() {
 
 export async function registerUser(input: {
   username: string;
+  email: string;
   telegramUsername: string;
   password: string;
 }) {
   await ensureDatabase();
 
   const username = normalizeUsername(input.username);
+  const email = input.email.trim().toLowerCase();
   const telegramUsername = normalizeTelegramUsername(input.telegramUsername);
 
   if (username.length < 3) {
     throw new Error("Username must be at least 3 characters.");
   }
 
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error("Enter a valid email address.");
+  }
+
   if (!isValidTelegramUsername(telegramUsername)) {
     throw new Error("Telegram username must start with @ and use 5-32 valid characters.");
   }
 
-  const [existingUser, existingTelegram] = await Promise.all([
+  const [existingUser, existingEmail, existingTelegram] = await Promise.all([
     queryOne("select id from users where username = ? limit 1", [username]),
+    queryOne("select id from users where email = ? limit 1", [email]),
     queryOne("select user_id from profiles where telegram_username = ? limit 1", [
       telegramUsername,
     ]),
@@ -2978,6 +2985,10 @@ export async function registerUser(input: {
 
   if (existingUser) {
     throw new Error("This username is already taken.");
+  }
+
+  if (existingEmail) {
+    throw new Error("This email is already connected to another account.");
   }
 
   if (existingTelegram) {
@@ -2995,7 +3006,7 @@ export async function registerUser(input: {
     [
       userId,
       username,
-      buildPlaceholderEmail(username),
+      email,
       username,
       passwordHash,
       "active",
@@ -5123,6 +5134,50 @@ export async function refreshTransVoucherTransactionStatus(
   });
 }
 
+export async function getTransactionById(transactionId: string, userId?: string) {
+  await ensureDatabase();
+  const transactionRow = await queryOne(
+    userId
+      ? "select * from transactions where id = ? and user_id = ? limit 1"
+      : "select * from transactions where id = ? limit 1",
+    userId ? [transactionId, userId] : [transactionId],
+  );
+
+  return transactionRow ? normalizeTransaction(transactionRow) : null;
+}
+
+export function getTransactionResultTarget(transaction: TransactionRecord | null) {
+  if (!transaction) {
+    return null;
+  }
+
+  if (transaction.kind === "purchase") {
+    if (transaction.status === "completed") {
+      return `/success?order=${encodeURIComponent(transaction.referenceId)}`;
+    }
+
+    if (transaction.status === "failed") {
+      return `/checkout/declined?order=${encodeURIComponent(transaction.referenceId)}`;
+    }
+
+    return `/checkout?pending=${encodeURIComponent(transaction.referenceId)}`;
+  }
+
+  if (transaction.kind === "deposit") {
+    if (transaction.status === "completed") {
+      return `/dashboard/deposit?receipt=${encodeURIComponent(transaction.referenceId)}`;
+    }
+
+    if (transaction.status === "failed") {
+      return `/dashboard/deposit?failed=${encodeURIComponent(transaction.referenceId)}`;
+    }
+
+    return `/dashboard/deposit?pending=${encodeURIComponent(transaction.referenceId)}`;
+  }
+
+  return null;
+}
+
 function extractWebhookRecord(value: unknown) {
   if (!value || typeof value !== "object") {
     return {} as Record<string, unknown>;
@@ -5211,36 +5266,7 @@ export async function getTransVoucherRedirectTarget(
   userId?: string,
 ) {
   const transaction = await refreshTransVoucherTransactionStatus(transactionId, userId);
-
-  if (!transaction) {
-    return null;
-  }
-
-  if (transaction.kind === "purchase") {
-    if (transaction.status === "completed") {
-      return `/success?order=${encodeURIComponent(transaction.referenceId)}`;
-    }
-
-    if (transaction.status === "failed") {
-      return `/checkout/declined?order=${encodeURIComponent(transaction.referenceId)}`;
-    }
-
-    return `/checkout?pending=${encodeURIComponent(transaction.referenceId)}`;
-  }
-
-  if (transaction.kind === "deposit") {
-    if (transaction.status === "completed") {
-      return `/dashboard/deposit?receipt=${encodeURIComponent(transaction.referenceId)}`;
-    }
-
-    if (transaction.status === "failed") {
-      return `/dashboard/deposit?failed=${encodeURIComponent(transaction.referenceId)}`;
-    }
-
-    return `/dashboard/deposit?pending=${encodeURIComponent(transaction.referenceId)}`;
-  }
-
-  return null;
+  return getTransactionResultTarget(transaction);
 }
 
 export async function replaceUserCartItems(
