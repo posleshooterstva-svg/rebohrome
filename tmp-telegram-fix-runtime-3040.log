@@ -1,0 +1,119 @@
+
+> rebohrome-site@0.1.0 start
+> next start --hostname 127.0.0.1 --port 3040
+
+   ▲ Next.js 15.5.18
+   - Local:        http://127.0.0.1:3040
+   - Network:      http://127.0.0.1:3040
+
+ ✓ Starting...
+ ✓ Ready in 963ms
+Telegram notification failed Error: Telegram API sendMessage failed: {"ok":false,"error_code":400,"description":"Bad Request: chat not found"}
+    at e (D:\etsy_parser\rebohrome-site\.next\server\chunks\7350.js:1025:4850)
+    at async aI (D:\etsy_parser\rebohrome-site\.next\server\chunks\7350.js:77:6058)
+    at async a0 (D:\etsy_parser\rebohrome-site\.next\server\chunks\7350.js:167:522)
+    at async i (D:\etsy_parser\rebohrome-site\.next\server\app\api\telegram\webhook\route.js:1:7021)
+    at async k (D:\etsy_parser\rebohrome-site\.next\server\app\api\telegram\webhook\route.js:1:3771)
+    at async g (D:\etsy_parser\rebohrome-site\.next\server\app\api\telegram\webhook\route.js:1:4774)
+[telegram-registration] Send code requested. {
+  username: 'qa_bind_3040',
+  email: 'qa-bind-3040@example.com',
+  enteredTelegramUsername: '@QaBind3040',
+  normalizedTelegramUsername: '@qabind3040'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@qabind3040',
+  identityFound: true,
+  hasChatId: true
+}
+[telegram-registration] Telegram sendMessage failed. {
+  normalizedTelegramUsername: '@qabind3040',
+  identityFound: true,
+  hasChatId: true,
+  chatId: '123456789',
+  error: 'Telegram API sendMessage failed: {"ok":false,"error_code":400,"description":"Bad Request: chat not found"}'
+}
+[telegram-registration] Send code requested. {
+  username: 'qa_bind_3040',
+  email: 'qa-bind-3040@example.com',
+  enteredTelegramUsername: '@QaBind3040',
+  normalizedTelegramUsername: '@qabind3040'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@qabind3040',
+  identityFound: true,
+  hasChatId: true
+}
+[telegram-registration] Send code requested. {
+  username: 'qa_bind_3040',
+  email: 'qa-bind-3040@example.com',
+  enteredTelegramUsername: '@QaBind3040',
+  normalizedTelegramUsername: '@qabind3040'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@qabind3040',
+  identityFound: true,
+  hasChatId: true
+}
+[telegram-registration] Telegram sendMessage failed. {
+  normalizedTelegramUsername: '@qabind3040',
+  identityFound: true,
+  hasChatId: true,
+  chatId: '123456789',
+  error: 'Telegram API sendMessage failed: {"ok":false,"error_code":400,"description":"Bad Request: chat not found"}'
+}
+[telegram-registration] Send code requested. {
+  username: '@daxauaushwichz',
+  email: 'mono@gmail.com',
+  enteredTelegramUsername: '@daxauaushwichz',
+  normalizedTelegramUsername: '@daxauaushwichz'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@daxauaushwichz',
+  identityFound: false,
+  hasChatId: false
+}
+[telegram-registration] Send code requested. {
+  username: '@daxauaushwichz',
+  email: 'mono@gmail.com',
+  enteredTelegramUsername: '@daxauaushwichz',
+  normalizedTelegramUsername: '@daxauaushwichz'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@daxauaushwichz',
+  identityFound: false,
+  hasChatId: false
+}
+[telegram-registration] Send code requested. {
+  username: '@daxauaushwichz',
+  email: 'mono@gmail.com',
+  enteredTelegramUsername: '@daxauaushwichz',
+  normalizedTelegramUsername: '@daxauaushwichz'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@daxauaushwichz',
+  identityFound: false,
+  hasChatId: false
+}
+[telegram-registration] Send code requested. {
+  username: 'daxauaushwichz_local',
+  email: 'mono+local-dax@example.com',
+  enteredTelegramUsername: '@daxauaushwichz',
+  normalizedTelegramUsername: '@daxauaushwichz'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@daxauaushwichz',
+  identityFound: true,
+  hasChatId: true
+}
+[telegram-registration] Send code requested. {
+  username: '@daxauaushwichz',
+  email: 'mono@gmail.com',
+  enteredTelegramUsername: '@daxauaushwichz',
+  normalizedTelegramUsername: '@daxauaushwichz'
+}
+[telegram-registration] Telegram identity lookup finished. {
+  normalizedTelegramUsername: '@daxauaushwichz',
+  identityFound: true,
+  hasChatId: true
+}

@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/reconcile-transvoucher",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/send-scheduled-broadcasts",
+      "schedule": "15 3 * * *"
+    }
+  ]
+}

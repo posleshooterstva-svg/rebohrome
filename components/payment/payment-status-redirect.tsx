@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { PremiumLoadingSystem } from "@/components/rebohrome/premium-loading-system";
 
 type PaymentStatusRedirectProps = {
   tx: string;
@@ -39,7 +40,11 @@ export function PaymentStatusRedirect({
 
     let cancelled = false;
 
+    let attempts = 0;
+    let timeoutId: number | null = null;
+
     async function run() {
+      attempts += 1;
       try {
         const response = await fetch("/api/payments/refresh-status", {
           method: "POST",
@@ -64,14 +69,21 @@ export function PaymentStatusRedirect({
           return;
         }
 
-        setMessage(payload.error || "We could not verify this payment yet.");
+        setMessage(
+          payload.error ||
+            "Your payment is being verified. This usually takes a few seconds.",
+        );
       } catch {
         if (!cancelled) {
-          setMessage("We could not verify this payment yet.");
+          setMessage("Your payment is being verified. This usually takes a few seconds.");
         }
       } finally {
         if (!cancelled) {
-          setBusy(false);
+          if (attempts < 12) {
+            timeoutId = window.setTimeout(run, 5000);
+          } else {
+            setBusy(false);
+          }
         }
       }
     }
@@ -80,8 +92,23 @@ export function PaymentStatusRedirect({
 
     return () => {
       cancelled = true;
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
     };
   }, [router, tx]);
+
+  if (busy && tx) {
+    return (
+      <PremiumLoadingSystem
+        fullScreen
+        step="verifying"
+        subtitle={message}
+        title={title}
+        transactionId={tx}
+      />
+    );
+  }
 
   return (
     <main className="mx-auto flex min-h-[72vh] w-full max-w-7xl items-center px-4 py-8 sm:px-6 lg:px-8">

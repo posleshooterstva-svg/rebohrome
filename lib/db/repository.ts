@@ -7,9 +7,14 @@ import {
   ADMIN_SEED_TELEGRAM,
   ADMIN_SEED_USERNAME,
   ADMIN_TELEGRAM_CHAT_ID,
+  ADMIN_TELEGRAM_IDS,
+  APP_BASE_URL,
+  TELEGRAM_CHANNEL_CHAT_ID,
   TELEGRAM_CALLBACK_SECRET,
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_BOT_USERNAME,
+  XROCKET_DEFAULT_CURRENCY,
+  XROCKET_DEFAULT_NETWORK,
 } from "@/lib/server-config";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { convertAmount } from "@/lib/currency-service";
@@ -17,18 +22,30 @@ import {
   answerTelegramCallbackQuery,
   editTelegramMessage,
   sendTelegramAdminMessage,
+  sendTelegramChannelPhotoFile,
   sendTelegramMessage,
   sendTelegramUserMessage,
   type TelegramReplyMarkup,
   type TelegramUpdate,
 } from "@/lib/telegram";
 import {
+  createXRocketWithdrawal,
+  extractXRocketStatus,
+  extractXRocketTxHash,
+  extractXRocketWithdrawalId,
+  getXRocketWithdrawalInfo,
+  isXRocketFailedStatus,
+  isXRocketPaidStatus,
+} from "@/lib/xrocket";
+import {
   buildPlaceholderEmail,
+  calculateWithdrawalPayout,
   createProductId,
   createReadableId,
   formatCurrency,
   formatUsd,
   formatUtcDateTime,
+  getPayoutTierProgress,
   getPaletteByRarity,
   isValidTelegramUsername,
   maskCardNumber,
@@ -51,6 +68,7 @@ import {
   type PaymentState,
   type PaymentMethodName,
   type PaymentProviderName,
+  type PaymentReconciliationStatus,
   type ProductInput,
   type ProductRecord,
   type Rarity,
@@ -60,6 +78,11 @@ import {
   type UserRecord,
   type UserRole,
   type UserStatus,
+  type ActivePaymentSessionRecord,
+  type ArchiveLedgerRecord,
+  type BroadcastRecord,
+  type UserNotificationRecord,
+  type VaultIntegrityReport,
   type WithdrawalActionSource,
   type WithdrawalRecord,
   type WithdrawalStatus,
@@ -132,6 +155,13 @@ const REQUIRED_TABLES = [
   "telegram_action_tokens",
   "telegram_runtime_state",
   "notifications",
+  "user_notifications",
+  "broadcasts",
+  "broadcast_deliveries",
+  "archive_ledger",
+  "vault_integrity_events",
+  "provider_health_logs",
+  "webhook_events",
   "security_audit_events",
 ] as const;
 
@@ -140,6 +170,12 @@ type SecurityAuditEventType =
   | "user_registered"
   | "user_login"
   | "user_email_changed"
+  | "admin_created_user"
+  | "admin_deleted_user"
+  | "archive_rules_accepted"
+  | "broadcast_created"
+  | "broadcast_sent"
+  | "broadcast_deleted"
   | "transvoucher_invalid_signature";
 
 type SecurityAuditEventInput = {
@@ -163,6 +199,8 @@ const TELEGRAM_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60;
 const TELEGRAM_VERIFICATION_MAX_RESENDS_PER_HOUR = 5;
 const TELEGRAM_VERIFICATION_PURPOSE_REGISTRATION = "registration";
 const SYSTEM_SETTING_KEY_MAINTENANCE_MODE = "maintenance_mode";
+const SYSTEM_SETTING_KEY_TRANSVOUCHER_RECONCILIATION_BASELINE =
+  "transvoucher_reconciliation_baseline_at";
 const DEFAULT_MAINTENANCE_TITLE = "We'll be back soon.";
 const DEFAULT_MAINTENANCE_MESSAGE =
   "ReboHrome is currently undergoing scheduled maintenance. Our archive will reopen shortly.";
@@ -200,8 +238,8 @@ function canTransitionWithdrawalStatus(
 ) {
   const transitions: Record<WithdrawalStatus, WithdrawalStatus[]> = {
     pending: ["approved", "declined"],
-    approved: ["processing"],
-    processing: ["completed"],
+    approved: ["processing", "completed", "declined"],
+    processing: ["completed", "declined"],
     completed: [],
     declined: [],
   };
@@ -236,6 +274,17 @@ function normalizeEmail(value: string) {
 function normalizeTelegramNumericId(value: string | number | null | undefined) {
   const next = String(value ?? "").trim();
   return /^\d+$/.test(next) ? next : "";
+}
+
+function isValidUsdtBep20Wallet(value: string) {
+  return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
+}
+
+function maskWallet(value: string) {
+  const trimmed = value.trim();
+  return trimmed.length > 12
+    ? `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`
+    : trimmed;
 }
 
 function addDays(date: Date, days: number) {
@@ -349,6 +398,9 @@ function normalizeProduct(row: DbRow): ProductRecord {
 }
 
 function normalizeUser(row: DbRow): UserRecord {
+  const integrityStatus = String(
+    row.vault_integrity_status ?? "Unstable",
+  ) as UserRecord["vaultIntegrityStatus"];
   return {
     id: String(row.id),
     username: String(row.username),
@@ -366,6 +418,116 @@ function normalizeUser(row: DbRow): UserRecord {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     lastLoginAt: row.last_login_at ? String(row.last_login_at) : null,
+    requirePasswordReset: asBoolean(row.require_password_reset ?? 0),
+    isDeleted: asBoolean(row.is_deleted ?? 0),
+    deletedAt: row.deleted_at ? String(row.deleted_at) : null,
+    deletedBy: row.deleted_by ? String(row.deleted_by) : null,
+    vaultIntegrityScore: Number(row.vault_integrity_score ?? 0),
+    vaultIntegrityStatus: ["Unstable", "Basic", "Verified", "Excellent"].includes(
+      integrityStatus,
+    )
+      ? integrityStatus
+      : "Unstable",
+    vaultIntegrityUpdatedAt: row.vault_integrity_updated_at
+      ? String(row.vault_integrity_updated_at)
+      : null,
+    archiveRulesAcceptedAt: row.archive_rules_accepted_at
+      ? String(row.archive_rules_accepted_at)
+      : null,
+    latestTermsAcceptedAt: row.latest_terms_accepted_at
+      ? String(row.latest_terms_accepted_at)
+      : null,
+  };
+}
+
+function normalizeUserNotification(row: DbRow): UserNotificationRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    broadcastId: row.broadcast_id ? String(row.broadcast_id) : null,
+    type: String(row.type ?? row.kind ?? "system_update"),
+    title: String(row.title),
+    body: String(row.body),
+    ctaLabel: row.cta_label ? String(row.cta_label) : null,
+    ctaUrl: row.cta_url ? String(row.cta_url) : null,
+    showAsPopup: asBoolean(row.show_as_popup ?? 0),
+    dismissedAt: row.dismissed_at ? String(row.dismissed_at) : null,
+    readAt: row.read_at ? String(row.read_at) : null,
+    expiresAt: row.expires_at ? String(row.expires_at) : null,
+    createdAt: String(row.created_at),
+  };
+}
+
+function normalizeBroadcast(row: DbRow): BroadcastRecord {
+  return {
+    id: String(row.id),
+    broadcastId: String(row.broadcast_id),
+    title: String(row.title),
+    body: String(row.body),
+    previewText: row.preview_text ? String(row.preview_text) : null,
+    type: String(row.type),
+    priority: String(row.priority ?? "normal"),
+    ctaLabel: row.cta_label ? String(row.cta_label) : null,
+    ctaUrl: row.cta_url ? String(row.cta_url) : null,
+    targetType: String(row.target_type),
+    targetFilters: row.target_filters ? String(row.target_filters) : null,
+    channels: String(row.channels),
+    status: String(row.status),
+    scheduledAt: row.scheduled_at ? String(row.scheduled_at) : null,
+    sentAt: row.sent_at ? String(row.sent_at) : null,
+    expiresAt: row.expires_at ? String(row.expires_at) : null,
+    createdBy: row.created_by ? String(row.created_by) : null,
+    telegramChannelEnabled: asBoolean(row.telegram_channel_enabled ?? 1),
+    telegramChannelId: row.telegram_channel_id ? String(row.telegram_channel_id) : null,
+    telegramChannelMessageId: row.telegram_channel_message_id
+      ? String(row.telegram_channel_message_id)
+      : null,
+    telegramChannelStatus: row.telegram_channel_status
+      ? String(row.telegram_channel_status)
+      : null,
+    telegramChannelError: row.telegram_channel_error
+      ? String(row.telegram_channel_error)
+      : null,
+    telegramChannelSentAt: row.telegram_channel_sent_at
+      ? String(row.telegram_channel_sent_at)
+      : null,
+    telegramChannelCaption: row.telegram_channel_caption
+      ? String(row.telegram_channel_caption)
+      : null,
+    telegramChannelTranslated: asBoolean(row.telegram_channel_translated ?? 0),
+    telegramChannelImagePath: row.telegram_channel_image_path
+      ? String(row.telegram_channel_image_path)
+      : null,
+    showAsPopup: asBoolean(row.show_as_popup ?? 0),
+    popupPosition: String(row.popup_position ?? "bottom-left"),
+    allowUserDismiss: asBoolean(row.allow_user_dismiss ?? 0),
+    isActive: asBoolean(row.is_active ?? 1),
+    deletedAt: row.deleted_at ? String(row.deleted_at) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function normalizeArchiveLedger(row: DbRow): ArchiveLedgerRecord {
+  return {
+    id: String(row.id),
+    ledgerId: String(row.ledger_id),
+    eventType: String(row.event_type),
+    userId: row.user_id ? String(row.user_id) : null,
+    adminId: row.admin_id ? String(row.admin_id) : null,
+    entityType: String(row.entity_type),
+    entityId: String(row.entity_id),
+    relatedOrderId: row.related_order_id ? String(row.related_order_id) : null,
+    relatedTransactionId: row.related_transaction_id
+      ? String(row.related_transaction_id)
+      : null,
+    relatedProductId: row.related_product_id ? String(row.related_product_id) : null,
+    title: String(row.title),
+    description: String(row.description),
+    metadata: row.metadata ? String(row.metadata) : null,
+    previousHash: row.previous_hash ? String(row.previous_hash) : null,
+    eventHash: String(row.event_hash),
+    createdAt: String(row.created_at),
   };
 }
 
@@ -459,6 +621,12 @@ function normalizeTransaction(row: DbRow): TransactionRecord {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     paidAt: row.paid_at ? String(row.paid_at) : null,
+    providerCheckedAt: row.provider_checked_at ? String(row.provider_checked_at) : null,
+    processedAt: row.processed_at ? String(row.processed_at) : null,
+    creditedAt: row.credited_at ? String(row.credited_at) : null,
+    nextCheckAt: row.next_check_at ? String(row.next_check_at) : null,
+    lastError: row.last_error ? String(row.last_error) : null,
+    reconciliationAttempts: Number(row.reconciliation_attempts ?? 0),
   };
 }
 
@@ -506,7 +674,12 @@ function normalizeWithdrawal(row: DbRow): WithdrawalRecord {
     id: String(row.id),
     userId: String(row.user_id),
     amount: Number(row.amount),
-    walletAddress: String(row.wallet_address),
+    requestedAmount: Number(row.requested_amount ?? row.amount),
+    basePayoutPercent: Number(row.base_payout_percent ?? 60),
+    bonusPayoutPercent: Number(row.bonus_payout_percent ?? 0),
+    finalPayoutPercent: Number(row.final_payout_percent ?? 60),
+    payoutAmount: Number(row.payout_amount ?? row.amount),
+    walletAddress: String(row.wallet_usdt_bep20 ?? row.wallet_address),
     telegramId: String(row.telegram_id),
     status: String(row.status) as WithdrawalRecord["status"],
     sourceDepositId: row.source_deposit_id ? String(row.source_deposit_id) : null,
@@ -528,6 +701,26 @@ function normalizeWithdrawal(row: DbRow): WithdrawalRecord {
     lastUpdatedByAdminId: row.last_updated_by_admin_id
       ? String(row.last_updated_by_admin_id)
       : null,
+    statusUpdatedBy: row.status_updated_by ? String(row.status_updated_by) : null,
+    statusUpdatedAt: row.status_updated_at ? String(row.status_updated_at) : null,
+    payoutProvider: row.payout_provider ? String(row.payout_provider) : null,
+    payoutCurrency: row.payout_currency ? String(row.payout_currency) : null,
+    payoutNetwork: row.payout_network ? String(row.payout_network) : null,
+    payoutAddress: row.payout_address ? String(row.payout_address) : null,
+    xrocketWithdrawalId: row.xrocket_withdrawal_id
+      ? String(row.xrocket_withdrawal_id)
+      : null,
+    xrocketStatus: row.xrocket_status ? String(row.xrocket_status) : null,
+    xrocketRawResponse: row.xrocket_raw_response
+      ? String(row.xrocket_raw_response)
+      : null,
+    xrocketSentAt: row.xrocket_sent_at ? String(row.xrocket_sent_at) : null,
+    xrocketConfirmedAt: row.xrocket_confirmed_at
+      ? String(row.xrocket_confirmed_at)
+      : null,
+    payoutTxHash: row.payout_tx_hash ? String(row.payout_tx_hash) : null,
+    payoutError: row.payout_error ? String(row.payout_error) : null,
+    payoutAttempts: Number(row.payout_attempts ?? 0),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -614,6 +807,44 @@ function normalizeDepositPaymentSession(
     rawProviderResponse: row.raw_provider_response
       ? String(row.raw_provider_response)
       : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    expiresAt: String(row.expires_at),
+  };
+}
+
+function normalizeActiveCheckoutSession(row: DbRow): ActivePaymentSessionRecord {
+  return {
+    id: String(row.id),
+    type: "purchase",
+    provider: String(row.payment_provider),
+    transactionId: row.transaction_id ? String(row.transaction_id) : null,
+    providerTransactionId: row.transvoucher_transaction_id
+      ? String(row.transvoucher_transaction_id)
+      : null,
+    paymentUrl: row.payment_url ? String(row.payment_url) : null,
+    amount: Number(row.total),
+    currency: String(row.currency) as SupportedCurrency,
+    status: String(row.status),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    expiresAt: String(row.expires_at),
+  };
+}
+
+function normalizeActiveDepositSession(row: DbRow): ActivePaymentSessionRecord {
+  return {
+    id: String(row.id),
+    type: "deposit",
+    provider: String(row.payment_provider),
+    transactionId: row.transaction_id ? String(row.transaction_id) : null,
+    providerTransactionId: row.transvoucher_transaction_id
+      ? String(row.transvoucher_transaction_id)
+      : null,
+    paymentUrl: row.payment_url ? String(row.payment_url) : null,
+    amount: Number(row.original_amount),
+    currency: String(row.currency) as SupportedCurrency,
+    status: String(row.status),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     expiresAt: String(row.expires_at),
@@ -733,6 +964,269 @@ async function ensureSystemSettingsTable() {
   );
 }
 
+async function ensurePaymentReconciliationRunsTable() {
+  await execute(
+    `create table if not exists payment_reconciliation_runs (
+      id text primary key,
+      provider text not null,
+      started_at text not null,
+      finished_at text,
+      checked_count integer not null default 0,
+      succeeded_count integer not null default 0,
+      failed_count integer not null default 0,
+      expired_count integer not null default 0,
+      pending_count integer not null default 0,
+      skipped_count integer not null default 0,
+      error_count integer not null default 0,
+      last_error text,
+      trigger_source text not null default 'cron'
+    )`,
+  );
+}
+
+async function ensureArchiveTrustTables() {
+  await execute(
+    `create table if not exists archive_ledger (
+      id text primary key,
+      ledger_id text not null unique,
+      event_type text not null,
+      user_id text,
+      admin_id text,
+      entity_type text not null,
+      entity_id text not null,
+      related_order_id text,
+      related_transaction_id text,
+      related_product_id text,
+      title text not null,
+      description text not null,
+      metadata text,
+      previous_hash text,
+      event_hash text not null,
+      created_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists vault_integrity_events (
+      id text primary key,
+      user_id text not null,
+      event_type text not null,
+      score_delta integer not null default 0,
+      reason text not null,
+      created_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists broadcasts (
+      id text primary key,
+      broadcast_id text not null unique,
+      title text not null,
+      body text not null,
+      preview_text text,
+      type text not null,
+      priority text not null default 'normal',
+      cta_label text,
+      cta_url text,
+      target_type text not null,
+      target_filters text,
+      channels text not null,
+      status text not null,
+      scheduled_at text,
+      sent_at text,
+      expires_at text,
+      created_by text,
+      updated_by text,
+      internal_note text,
+      telegram_channel_enabled integer not null default 1,
+      telegram_channel_id text,
+      telegram_channel_message_id text,
+      telegram_channel_status text,
+      telegram_channel_error text,
+      telegram_channel_sent_at text,
+      telegram_channel_caption text,
+      telegram_channel_translated integer not null default 0,
+      telegram_channel_image_path text,
+      show_as_popup integer not null default 0,
+      popup_position text not null default 'bottom-left',
+      allow_user_dismiss integer not null default 0,
+      is_active integer not null default 1,
+      deleted_at text,
+      created_at text not null,
+      updated_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists telegram_admin_sessions (
+      id text primary key,
+      telegram_admin_id text not null,
+      command text not null,
+      step text not null,
+      payload text,
+      expires_at text not null,
+      created_at text not null,
+      updated_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists broadcast_deliveries (
+      id text primary key,
+      broadcast_id text not null,
+      user_id text not null,
+      channel text not null,
+      status text not null,
+      delivered_at text,
+      read_at text,
+      skipped_reason text,
+      error_message text,
+      telegram_message_id text,
+      created_at text not null,
+      updated_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists user_notifications (
+      id text primary key,
+      user_id text not null,
+      broadcast_id text,
+      type text not null,
+      title text not null,
+      body text not null,
+      cta_label text,
+      cta_url text,
+      show_as_popup integer not null default 0,
+      dismissed_at text,
+      read_at text,
+      expires_at text,
+      created_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists provider_health_logs (
+      id text primary key,
+      provider text not null,
+      status text not null,
+      latency_ms integer,
+      success integer not null default 0,
+      error_message text,
+      checked_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists webhook_events (
+      id text primary key,
+      provider text not null,
+      event_type text,
+      provider_transaction_id text,
+      valid_signature integer not null default 0,
+      duplicate integer not null default 0,
+      processed integer not null default 0,
+      error text,
+      received_at text not null
+    )`,
+  );
+}
+
+async function getSystemSettingValue(key: string) {
+  await ensureSystemSettingsTable();
+  const row = await queryOne(
+    "select value from system_settings where key = ? limit 1",
+    [key],
+  );
+  return row?.value ? String(row.value) : null;
+}
+
+async function setSystemSettingValue(input: {
+  key: string;
+  value: string;
+  updatedBy?: string | null;
+}) {
+  await ensureSystemSettingsTable();
+  await execute(
+    `insert into system_settings (key, value, updated_by, updated_at)
+     values (?, ?, ?, ?)
+     on conflict(key) do update set
+       value = excluded.value,
+       updated_by = excluded.updated_by,
+       updated_at = excluded.updated_at`,
+    [input.key, input.value, input.updatedBy ?? null, nowIso()],
+  );
+}
+
+async function getTransVoucherReconciliationBaselineAt() {
+  return getSystemSettingValue(
+    SYSTEM_SETTING_KEY_TRANSVOUCHER_RECONCILIATION_BASELINE,
+  );
+}
+
+export async function resetTransVoucherReconciliationBaseline(input?: {
+  updatedBy?: string | null;
+}) {
+  await ensureDatabase();
+  const baselineAt = nowIso();
+  await setSystemSettingValue({
+    key: SYSTEM_SETTING_KEY_TRANSVOUCHER_RECONCILIATION_BASELINE,
+    value: baselineAt,
+    updatedBy: input?.updatedBy ?? "system",
+  });
+  revalidateAdmin();
+  return baselineAt;
+}
+
+async function ensureApplicationColumns() {
+  await ensureColumn("users", "require_password_reset integer not null default 0");
+  await ensureColumn("users", "is_deleted integer not null default 0");
+  await ensureColumn("users", "deleted_at text");
+  await ensureColumn("users", "deleted_by text");
+  await ensureColumn("users", "vault_integrity_score integer not null default 0");
+  await ensureColumn("users", "vault_integrity_status text not null default 'Unstable'");
+  await ensureColumn("users", "vault_integrity_updated_at text");
+  await ensureColumn("users", "archive_rules_accepted_at text");
+  await ensureColumn("users", "latest_terms_accepted_at text");
+  await ensureColumn("transactions", "provider_checked_at text");
+  await ensureColumn("transactions", "processed_at text");
+  await ensureColumn("transactions", "credited_at text");
+  await ensureColumn("transactions", "next_check_at text");
+  await ensureColumn("transactions", "last_error text");
+  await ensureColumn("transactions", "reconciliation_attempts integer not null default 0");
+  await ensureColumn("transactions", "environment text not null default 'production'");
+  await ensureColumn("withdrawal_requests", "requested_amount integer");
+  await ensureColumn("withdrawal_requests", "base_payout_percent integer not null default 60");
+  await ensureColumn("withdrawal_requests", "bonus_payout_percent integer not null default 0");
+  await ensureColumn("withdrawal_requests", "final_payout_percent integer not null default 60");
+  await ensureColumn("withdrawal_requests", "payout_amount integer");
+  await ensureColumn("withdrawal_requests", "wallet_usdt_bep20 text");
+  await ensureColumn("withdrawal_requests", "status_updated_by text");
+  await ensureColumn("withdrawal_requests", "status_updated_at text");
+  await ensureColumn("withdrawal_requests", "payout_provider text");
+  await ensureColumn("withdrawal_requests", "payout_currency text not null default 'USDT'");
+  await ensureColumn("withdrawal_requests", "payout_network text");
+  await ensureColumn("withdrawal_requests", "payout_address text");
+  await ensureColumn("withdrawal_requests", "xrocket_withdrawal_id text");
+  await ensureColumn("withdrawal_requests", "xrocket_status text");
+  await ensureColumn("withdrawal_requests", "xrocket_raw_response text");
+  await ensureColumn("withdrawal_requests", "xrocket_sent_at text");
+  await ensureColumn("withdrawal_requests", "xrocket_confirmed_at text");
+  await ensureColumn("withdrawal_requests", "payout_tx_hash text");
+  await ensureColumn("withdrawal_requests", "payout_error text");
+  await ensureColumn("withdrawal_requests", "payout_attempts integer not null default 0");
+  await ensureColumn("broadcasts", "telegram_channel_enabled integer not null default 1");
+  await ensureColumn("broadcasts", "telegram_channel_id text");
+  await ensureColumn("broadcasts", "telegram_channel_message_id text");
+  await ensureColumn("broadcasts", "telegram_channel_status text");
+  await ensureColumn("broadcasts", "telegram_channel_error text");
+  await ensureColumn("broadcasts", "telegram_channel_sent_at text");
+  await ensureColumn("broadcasts", "telegram_channel_caption text");
+  await ensureColumn("broadcasts", "telegram_channel_translated integer not null default 0");
+  await ensureColumn("broadcasts", "telegram_channel_image_path text");
+  await ensureColumn("notifications", "broadcast_id text");
+  await ensureColumn("notifications", "cta_label text");
+  await ensureColumn("notifications", "cta_url text");
+  await ensureColumn("notifications", "expires_at text");
+  await ensureColumn("notifications", "show_as_popup integer not null default 0");
+  await ensureColumn("notifications", "dismissed_at text");
+  await ensurePaymentReconciliationRunsTable();
+  await ensureArchiveTrustTables();
+}
+
 async function insertSecurityAuditEvent(input: SecurityAuditEventInput) {
   await execute(
     `insert into security_audit_events (
@@ -754,6 +1248,1613 @@ async function insertSecurityAuditEvent(input: SecurityAuditEventInput) {
       input.timestamp,
     ],
   );
+}
+
+function getVaultIntegrityStatus(score: number): UserRecord["vaultIntegrityStatus"] {
+  if (score >= 90) {
+    return "Excellent";
+  }
+  if (score >= 70) {
+    return "Verified";
+  }
+  if (score >= 40) {
+    return "Basic";
+  }
+  return "Unstable";
+}
+
+function buildArchiveLedgerHash(input: {
+  eventType: string;
+  entityId: string;
+  metadata: string;
+  previousHash: string | null;
+  createdAt: string;
+}) {
+  return createHash("sha256")
+    .update(
+      [
+        input.eventType,
+        input.entityId,
+        input.metadata,
+        input.previousHash ?? "",
+        input.createdAt,
+      ].join("|"),
+    )
+    .digest("hex");
+}
+
+export async function appendArchiveLedgerEntry(input: {
+  eventType: string;
+  userId?: string | null;
+  adminId?: string | null;
+  entityType: string;
+  entityId: string;
+  relatedOrderId?: string | null;
+  relatedTransactionId?: string | null;
+  relatedProductId?: string | null;
+  title: string;
+  description: string;
+  metadata?: Record<string, unknown> | null;
+}) {
+  await ensureDatabase();
+  await ensureArchiveTrustTables();
+  const createdAt = nowIso();
+  const previousRow = await queryOne(
+    "select event_hash from archive_ledger order by created_at desc, id desc limit 1",
+  );
+  const previousHash = previousRow?.event_hash
+    ? String(previousRow.event_hash)
+    : null;
+  const metadata = toJson(input.metadata ?? {});
+  const eventHash = buildArchiveLedgerHash({
+    eventType: input.eventType,
+    entityId: input.entityId,
+    metadata,
+    previousHash,
+    createdAt,
+  });
+  const id = randomUUID();
+  const ledgerId = createReadableId("ARCH");
+
+  await execute(
+    `insert into archive_ledger (
+      id, ledger_id, event_type, user_id, admin_id, entity_type, entity_id,
+      related_order_id, related_transaction_id, related_product_id, title,
+      description, metadata, previous_hash, event_hash, created_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      ledgerId,
+      input.eventType,
+      input.userId ?? null,
+      input.adminId ?? null,
+      input.entityType,
+      input.entityId,
+      input.relatedOrderId ?? null,
+      input.relatedTransactionId ?? null,
+      input.relatedProductId ?? null,
+      input.title,
+      input.description,
+      metadata,
+      previousHash,
+      eventHash,
+      createdAt,
+    ],
+  );
+
+  return {
+    id,
+    ledgerId,
+    eventHash,
+  };
+}
+
+export async function calculateVaultIntegrityReport(
+  userId: string,
+): Promise<VaultIntegrityReport> {
+  await ensureDatabase();
+  const account = await getUserAndBalance(userId);
+
+  if (!account) {
+    throw new Error("Unable to load archive profile.");
+  }
+
+  const user = account.user;
+  const ownedCards = await queryOne(
+    "select count(*) as count from owned_cards where user_id = ?",
+    [userId],
+  );
+  const factors: string[] = [];
+  const issues: string[] = [];
+  let score = 20;
+
+  if (user.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.email)) {
+    score += 15;
+    factors.push("Email added and valid");
+  } else {
+    issues.push("Add a valid email address");
+  }
+
+  if (user.telegramVerified) {
+    score += 20;
+    factors.push("Telegram account verified");
+  } else {
+    issues.push("Verify Telegram account");
+  }
+
+  if (user.name && user.name !== user.username) {
+    score += 10;
+    factors.push("Profile details completed");
+  } else {
+    issues.push("Complete profile details");
+  }
+
+  if (user.requirePasswordReset) {
+    issues.push("Complete the required password reset");
+  } else {
+    score += 10;
+    factors.push("Account security settings completed");
+  }
+
+  if (user.status === "active") {
+    score += 10;
+    factors.push("No active account restrictions");
+  } else if (user.status === "under_review") {
+    score -= 10;
+    issues.push("Account is under review");
+  } else if (user.status === "frozen" || user.status === "blocked") {
+    score -= 25;
+    issues.push("Account access is currently restricted");
+  }
+
+  if (Number(ownedCards?.count ?? 0) > 0) {
+    score += 10;
+    factors.push("Collection activity exists");
+  }
+
+  if (user.archiveRulesAcceptedAt) {
+    score += 10;
+    factors.push("Archive Economy Rules accepted");
+  } else {
+    issues.push("Review and accept Archive Economy Rules");
+  }
+
+  if (user.latestTermsAcceptedAt) {
+    score += 5;
+    factors.push("Latest platform policies accepted");
+  } else {
+    issues.push("Accept the latest platform policies");
+  }
+
+  score = Math.min(100, Math.max(0, score));
+
+  return {
+    score,
+    status: getVaultIntegrityStatus(score),
+    factors,
+    issues,
+    updatedAt: user.vaultIntegrityUpdatedAt,
+  };
+}
+
+export async function recalculateVaultIntegrity(userId: string) {
+  await ensureDatabase();
+  const report = await calculateVaultIntegrityReport(userId);
+  const updatedAt = nowIso();
+  await execute(
+    `update users set
+      vault_integrity_score = ?,
+      vault_integrity_status = ?,
+      vault_integrity_updated_at = ?,
+      updated_at = ?
+     where id = ?`,
+    [report.score, report.status, updatedAt, updatedAt, userId],
+  );
+  await execute(
+    `insert into vault_integrity_events (
+      id, user_id, event_type, score_delta, reason, created_at
+    ) values (?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      userId,
+      "vault_integrity_recalculated",
+      0,
+      `Vault Integrity recalculated as ${report.status} (${report.score}%).`,
+      updatedAt,
+    ],
+  );
+
+  return {
+    ...report,
+    updatedAt,
+  };
+}
+
+export async function acceptArchiveRules(userId: string) {
+  await ensureDatabase();
+  const timestamp = nowIso();
+  await execute(
+    `update users set
+      archive_rules_accepted_at = ?,
+      latest_terms_accepted_at = coalesce(latest_terms_accepted_at, ?),
+      updated_at = ?
+     where id = ?`,
+    [timestamp, timestamp, timestamp, userId],
+  );
+  await appendArchiveLedgerEntry({
+    eventType: "archive_rules_accepted",
+    userId,
+    entityType: "user",
+    entityId: userId,
+    title: "Archive Economy Rules accepted",
+    description:
+      "Collector reviewed and accepted the latest Archive Economy Rules.",
+    metadata: {
+      acceptedAt: timestamp,
+    },
+  });
+  await recalculateVaultIntegrity(userId);
+  revalidatePrivate(userId);
+  return timestamp;
+}
+
+function normalizeBroadcastChannels(channels: string[]) {
+  const allowed = new Set(["website", "telegram", "email"]);
+  const unique = Array.from(
+    new Set(channels.map((item) => item.trim()).filter((item) => allowed.has(item))),
+  );
+  return unique.length > 0 ? unique : ["website"];
+}
+
+async function resolveBroadcastTargetUsers(input: {
+  targetType: string;
+  targetFilters?: Record<string, unknown> | null;
+}) {
+  if (input.targetType === "admin_notice_only" || input.targetType === "telegram_channel") {
+    return [];
+  }
+
+  const filters = input.targetFilters ?? {};
+  const args: SqlValue[] = [];
+  const where = ["coalesce(users.is_deleted, 0) = 0"];
+
+  if (input.targetType === "telegram_verified_users" || input.targetType === "verified_users") {
+    where.push("coalesce(profiles.telegram_verified, 0) = 1");
+  } else if (input.targetType === "pending_withdrawals") {
+    where.push(
+      `exists (
+        select 1 from withdrawal_requests
+        where withdrawal_requests.user_id = users.id
+          and withdrawal_requests.status in ('pending', 'approved', 'processing')
+      )`,
+    );
+  } else if (input.targetType === "pending_payments") {
+    where.push(
+      `exists (
+        select 1 from transactions
+        where transactions.user_id = users.id
+          and transactions.status in ('pending', 'attempting', 'processing')
+      )`,
+    );
+  } else if (input.targetType === "successful_deposits") {
+    where.push(
+      `exists (
+        select 1 from deposits
+        where deposits.user_id = users.id and deposits.status = 'completed'
+      )`,
+    );
+  } else if (input.targetType === "zero_balance") {
+    where.push("coalesce(balances.available, 0) = 0");
+  } else if (input.targetType === "balance_above") {
+    where.push("coalesce(balances.available, 0) >= ?");
+    args.push(Number(filters.balanceAbove ?? 0));
+  } else if (input.targetType === "role") {
+    where.push("profiles.role = ?");
+    args.push(String(filters.role ?? "user"));
+  } else if (input.targetType === "account_status") {
+    where.push("users.status = ?");
+    args.push(String(filters.status ?? "active"));
+  } else if (input.targetType === "accepted_archive_rules") {
+    where.push("users.archive_rules_accepted_at is not null");
+  } else if (input.targetType === "not_accepted_archive_rules") {
+    where.push("users.archive_rules_accepted_at is null");
+  } else if (input.targetType === "specific_usernames") {
+    const usernames = Array.isArray(filters.usernames)
+      ? filters.usernames.map((item) => normalizeUsername(String(item))).filter(Boolean)
+      : [];
+    if (usernames.length === 0) {
+      return [];
+    }
+    where.push(`users.username in (${usernames.map(() => "?").join(", ")})`);
+    args.push(...usernames);
+  } else if (input.targetType === "specific_user_ids") {
+    const ids = Array.isArray(filters.userIds)
+      ? filters.userIds.map((item) => String(item).trim()).filter(Boolean)
+      : [];
+    if (ids.length === 0) {
+      return [];
+    }
+    where.push(`users.id in (${ids.map(() => "?").join(", ")})`);
+    args.push(...ids);
+  }
+
+  const rows = await queryMany(
+    `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
+      profiles.withdrawal_wallet, profiles.verified
+     from users
+     inner join profiles on profiles.user_id = users.id
+     inner join balances on balances.user_id = users.id
+     where ${where.join(" and ")}
+     order by users.created_at desc`,
+    args,
+  );
+
+  return rows.map((row) => normalizeUser(row));
+}
+
+function buildBroadcastTelegramMessage(input: {
+  title: string;
+  body: string;
+  type: string;
+}) {
+  return [
+    "<b>ReboHrome Archive Notice</b>",
+    "",
+    `Title: ${escapeTelegramHtml(input.title)}`,
+    `Type: ${escapeTelegramHtml(input.type.replace(/_/g, " "))}`,
+    "",
+    escapeTelegramHtml(input.body),
+  ].join("\n");
+}
+
+function hasCyrillic(value: string) {
+  return /[А-Яа-яЁё]/.test(value);
+}
+
+function looksEnglish(value: string) {
+  return /[A-Za-z]/.test(value) && !hasCyrillic(value);
+}
+
+function normalizeTranslationKey(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/g, "");
+}
+
+function createRussianFallbackTitle(title: string) {
+  const normalized = normalizeTranslationKey(title);
+  if (normalized.includes("transvoucher")) {
+    return "Исправление TransVoucher";
+  }
+  if (normalized.includes("payment")) {
+    return "Обновление платежей";
+  }
+  if (normalized.includes("withdrawal")) {
+    return "Обновление выводов";
+  }
+  if (normalized.includes("maintenance")) {
+    return "Техническое обслуживание";
+  }
+  return "Уведомление ReboHrome";
+}
+
+function createRussianFallbackBody(body: string) {
+  const normalized = normalizeTranslationKey(body);
+  if (normalized === "we fix" || normalized.includes("fix")) {
+    return "Мы уже работаем над обновлением. Пожалуйста, следите за статусом в ReboHrome.";
+  }
+  if (normalized.includes("payment")) {
+    return "Мы обновляем платежный маршрут и синхронизацию с провайдером. Пожалуйста, следите за статусом в ReboHrome.";
+  }
+  return "Новое архивное уведомление доступно в ReboHrome. Пожалуйста, ознакомьтесь с обновлением на платформе.";
+}
+
+function translateBroadcastToRussian(input: { title: string; body: string }) {
+  const title = input.title.trim();
+  const body = input.body.trim();
+
+  if (!looksEnglish(`${title} ${body}`)) {
+    return {
+      title,
+      body,
+      translated: false,
+    };
+  }
+
+  const normalizedTitle = normalizeTranslationKey(title);
+  const normalizedBody = normalizeTranslationKey(body);
+  const titleTranslations: Record<string, string> = {
+    "transvoucher stop": "TransVoucher временно остановлен",
+    "transvoucher fix": "Исправление TransVoucher",
+    "new archive drop is live": "Новый архивный дроп уже доступен",
+    "scheduled maintenance": "Плановое техническое обслуживание",
+    "payment verification update": "Обновление проверки платежей",
+    "withdrawal review update": "Обновление проверки выводов",
+    "archive rules updated": "Правила архива обновлены",
+    "security notice": "Уведомление безопасности",
+  };
+  const bodyTranslations: Record<string, string> = {
+    "we fix": "Мы уже работаем над обновлением. Пожалуйста, следите за статусом в ReboHrome.",
+    "we are temporarily updating payment routing. please do not create duplicate payments while provider sync is active.":
+      "Мы временно обновляем платежную маршрутизацию. Пожалуйста, не создавайте повторные платежи, пока синхронизация провайдера активна.",
+    "a new set of digital collectibles is now available in the marketplace.":
+      "Новый набор цифровых коллекционных карт уже доступен в маркетплейсе.",
+    "rebohrome will be under maintenance while we update archive systems.":
+      "ReboHrome будет временно недоступен, пока мы обновляем архивные системы.",
+    "we are improving payment verification and provider synchronization.":
+      "Мы улучшаем проверку платежей и синхронизацию с платежным провайдером.",
+    "withdrawal requests are reviewed manually and processed according to archive rules.":
+      "Заявки на вывод проверяются вручную и обрабатываются согласно правилам архива.",
+    "please review the latest archive economy rules before continuing withdrawal activity.":
+      "Пожалуйста, ознакомьтесь с актуальными правилами архива перед продолжением операций вывода.",
+    "please verify your telegram account and review your account security settings.":
+      "Пожалуйста, подтвердите Telegram аккаунт и проверьте настройки безопасности профиля.",
+  };
+
+  return {
+    title: titleTranslations[normalizedTitle] ?? createRussianFallbackTitle(title),
+    body: bodyTranslations[normalizedBody] ?? createRussianFallbackBody(body),
+    translated: Boolean(
+      titleTranslations[normalizedTitle] || bodyTranslations[normalizedBody],
+    ),
+  };
+}
+
+function buildTelegramChannelReplyMarkup(input: {
+  ctaLabel?: string | null;
+  ctaUrl?: string | null;
+}) {
+  const baseUrl = APP_BASE_URL.replace(/\/+$/, "");
+  const rawUrl = input.ctaUrl?.trim();
+  const url = rawUrl
+    ? rawUrl.startsWith("/")
+      ? `${baseUrl}${rawUrl}`
+      : rawUrl
+    : "https://www.rebohrome.com";
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: input.ctaLabel?.trim() || "Open ReboHrome",
+          url,
+        },
+      ],
+    ],
+  } satisfies TelegramReplyMarkup;
+}
+
+function translateBroadcastToEnglish(input: { title: string; body: string }) {
+  const title = input.title.trim();
+  const body = input.body.trim();
+  const normalizedTitle = title.toLowerCase();
+  const normalizedBody = body.toLowerCase();
+  const titleTranslations: Record<string, string> = {
+    "transvoucher временно остановлен": "TransVoucher maintenance",
+    "новый архивный дроп уже доступен": "New archive drop is live",
+    "плановое техническое обслуживание": "Scheduled maintenance",
+    "обновление проверки платежей": "Payment verification update",
+    "обновление проверки выводов": "Withdrawal review update",
+    "правила архива обновлены": "Archive rules updated",
+    "уведомление безопасности": "Security notice",
+  };
+  const bodyTranslations: Record<string, string> = {
+    "мы уже работаем над обновлением. пожалуйста, следите за статусом в rebohrome.":
+      "We are already working on the update. Please follow the status in ReboHrome.",
+    "мы временно обновляем платежную маршрутизацию. пожалуйста, не создавайте повторные платежи, пока синхронизация провайдера активна.":
+      "We are temporarily updating payment routing. Please do not create duplicate payments while provider sync is active.",
+    "новый набор цифровых коллекционных карт уже доступен в маркетплейсе.":
+      "A new set of digital collectibles is now available in the marketplace.",
+    "rebohrome будет временно недоступен, пока мы обновляем архивные системы.":
+      "ReboHrome will be under maintenance while we update archive systems.",
+    "мы улучшаем проверку платежей и синхронизацию с платежным провайдером.":
+      "We are improving payment verification and provider synchronization.",
+    "заявки на вывод проверяются вручную и обрабатываются согласно правилам архива.":
+      "Withdrawal requests are reviewed manually and processed according to archive rules.",
+    "пожалуйста, ознакомьтесь с актуальными правилами архива перед продолжением операций вывода.":
+      "Please review the latest Archive Economy Rules before continuing withdrawal activity.",
+    "пожалуйста, подтвердите telegram аккаунт и проверьте настройки безопасности профиля.":
+      "Please verify your Telegram account and review your account security settings.",
+  };
+
+  return {
+    title: titleTranslations[normalizedTitle] ?? title,
+    body: bodyTranslations[normalizedBody] ?? body,
+  };
+}
+
+function buildTelegramBilingualCaption(input: {
+  title: string;
+  body: string;
+}) {
+  const originalTitle = input.title.trim() || "ReboHrome notification";
+  const originalBody =
+    input.body.trim() || "A new ReboHrome archive notice is available.";
+  const russian = translateBroadcastToRussian({
+    title: originalTitle,
+    body: originalBody,
+  });
+  const english = translateBroadcastToEnglish({
+    title: originalTitle,
+    body: originalBody,
+  });
+  const originalHasCyrillic = hasCyrillic(`${originalTitle} ${originalBody}`);
+  const titleEn = originalHasCyrillic ? english.title : originalTitle;
+  const bodyEn = originalHasCyrillic ? english.body : originalBody;
+  const titleRu = originalHasCyrillic ? originalTitle : russian.title;
+  const bodyRu = originalHasCyrillic ? originalBody : russian.body;
+
+  return [
+    "<b>🔔 ReboHrome Notification</b>",
+    "",
+    `<b>EN 🇺🇸 — ${escapeTelegramHtml(titleEn).slice(0, 120)}</b>`,
+    `<blockquote>${escapeTelegramHtml(bodyEn).slice(0, 450)}</blockquote>`,
+    "",
+    `<b>RU 🇷🇺 — ${escapeTelegramHtml(titleRu || originalTitle).slice(0, 120)}</b>`,
+    `<blockquote>${escapeTelegramHtml(bodyRu || originalBody).slice(0, 450)}</blockquote>`,
+    "",
+    "━━━━━━━━━━━━━━",
+    "",
+    "<i>ReboHrome Archive</i>",
+  ].join("\n");
+}
+
+function getTelegramChannelCaptionPreview(input: {
+  title: string;
+  body: string;
+}) {
+  const originalTitle = input.title.trim() || "ReboHrome notification";
+  const originalBody =
+    input.body.trim() || "A new ReboHrome archive notice is available.";
+  const russian = translateBroadcastToRussian({
+    title: originalTitle,
+    body: originalBody,
+  });
+  const english = translateBroadcastToEnglish({
+    title: originalTitle,
+    body: originalBody,
+  });
+  const originalHasCyrillic = hasCyrillic(`${originalTitle} ${originalBody}`);
+
+  return {
+    titleEn: originalHasCyrillic ? english.title : originalTitle,
+    bodyEn: originalHasCyrillic ? english.body : originalBody,
+    titleRu: originalHasCyrillic ? originalTitle : russian.title,
+    bodyRu: originalHasCyrillic ? originalBody : russian.body,
+    translated: !originalHasCyrillic,
+    caption: buildTelegramBilingualCaption({
+      title: originalTitle,
+      body: originalBody,
+    }),
+  };
+}
+
+async function sendBroadcastTelegramChannelPost(input: {
+  title: string;
+  body: string;
+  ctaLabel?: string | null;
+  ctaUrl?: string | null;
+}) {
+  const preview = getTelegramChannelCaptionPreview({
+    title: input.title,
+    body: input.body,
+  });
+  const replyMarkup = buildTelegramChannelReplyMarkup({
+    ctaLabel: input.ctaLabel,
+    ctaUrl: input.ctaUrl,
+  });
+  const photoPath = path.join(
+    process.cwd(),
+    "public",
+    "broadcast",
+    "rebohrome-notification.png",
+  );
+
+  const result = await sendTelegramChannelPhotoFile(preview.caption, {
+    photoPath,
+    filename: "rebohrome-notification.png",
+    replyMarkup,
+  });
+
+  return {
+    ...result,
+    caption: preview.caption,
+    translated: preview.translated,
+    imagePath: "public/broadcast/rebohrome-notification.png",
+    channelId: TELEGRAM_CHANNEL_CHAT_ID,
+    messageId: result.result?.message_id ? String(result.result.message_id) : null,
+  };
+}
+
+export async function createBroadcast(input: {
+  adminUserId: string;
+  title: string;
+  body: string;
+  previewText?: string | null;
+  type: string;
+  priority?: string;
+  ctaLabel?: string | null;
+  ctaUrl?: string | null;
+  targetType: string;
+  targetFilters?: Record<string, unknown> | null;
+  channels: string[];
+  status?: "draft" | "scheduled" | "sending" | "sent";
+  scheduledAt?: string | null;
+  expiresAt?: string | null;
+  internalNote?: string | null;
+  showAsPopup?: boolean;
+  popupPosition?: string;
+  allowUserDismiss?: boolean;
+}) {
+  await ensureDatabase();
+  await ensureArchiveTrustTables();
+  const timestamp = nowIso();
+  const id = randomUUID();
+  const broadcastId = createReadableId("BRC");
+  const channels = normalizeBroadcastChannels(input.channels);
+  const status = input.status ?? (input.scheduledAt ? "scheduled" : "draft");
+
+  await execute(
+    `insert into broadcasts (
+      id, broadcast_id, title, body, preview_text, type, priority, cta_label,
+      cta_url, target_type, target_filters, channels, status, scheduled_at,
+      sent_at, expires_at, created_by, updated_by, internal_note, show_as_popup,
+      popup_position, allow_user_dismiss, is_active, deleted_at, created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      broadcastId,
+      input.title,
+      input.body,
+      input.previewText ?? null,
+      input.type,
+      input.priority ?? "normal",
+      input.ctaLabel ?? null,
+      input.ctaUrl ?? null,
+      input.targetType,
+      toJson(input.targetFilters ?? {}),
+      toJson(channels),
+      status,
+      input.scheduledAt ?? null,
+      null,
+      input.expiresAt ?? null,
+      input.adminUserId,
+      input.adminUserId,
+      input.internalNote ?? null,
+      input.showAsPopup ? 1 : 0,
+      input.popupPosition ?? "bottom-left",
+      input.allowUserDismiss ? 1 : 0,
+      1,
+      null,
+      timestamp,
+      timestamp,
+    ],
+  );
+
+  await appendArchiveLedgerEntry({
+    eventType: "broadcast_created",
+    adminId: input.adminUserId,
+    entityType: "broadcast",
+    entityId: id,
+    title: "Broadcast created",
+    description: `Admin created archive broadcast ${broadcastId}.`,
+    metadata: {
+      broadcastId,
+      targetType: input.targetType,
+      channels,
+      status,
+    },
+  });
+
+  return getBroadcastById(id);
+}
+
+export async function getBroadcastById(id: string) {
+  await ensureDatabase();
+  const row = await queryOne("select * from broadcasts where id = ? limit 1", [id]);
+  return row ? normalizeBroadcast(row) : null;
+}
+
+export async function getAdminBroadcasts() {
+  await ensureDatabase();
+  await ensureArchiveTrustTables();
+  const rows = await queryMany(
+    `select * from broadcasts
+     where deleted_at is null
+     order by created_at desc`,
+  );
+  return rows.map((row) => normalizeBroadcast(row));
+}
+
+export async function getAdminBroadcastDebugStats() {
+  await ensureDatabase();
+  await ensureArchiveTrustTables();
+  const broadcasts = await getAdminBroadcasts();
+  const stats = [];
+
+  for (const broadcast of broadcasts) {
+    const targetUsers = await resolveBroadcastTargetUsers({
+      targetType: broadcast.targetType,
+      targetFilters: fromJson<Record<string, unknown>>(broadcast.targetFilters),
+    });
+    const [websiteRow, telegramRow] = await Promise.all([
+      queryOne(
+        `select count(*) as count from broadcast_deliveries
+         where broadcast_id = ? and channel = 'website'`,
+        [broadcast.id],
+      ),
+      queryOne(
+        `select count(*) as count from broadcast_deliveries
+         where broadcast_id = ? and channel = 'telegram'`,
+        [broadcast.id],
+      ),
+    ]);
+    const activePopupEligible =
+      broadcast.showAsPopup &&
+      broadcast.isActive &&
+      !broadcast.deletedAt &&
+      ["sent", "sending"].includes(broadcast.status) &&
+      (!broadcast.expiresAt || broadcast.expiresAt > nowIso())
+        ? targetUsers.filter((user) =>
+            broadcast.targetType === "telegram_verified_users" ||
+            broadcast.targetType === "verified_users"
+              ? user.telegramVerified
+              : true,
+          ).length
+        : 0;
+
+    stats.push({
+      broadcastId: broadcast.id,
+      targetCount: targetUsers.length,
+      websiteDeliveries: Number(websiteRow?.count ?? 0),
+      telegramDeliveries: Number(telegramRow?.count ?? 0),
+      activePopupEligible,
+    });
+  }
+
+  return stats;
+}
+
+export async function getAdminArchiveLedger(input?: {
+  query?: string | null;
+  eventType?: string | null;
+  limit?: number;
+}) {
+  await ensureDatabase();
+  await ensureArchiveTrustTables();
+  const where: string[] = ["1 = 1"];
+  const args: SqlValue[] = [];
+  const query = input?.query?.trim();
+  if (query) {
+    where.push(
+      `(ledger_id like ? or user_id like ? or entity_id like ? or related_order_id like ? or related_transaction_id like ?)`,
+    );
+    const value = `%${query}%`;
+    args.push(value, value, value, value, value);
+  }
+  if (input?.eventType) {
+    where.push("event_type = ?");
+    args.push(input.eventType);
+  }
+  const rows = await queryMany(
+    `select * from archive_ledger
+     where ${where.join(" and ")}
+     order by created_at desc
+     limit ?`,
+    [...args, Math.min(Math.max(input?.limit ?? 100, 1), 250)],
+  );
+  return rows.map((row) => normalizeArchiveLedger(row));
+}
+
+export async function verifyArchiveLedgerEntry(id: string) {
+  await ensureDatabase();
+  const row = await queryOne("select * from archive_ledger where id = ? limit 1", [id]);
+  if (!row) {
+    return null;
+  }
+  const record = normalizeArchiveLedger(row);
+  const expected = buildArchiveLedgerHash({
+    eventType: record.eventType,
+    entityId: record.entityId,
+    metadata: record.metadata ?? "{}",
+    previousHash: record.previousHash,
+    createdAt: record.createdAt,
+  });
+  return {
+    record,
+    valid: expected === record.eventHash,
+    expectedHash: expected,
+  };
+}
+
+type ProviderIntelligenceRange = "24h" | "7d" | "30d" | "all";
+
+function resolveProviderWindow(range: ProviderIntelligenceRange = "24h") {
+  const now = Date.now();
+  if (range === "7d") {
+    return {
+      range,
+      label: "Last 7 days",
+      from: new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+  }
+  if (range === "30d") {
+    return {
+      range,
+      label: "Last 30 days",
+      from: new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+  }
+  if (range === "all") {
+    return {
+      range,
+      label: "All time",
+      from: null,
+    };
+  }
+  return {
+    range: "24h" as const,
+    label: "Last 24 hours",
+    from: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+  };
+}
+
+function buildProviderFilters(input: {
+  from: string | null;
+  environment: "production" | "test" | "development" | "all";
+}) {
+  const where = ["payment_provider = 'TransVoucher'"];
+  const args: SqlValue[] = [];
+  if (input.from) {
+    where.push("created_at >= ?");
+    args.push(input.from);
+  }
+  if (input.environment !== "all") {
+    where.push("coalesce(environment, 'production') = ?");
+    args.push(input.environment);
+  }
+  return {
+    clause: where.join(" and "),
+    args,
+  };
+}
+
+export async function getProviderIntelligence(input?: {
+  range?: ProviderIntelligenceRange;
+  environment?: "production" | "test" | "development" | "all";
+}) {
+  await ensureDatabase();
+  await ensurePaymentReconciliationRunsTable();
+  await ensureArchiveTrustTables();
+  const selectedWindow = resolveProviderWindow(input?.range ?? "24h");
+  const environment = input?.environment ?? "production";
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const filter = buildProviderFilters({
+    from: selectedWindow.from,
+    environment,
+  });
+  const reconciliationWhere = selectedWindow.from
+    ? "provider = 'TransVoucher' and started_at >= ?"
+    : "provider = 'TransVoucher'";
+  const reconciliationArgs = selectedWindow.from ? [selectedWindow.from] : [];
+  const webhookWhere = selectedWindow.from
+    ? "provider = 'TransVoucher' and received_at >= ?"
+    : "provider = 'TransVoucher'";
+  const webhookArgs = selectedWindow.from ? [selectedWindow.from] : [];
+  const [
+    lastRun,
+    created,
+    succeeded,
+    failed,
+    expired,
+    pending,
+    pending15,
+    pending60,
+    lastWebhook,
+    invalidWebhooks,
+    duplicateWebhooks,
+    failedReasons,
+    reconciliationTotals,
+  ] = await Promise.all([
+    queryOne(
+      `select * from payment_reconciliation_runs
+       where provider = 'TransVoucher'
+       order by started_at desc
+       limit 1`,
+    ),
+    queryOne(`select count(*) as count from transactions where ${filter.clause}`, filter.args),
+    queryOne(
+      `select count(*) as count from transactions where ${filter.clause} and status = 'completed'`,
+      filter.args,
+    ),
+    queryOne(
+      `select count(*) as count from transactions where ${filter.clause} and status = 'failed'`,
+      filter.args,
+    ),
+    queryOne(
+      `select count(*) as count from transactions where ${filter.clause} and status = 'expired'`,
+      filter.args,
+    ),
+    queryOne(
+      `select count(*) as count from transactions
+       where ${filter.clause}
+         and status in ('pending', 'attempting', 'processing')`,
+      filter.args,
+    ),
+    queryOne(
+      `select count(*) as count from transactions
+       where payment_provider = 'TransVoucher'
+         and coalesce(environment, 'production') = ?
+         and status in ('pending', 'attempting', 'processing')
+         and created_at >= ?
+         and created_at < ?`,
+      [environment, dayAgo, new Date(Date.now() - 15 * 60 * 1000).toISOString()],
+    ),
+    queryOne(
+      `select count(*) as count from transactions
+       where payment_provider = 'TransVoucher'
+         and coalesce(environment, 'production') = ?
+         and status in ('pending', 'attempting', 'processing')
+         and created_at >= ?
+         and created_at < ?`,
+      [environment, dayAgo, new Date(Date.now() - 60 * 60 * 1000).toISOString()],
+    ),
+    queryOne(
+      `select * from webhook_events
+       where provider = 'TransVoucher'
+       order by received_at desc
+       limit 1`,
+    ),
+    queryOne(
+      `select count(*) as count from webhook_events where ${webhookWhere} and valid_signature = 0`,
+      webhookArgs,
+    ),
+    queryOne(
+      `select count(*) as count from webhook_events where ${webhookWhere} and duplicate = 1`,
+      webhookArgs,
+    ),
+    queryMany(
+      `select coalesce(last_error, provider_status, 'unknown') as reason, count(*) as count
+       from transactions
+       where ${filter.clause} and status = 'failed'
+       group by coalesce(last_error, provider_status, 'unknown')
+       order by count desc
+       limit 6`,
+      filter.args,
+    ),
+    queryOne(
+      `select
+        coalesce(sum(checked_count), 0) as checked,
+        coalesce(sum(succeeded_count), 0) as succeeded,
+        coalesce(sum(failed_count), 0) as failed,
+        coalesce(sum(expired_count), 0) as expired,
+        coalesce(sum(skipped_count), 0) as skipped
+       from payment_reconciliation_runs
+       where ${reconciliationWhere}`,
+      reconciliationArgs,
+    ),
+  ]);
+
+  async function successRate(since: string | null) {
+    const successFilter = buildProviderFilters({
+      from: since,
+      environment,
+    });
+    const row = await queryOne(
+      `select
+        sum(case when status = 'completed' then 1 else 0 end) as succeeded,
+        sum(case when status in ('completed', 'failed', 'expired') then 1 else 0 end) as completed_attempts
+       from transactions
+       where ${successFilter.clause}`,
+      successFilter.args,
+    );
+    const completedAttempts = Number(row?.completed_attempts ?? 0);
+    return completedAttempts > 0
+      ? Math.round((Number(row?.succeeded ?? 0) / completedAttempts) * 100)
+      : 0;
+  }
+
+  const [success24h, success7d, success30d] = await Promise.all([
+    successRate(dayAgo),
+    successRate(weekAgo),
+    successRate(monthAgo),
+  ]);
+  const createdCount = Number(created?.count ?? 0);
+  const succeededCount = Number(succeeded?.count ?? 0);
+  const failedCount = Number(failed?.count ?? 0);
+  const pendingCount = Number(pending?.count ?? 0);
+  const expiredCount = Number(expired?.count ?? 0);
+  const completedAttempts = succeededCount + failedCount + expiredCount;
+  const selectedSuccessRate =
+    completedAttempts > 0 ? Math.round((succeededCount / completedAttempts) * 100) : 0;
+  const pending15Count = Number(pending15?.count ?? 0);
+  const hasRecentReconciliationError = Boolean(
+    lastRun?.last_error &&
+      lastRun?.started_at &&
+      (!selectedWindow.from || String(lastRun.started_at) >= selectedWindow.from),
+  );
+  const status =
+    createdCount === 0
+      ? "No recent activity"
+      : (completedAttempts >= 5 && selectedSuccessRate < 70) ||
+          pending15Count > 10 ||
+          hasRecentReconciliationError
+        ? "Degraded"
+        : "Operational";
+
+  return {
+    provider: "TransVoucher",
+    status,
+    window: selectedWindow.label,
+    range: selectedWindow.range,
+    environment: environment === "all" ? "All environments" : "Production",
+    lastApiCheck: lastRun?.started_at ? String(lastRun.started_at) : null,
+    lastWebhookReceived: lastWebhook?.received_at ? String(lastWebhook.received_at) : null,
+    lastReconciliationRun: lastRun?.started_at ? String(lastRun.started_at) : null,
+    funnel: {
+      created: createdCount,
+      succeeded: succeededCount,
+      failed: failedCount,
+      expired: expiredCount,
+      pending: pendingCount,
+    },
+    successRate: {
+      last24h: success24h,
+      last7d: success7d,
+      last30d: success30d,
+    },
+    pendingTooLong: {
+      over15m: pending15Count,
+      over1h: Number(pending60?.count ?? 0),
+    },
+    reconciliation: {
+      checked: Number(reconciliationTotals?.checked ?? 0),
+      succeeded: Number(reconciliationTotals?.succeeded ?? 0),
+      failed: Number(reconciliationTotals?.failed ?? 0),
+      expired: Number(reconciliationTotals?.expired ?? 0),
+      skipped: Number(reconciliationTotals?.skipped ?? 0),
+      lastError: lastRun?.last_error ? String(lastRun.last_error) : null,
+    },
+    webhook: {
+      invalidSignatureCount: Number(invalidWebhooks?.count ?? 0),
+      duplicateCount: Number(duplicateWebhooks?.count ?? 0),
+    },
+    failedReasons: failedReasons.map((row) => ({
+      reason: String(row.reason),
+      count: Number(row.count ?? 0),
+    })),
+  };
+}
+
+export async function sendBroadcastNow(input: {
+  broadcastId: string;
+  adminUserId: string;
+}) {
+  await ensureDatabase();
+  const broadcast = await getBroadcastById(input.broadcastId);
+
+  if (!broadcast) {
+    throw new Error("Broadcast not found.");
+  }
+
+  if (broadcast.deletedAt || !broadcast.isActive) {
+    throw new Error("Broadcast is not active.");
+  }
+
+  const timestamp = nowIso();
+  const channels = fromJson<string[]>(broadcast.channels) ?? ["website"];
+  const targetUsers = await resolveBroadcastTargetUsers({
+    targetType: broadcast.targetType,
+    targetFilters: fromJson<Record<string, unknown>>(broadcast.targetFilters),
+  });
+  let delivered = 0;
+  let failed = 0;
+  let skipped = 0;
+  let telegramChannelStatus: "not_requested" | "delivered" | "skipped" | "failed" =
+    "not_requested";
+
+  await execute(
+    "update broadcasts set status = 'sending', updated_at = ? where id = ?",
+    [timestamp, broadcast.id],
+  );
+
+  if (channels.includes("telegram")) {
+    try {
+      const channelResult = await sendBroadcastTelegramChannelPost({
+        title: broadcast.title,
+        body: broadcast.body,
+        ctaLabel: broadcast.ctaLabel,
+        ctaUrl: broadcast.ctaUrl,
+      });
+      telegramChannelStatus = channelResult.skipped ? "skipped" : "delivered";
+      await execute(
+        `update broadcasts set
+          telegram_channel_enabled = 1,
+          telegram_channel_id = ?,
+          telegram_channel_message_id = ?,
+          telegram_channel_status = ?,
+          telegram_channel_error = null,
+          telegram_channel_sent_at = ?,
+          telegram_channel_caption = ?,
+          telegram_channel_translated = ?,
+          telegram_channel_image_path = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          channelResult.channelId || TELEGRAM_CHANNEL_CHAT_ID,
+          channelResult.messageId,
+          telegramChannelStatus,
+          timestamp,
+          channelResult.caption,
+          channelResult.translated ? 1 : 0,
+          channelResult.imagePath,
+          timestamp,
+          broadcast.id,
+        ],
+      );
+      if (channelResult.skipped) {
+        skipped += 1;
+      }
+    } catch (error) {
+      telegramChannelStatus = "failed";
+      failed += 1;
+      await execute(
+        `update broadcasts set
+          telegram_channel_enabled = 1,
+          telegram_channel_id = ?,
+          telegram_channel_status = 'failed',
+          telegram_channel_error = ?,
+          telegram_channel_sent_at = null,
+          telegram_channel_caption = ?,
+          telegram_channel_translated = ?,
+          telegram_channel_image_path = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          TELEGRAM_CHANNEL_CHAT_ID,
+          error instanceof Error ? error.message : "Telegram channel delivery failed.",
+          getTelegramChannelCaptionPreview({
+            title: broadcast.title,
+            body: broadcast.body,
+          }).caption,
+          looksEnglish(`${broadcast.title} ${broadcast.body}`) ? 1 : 0,
+          "public/broadcast/rebohrome-notification.png",
+          timestamp,
+          broadcast.id,
+        ],
+      );
+      console.warn("[broadcast] Telegram channel post failed.", error);
+    }
+  }
+
+  for (const user of targetUsers) {
+    if (channels.includes("website")) {
+      const notificationId = randomUUID();
+      await execute(
+        `insert into user_notifications (
+          id, user_id, broadcast_id, type, title, body, cta_label, cta_url,
+          show_as_popup, dismissed_at, read_at, expires_at, created_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          notificationId,
+          user.id,
+          broadcast.id,
+          broadcast.type,
+          broadcast.title,
+          broadcast.body,
+          broadcast.ctaLabel,
+          broadcast.ctaUrl,
+          broadcast.showAsPopup ? 1 : 0,
+          null,
+          null,
+          broadcast.expiresAt,
+          timestamp,
+        ],
+      );
+      await execute(
+        `insert into broadcast_deliveries (
+          id, broadcast_id, user_id, channel, status, delivered_at, read_at,
+          skipped_reason, error_message, telegram_message_id, created_at, updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          randomUUID(),
+          broadcast.id,
+          user.id,
+          "website",
+          "delivered",
+          timestamp,
+          null,
+          null,
+          null,
+          null,
+          timestamp,
+          timestamp,
+        ],
+      );
+      delivered += 1;
+    }
+
+    if (channels.includes("telegram")) {
+      if (!user.telegramVerified || !user.telegramChatId) {
+        await execute(
+          `insert into broadcast_deliveries (
+            id, broadcast_id, user_id, channel, status, delivered_at, read_at,
+            skipped_reason, error_message, telegram_message_id, created_at, updated_at
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            randomUUID(),
+            broadcast.id,
+            user.id,
+            "telegram",
+            "skipped",
+            null,
+            null,
+            "Telegram is not verified or chat_id is missing.",
+            null,
+            null,
+            timestamp,
+            timestamp,
+          ],
+        );
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        const result = await sendTelegramUserMessage(
+          user.telegramChatId,
+          buildBroadcastTelegramMessage({
+            title: broadcast.title,
+            body: broadcast.body,
+            type: broadcast.type,
+          }),
+          broadcast.ctaUrl
+            ? {
+                replyMarkup: {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: broadcast.ctaLabel ?? "Open",
+                        url: broadcast.ctaUrl,
+                      },
+                    ],
+                  ],
+                },
+              }
+            : undefined,
+        );
+        await execute(
+          `insert into broadcast_deliveries (
+            id, broadcast_id, user_id, channel, status, delivered_at, read_at,
+            skipped_reason, error_message, telegram_message_id, created_at, updated_at
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            randomUUID(),
+            broadcast.id,
+            user.id,
+            "telegram",
+            result.skipped ? "skipped" : "delivered",
+            result.skipped ? null : timestamp,
+            null,
+            result.skipped ? "Telegram bot token is not configured." : null,
+            null,
+            result.result?.message_id ? String(result.result.message_id) : null,
+            timestamp,
+            timestamp,
+          ],
+        );
+        if (result.skipped) {
+          skipped += 1;
+        } else {
+          delivered += 1;
+        }
+      } catch (error) {
+        await execute(
+          `insert into broadcast_deliveries (
+            id, broadcast_id, user_id, channel, status, delivered_at, read_at,
+            skipped_reason, error_message, telegram_message_id, created_at, updated_at
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            randomUUID(),
+            broadcast.id,
+            user.id,
+            "telegram",
+            "failed",
+            null,
+            null,
+            null,
+            error instanceof Error ? error.message : "Telegram delivery failed.",
+            null,
+            timestamp,
+            timestamp,
+          ],
+        );
+        failed += 1;
+      }
+    }
+  }
+
+  const status = failed > 0 && delivered > 0 ? "partially_failed" : failed > 0 ? "failed" : "sent";
+  await execute(
+    "update broadcasts set status = ?, sent_at = ?, updated_at = ? where id = ?",
+    [status, timestamp, timestamp, broadcast.id],
+  );
+  await appendArchiveLedgerEntry({
+    eventType: "broadcast_sent",
+    adminId: input.adminUserId,
+    entityType: "broadcast",
+    entityId: broadcast.id,
+    title: "Broadcast sent",
+    description: `Archive broadcast ${broadcast.broadcastId} was delivered.`,
+    metadata: {
+      targetCount: targetUsers.length,
+      channels,
+      delivered,
+      failed,
+      skipped,
+      telegramChannelStatus,
+    },
+  });
+  await notifySafely(() =>
+    sendTelegramAdminMessage(
+      [
+        "<b>Broadcast Sent</b>",
+        "",
+        `Title: ${escapeTelegramHtml(broadcast.title)}`,
+        `Type: ${escapeTelegramHtml(broadcast.type)}`,
+        `Audience: ${escapeTelegramHtml(broadcast.targetType)}`,
+        `Channels: ${escapeTelegramHtml(channels.join(", "))}`,
+        `Delivered: ${delivered}`,
+        `Failed: ${failed}`,
+        `Skipped: ${skipped}`,
+        `Time: ${escapeTelegramHtml(formatUtcDateTime(timestamp))} UTC`,
+      ].join("\n"),
+    ),
+  );
+  revalidatePath("/notifications");
+  revalidateAdmin();
+  return { delivered, failed, skipped, targetCount: targetUsers.length, status };
+}
+
+export async function retryBroadcastTelegramChannel(input: {
+  broadcastId: string;
+  adminUserId: string;
+}) {
+  await ensureDatabase();
+  const broadcast = await getBroadcastById(input.broadcastId);
+
+  if (!broadcast) {
+    throw new Error("Broadcast not found.");
+  }
+
+  if (broadcast.deletedAt || !broadcast.isActive) {
+    throw new Error("Broadcast is not active.");
+  }
+
+  const channels = fromJson<string[]>(broadcast.channels) ?? [];
+  if (!channels.includes("telegram")) {
+    throw new Error("Broadcast does not have Telegram delivery enabled.");
+  }
+
+  const timestamp = nowIso();
+  let channelResult: Awaited<ReturnType<typeof sendBroadcastTelegramChannelPost>>;
+
+  try {
+    channelResult = await sendBroadcastTelegramChannelPost({
+      title: broadcast.title,
+      body: broadcast.body,
+      ctaLabel: broadcast.ctaLabel,
+      ctaUrl: broadcast.ctaUrl,
+    });
+  } catch (error) {
+    await execute(
+      `update broadcasts set
+        telegram_channel_status = 'failed',
+        telegram_channel_error = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        error instanceof Error ? error.message : "Telegram channel delivery failed.",
+        timestamp,
+        broadcast.id,
+      ],
+    );
+    throw error;
+  }
+
+  await execute(
+    `update broadcasts set
+      status = 'sent',
+      sent_at = coalesce(sent_at, ?),
+      telegram_channel_enabled = 1,
+      telegram_channel_id = ?,
+      telegram_channel_message_id = ?,
+      telegram_channel_status = ?,
+      telegram_channel_error = null,
+      telegram_channel_sent_at = ?,
+      telegram_channel_caption = ?,
+      telegram_channel_translated = ?,
+      telegram_channel_image_path = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      timestamp,
+      channelResult.channelId || TELEGRAM_CHANNEL_CHAT_ID,
+      channelResult.messageId,
+      channelResult.skipped ? "skipped" : "delivered",
+      timestamp,
+      channelResult.caption,
+      channelResult.translated ? 1 : 0,
+      channelResult.imagePath,
+      timestamp,
+      broadcast.id,
+    ],
+  );
+
+  await appendArchiveLedgerEntry({
+    eventType: "broadcast_sent",
+    adminId: input.adminUserId,
+    entityType: "broadcast",
+    entityId: broadcast.id,
+    title: "Telegram channel broadcast retried",
+    description: `Telegram channel post for ${broadcast.broadcastId} was delivered.`,
+    metadata: {
+      broadcastId: broadcast.broadcastId,
+      channel: "telegram",
+      retryOnly: true,
+      timestamp,
+    },
+  });
+
+  revalidateAdmin();
+  return { ok: true as const, broadcastId: broadcast.id };
+}
+
+export async function deleteBroadcast(input: {
+  broadcastId: string;
+  adminUserId: string;
+}) {
+  await ensureDatabase();
+  const timestamp = nowIso();
+  await execute(
+    `update broadcasts set
+      is_active = 0,
+      deleted_at = ?,
+      updated_by = ?,
+      updated_at = ?
+     where id = ?`,
+    [timestamp, input.adminUserId, timestamp, input.broadcastId],
+  );
+  await appendArchiveLedgerEntry({
+    eventType: "broadcast_deleted",
+    adminId: input.adminUserId,
+    entityType: "broadcast",
+    entityId: input.broadcastId,
+    title: "Broadcast removed",
+    description: "Admin removed an archive broadcast and disabled any popup.",
+    metadata: { deletedAt: timestamp },
+  });
+  revalidatePath("/notifications");
+  revalidateAdmin();
+}
+
+export async function getUserNotifications(userId: string) {
+  await ensureDatabase();
+  await ensureArchiveTrustTables();
+  const rows = await queryMany(
+    `select * from user_notifications
+     where user_id = ?
+       and (expires_at is null or expires_at > ?)
+     order by created_at desc`,
+    [userId, nowIso()],
+  );
+  return rows.map((row) => normalizeUserNotification(row));
+}
+
+export async function getUnreadNotificationCount(userId: string) {
+  await ensureDatabase();
+  const row = await queryOne(
+    `select count(*) as count from user_notifications
+     where user_id = ?
+       and read_at is null
+       and (expires_at is null or expires_at > ?)`,
+    [userId, nowIso()],
+  );
+  return Number(row?.count ?? 0);
+}
+
+export async function markNotificationRead(input: {
+  userId: string;
+  notificationId?: string | null;
+  all?: boolean;
+}) {
+  await ensureDatabase();
+  const timestamp = nowIso();
+  if (input.all) {
+    await execute(
+      "update user_notifications set read_at = coalesce(read_at, ?) where user_id = ?",
+      [timestamp, input.userId],
+    );
+  } else if (input.notificationId) {
+    await execute(
+      "update user_notifications set read_at = coalesce(read_at, ?) where user_id = ? and id = ?",
+      [timestamp, input.userId, input.notificationId],
+    );
+  }
+  revalidatePath("/notifications");
+}
+
+export async function getActiveUserPopups(userId: string) {
+  await ensureDatabase();
+  const user = await getUserById(userId);
+
+  if (!user || !user.telegramVerified || user.isDeleted || user.status === "blocked") {
+    return [];
+  }
+
+  const timestamp = nowIso();
+  const notificationRows = await queryMany(
+    `select user_notifications.*
+     from user_notifications
+     inner join broadcasts on broadcasts.id = user_notifications.broadcast_id
+     where user_notifications.user_id = ?
+       and broadcasts.is_active = 1
+       and broadcasts.deleted_at is null
+       and broadcasts.show_as_popup = 1
+       and broadcasts.status in ('sent', 'sending')
+       and user_notifications.show_as_popup = 1
+       and (broadcasts.expires_at is null or broadcasts.expires_at > ?)
+       and (
+         broadcasts.allow_user_dismiss = 0
+         or user_notifications.dismissed_at is null
+     )
+     order by user_notifications.created_at desc
+     limit 1`,
+    [userId, timestamp],
+  );
+  if (notificationRows.length > 0) {
+    return notificationRows.map((row) => normalizeUserNotification(row));
+  }
+
+  const broadcastRows = await queryMany(
+    `select broadcasts.*
+     from broadcasts
+     where broadcasts.is_active = 1
+       and broadcasts.deleted_at is null
+       and broadcasts.show_as_popup = 1
+       and broadcasts.status in ('sent', 'sending')
+       and (broadcasts.expires_at is null or broadcasts.expires_at > ?)
+       and (
+         broadcasts.target_type not in ('telegram_verified_users', 'verified_users')
+         or ? = 1
+       )
+     order by broadcasts.created_at desc
+     limit 1`,
+    [timestamp, user.telegramVerified ? 1 : 0],
+  );
+
+  return broadcastRows.map((row) => {
+    const broadcast = normalizeBroadcast(row);
+    return {
+      id: broadcast.id,
+      userId,
+      broadcastId: broadcast.id,
+      type: broadcast.type,
+      title: broadcast.title,
+      body: broadcast.body,
+      ctaLabel: broadcast.ctaLabel,
+      ctaUrl: broadcast.ctaUrl,
+      showAsPopup: true,
+      dismissedAt: null,
+      readAt: null,
+      expiresAt: broadcast.expiresAt,
+      createdAt: broadcast.createdAt,
+    };
+  });
 }
 
 async function hasRecentSecurityAuditEvent(input: {
@@ -798,6 +2899,7 @@ async function assertDatabaseReady() {
   );
 
   if (missingTables.length === 0) {
+    await ensureApplicationColumns();
     return;
   }
 
@@ -872,6 +2974,7 @@ async function seedAdminAccount() {
      from users
      inner join profiles on profiles.user_id = users.id
      where users.username = ?
+       and coalesce(users.is_deleted, 0) = 0
      limit 1`,
     [username],
   );
@@ -1010,16 +3113,43 @@ async function getUserRowById(userId: string) {
   );
 }
 
-async function getUserRowByTelegramUsername(telegramUsername: string) {
+async function getUserRowByTelegramHandle(telegramUsername: string) {
+  const handle = normalizeTelegramUsername(telegramUsername);
   return queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
       profiles.withdrawal_wallet, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
-     where profiles.telegram_username = ?
+     where profiles.telegram_username = ? or profiles.telegram_id = ?
      limit 1`,
-    [normalizeTelegramUsername(telegramUsername)],
+    [handle, handle],
+  );
+}
+
+async function getUserRowByTelegramId(telegramId: string | number) {
+  return queryOne(
+    `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
+      profiles.withdrawal_wallet, profiles.verified
+     from users
+     inner join profiles on profiles.user_id = users.id
+     where profiles.telegram_id = ?
+     limit 1`,
+    [String(telegramId)],
+  );
+}
+
+async function getUserRowByUsername(username: string) {
+  return queryOne(
+    `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
+      profiles.withdrawal_wallet, profiles.verified
+     from users
+     inner join profiles on profiles.user_id = users.id
+     where users.username = ?
+     limit 1`,
+    [normalizeUsername(username)],
   );
 }
 
@@ -1368,9 +3498,13 @@ function mapProviderStatusToTransactionStatus(
     normalized === "declined" ||
     normalized === "cancelled" ||
     normalized === "canceled" ||
-    normalized === "expired"
+    normalized === "rejected"
   ) {
     return "failed";
+  }
+
+  if (normalized === "expired" || normalized === "timeout") {
+    return "expired";
   }
 
   return "pending";
@@ -1458,6 +3592,32 @@ function isProviderCompletedStatus(status: string) {
 
 function isProviderFailedStatus(status: string) {
   return mapProviderStatusToTransactionStatus(status) === "failed";
+}
+
+function isProviderExpiredStatus(status: string) {
+  return mapProviderStatusToTransactionStatus(status) === "expired";
+}
+
+function isProviderTerminalFailureStatus(status: string) {
+  return isProviderFailedStatus(status) || isProviderExpiredStatus(status);
+}
+
+function getNextTransVoucherCheckAt(createdAt: string, checkedAt = nowIso()) {
+  const createdMs = new Date(createdAt).getTime();
+  const checkedMs = new Date(checkedAt).getTime();
+  const ageMinutes = Number.isFinite(createdMs)
+    ? Math.max(0, (checkedMs - createdMs) / 60_000)
+    : 60;
+
+  if (ageMinutes < 15) {
+    return new Date(checkedMs + 60_000).toISOString();
+  }
+
+  if (ageMinutes < 60) {
+    return new Date(checkedMs + 5 * 60_000).toISOString();
+  }
+
+  return new Date(checkedMs + 15 * 60_000).toISOString();
 }
 
 function buildTransVoucherPaymentReference(input: {
@@ -1619,6 +3779,12 @@ function buildWithdrawalTelegramMessage(input: {
   telegramId: string;
   walletAddress: string;
   amount: number;
+  requestedAmount: number;
+  basePayoutPercent: number;
+  bonusPayoutPercent: number;
+  finalPayoutPercent: number;
+  payoutAmount: number;
+  totalDeposited: number;
   requestId: string;
   status: WithdrawalStatus;
   updatedAt: string;
@@ -1628,14 +3794,27 @@ function buildWithdrawalTelegramMessage(input: {
   sourceCardholderName: string | null;
   syncStatus: TelegramSyncStatus;
 }) {
+  const progress = getPayoutTierProgress(input.totalDeposited);
+
   return [
-    "<b>Withdrawal Request</b>",
+    "<b>New Withdrawal Request</b>",
     "",
     `User: ${input.telegramUsername}`,
     `Username: ${input.username}`,
     `Telegram ID: ${input.telegramId}`,
     `Wallet: <code>${input.walletAddress}</code>`,
-    `Amount: ${formatUsd(input.amount)}`,
+    "",
+    `Requested Amount: ${formatUsd(input.requestedAmount)}`,
+    "",
+    "Payout Calculation:",
+    `Base Percent: ${input.basePayoutPercent}%`,
+    `User Bonus: +${input.bonusPayoutPercent}%`,
+    `Final Percent: ${input.finalPayoutPercent}%`,
+    `Final Payout Amount: ${formatUsd(input.payoutAmount)}`,
+    "",
+    `Total Deposited: ${formatUsd(input.totalDeposited)}`,
+    `Progress: ${formatUsd(input.totalDeposited)} / ${formatUsd(progress.nextThreshold)}`,
+    "",
     `Request ID: ${input.requestId}`,
     "",
     "Current Status:",
@@ -2256,12 +4435,25 @@ function getWithdrawalTargetStatus(actionType: string): WithdrawalStatus {
     case "processing":
       return "processing";
     case "decline":
+    case "reject":
       return "declined";
     case "complete":
+    case "paid":
       return "completed";
     default:
       throw new Error("Unsupported withdrawal action.");
   }
+}
+
+function normalizeTelegramWithdrawalAction(actionType: string) {
+  const normalized = actionType.trim().toLowerCase();
+  if (normalized === "reject") {
+    return "decline";
+  }
+  if (normalized === "paid") {
+    return "complete";
+  }
+  return normalized;
 }
 
 function createTelegramActionTokenId() {
@@ -2279,13 +4471,6 @@ function createTelegramCallbackSignature(input: {
     )
     .digest("hex")
     .slice(0, 12);
-}
-
-function buildTelegramCallbackData(input: {
-  tokenId: string;
-  signature: string;
-}) {
-  return `wd:${input.tokenId}:${input.signature}`;
 }
 
 async function getAdminIdentity(adminUserId: string) {
@@ -2310,11 +4495,13 @@ async function getWithdrawalNotificationContext(withdrawalId: string) {
       withdrawal_requests.*,
       users.username,
       profiles.telegram_username,
+      balances.total_deposited,
       updater.username as updated_by_username,
       updater_profiles.telegram_username as updated_by_telegram_username
      from withdrawal_requests
      inner join users on users.id = withdrawal_requests.user_id
      inner join profiles on profiles.user_id = users.id
+     inner join balances on balances.user_id = users.id
      left join users as updater on updater.id = withdrawal_requests.last_updated_by_admin_id
      left join profiles as updater_profiles on updater_profiles.user_id = updater.id
      where withdrawal_requests.id = ?
@@ -2336,6 +4523,7 @@ async function getWithdrawalNotificationContext(withdrawalId: string) {
     updatedByTelegramUsername: row.updated_by_telegram_username
       ? String(row.updated_by_telegram_username)
       : null,
+    totalDeposited: Number(row.total_deposited ?? 0),
   };
 }
 
@@ -2370,12 +4558,19 @@ function getAllowedTelegramWithdrawalActions(status: WithdrawalStatus) {
     case "pending":
       return [
         { id: "approve", label: "Approve" },
-        { id: "decline", label: "Decline" },
+        { id: "decline", label: "Reject" },
       ] as const;
     case "approved":
-      return [{ id: "processing", label: "Processing" }] as const;
+      return [
+        { id: "processing", label: "Processing" },
+        { id: "complete", label: "Mark Paid" },
+        { id: "decline", label: "Reject" },
+      ] as const;
     case "processing":
-      return [{ id: "complete", label: "Complete" }] as const;
+      return [
+        { id: "complete", label: "Mark Paid" },
+        { id: "decline", label: "Reject" },
+      ] as const;
     case "completed":
     case "declined":
       return [] as const;
@@ -2399,6 +4594,8 @@ async function replaceWithdrawalTelegramTokens(input: {
 
   for (const action of getAllowedTelegramWithdrawalActions(input.status)) {
     const actionType = action.id;
+    const callbackAction =
+      actionType === "decline" ? "reject" : actionType === "complete" ? "paid" : actionType;
     const tokenId = createTelegramActionTokenId();
     const signature = createTelegramCallbackSignature({
       tokenId,
@@ -2425,7 +4622,7 @@ async function replaceWithdrawalTelegramTokens(input: {
 
     buttons.push({
       text: action.label,
-      callbackData: buildTelegramCallbackData({ tokenId, signature }),
+      callbackData: `withdrawal:${callbackAction}:${input.withdrawalId}`,
     });
   }
 
@@ -2460,6 +4657,12 @@ export async function syncWithdrawalTelegramMessage(withdrawalId: string) {
     telegramId: context.request.telegramId,
     walletAddress: context.request.walletAddress,
     amount: context.request.amount,
+    requestedAmount: context.request.requestedAmount,
+    basePayoutPercent: context.request.basePayoutPercent,
+    bonusPayoutPercent: context.request.bonusPayoutPercent,
+    finalPayoutPercent: context.request.finalPayoutPercent,
+    payoutAmount: context.request.payoutAmount,
+    totalDeposited: context.totalDeposited,
     requestId: context.request.id,
     status: context.request.status,
     updatedAt: context.request.updatedAt,
@@ -2736,7 +4939,7 @@ async function upsertTelegramUserFromStart(input: {
 
 export async function getAdminByTelegramUsername(telegramUsername: string) {
   await ensureDatabase();
-  const row = await getUserRowByTelegramUsername(telegramUsername);
+  const row = await getUserRowByTelegramHandle(telegramUsername);
 
   if (!row) {
     return null;
@@ -2744,6 +4947,794 @@ export async function getAdminByTelegramUsername(telegramUsername: string) {
 
   const user = normalizeUser(row);
   return user.role === "admin" ? user : null;
+}
+
+async function getAdminByTelegramMessageSender(message: NonNullable<TelegramUpdate["message"]>) {
+  const telegramId = message.from?.id ? String(message.from.id) : "";
+  const messageUsername = message.from?.username
+    ? normalizeTelegramUsername(message.from.username)
+    : null;
+  const adminIdAllowedByEnv =
+    telegramId && ADMIN_TELEGRAM_IDS.length > 0 && ADMIN_TELEGRAM_IDS.includes(telegramId);
+
+  if (telegramId) {
+    const rowByTelegramId = await getUserRowByTelegramId(telegramId);
+    if (rowByTelegramId) {
+      const user = normalizeUser(rowByTelegramId);
+      if (user.role === "admin") {
+        return {
+          admin: user,
+          label: messageUsername ?? user.telegramUsername ?? telegramId,
+          authorized: true,
+        };
+      }
+    }
+  }
+
+  if (messageUsername) {
+    const admin = await getAdminByTelegramUsername(messageUsername);
+    if (admin) {
+      return {
+        admin,
+        label: messageUsername,
+        authorized: true,
+      };
+    }
+  }
+
+  if (adminIdAllowedByEnv) {
+    const seedRow = await getUserRowByUsername(ADMIN_SEED_USERNAME);
+    if (seedRow) {
+      const seedAdmin = normalizeUser(seedRow);
+      if (seedAdmin.role === "admin") {
+        return {
+          admin: seedAdmin,
+          label: messageUsername ?? telegramId,
+          authorized: true,
+        };
+      }
+    }
+  }
+
+  return {
+    admin: null,
+    label: messageUsername ?? message.from?.first_name ?? telegramId,
+    authorized: false,
+  };
+}
+
+async function getAdminByTelegramCallbackSender(callback: NonNullable<TelegramUpdate["callback_query"]>) {
+  const telegramId = String(callback.from.id);
+  const callbackUsername = callback.from.username
+    ? normalizeTelegramUsername(callback.from.username)
+    : null;
+  const adminIdAllowedByEnv =
+    ADMIN_TELEGRAM_IDS.length > 0 && ADMIN_TELEGRAM_IDS.includes(telegramId);
+
+  const rowByTelegramId = await getUserRowByTelegramId(telegramId);
+  if (rowByTelegramId) {
+    const user = normalizeUser(rowByTelegramId);
+    if (user.role === "admin") {
+      return {
+        admin: user,
+        label: callbackUsername ?? user.telegramUsername ?? telegramId,
+        authorized: true,
+      };
+    }
+  }
+
+  if (callbackUsername) {
+    const admin = await getAdminByTelegramUsername(callbackUsername);
+    if (admin) {
+      return {
+        admin,
+        label: callbackUsername,
+        authorized: true,
+      };
+    }
+  }
+
+  if (adminIdAllowedByEnv) {
+    const seedRow = await getUserRowByUsername(ADMIN_SEED_USERNAME);
+    if (seedRow) {
+      const seedAdmin = normalizeUser(seedRow);
+      if (seedAdmin.role === "admin") {
+        return {
+          admin: seedAdmin,
+          label: callbackUsername ?? telegramId,
+          authorized: true,
+        };
+      }
+    }
+  }
+
+  return {
+    admin: null,
+    label: callbackUsername ?? callback.from.first_name ?? telegramId,
+    authorized: false,
+  };
+}
+
+async function processWithdrawalDirectCallback(callback: NonNullable<TelegramUpdate["callback_query"]>) {
+  const parts = String(callback.data ?? "").split(":");
+  const [, rawAction, withdrawalId] = parts;
+  const actionType = normalizeTelegramWithdrawalAction(rawAction ?? "");
+
+  if (parts.length !== 3 || !actionType || !withdrawalId) {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Malformed withdrawal action.",
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Malformed withdrawal callback data." };
+  }
+
+  let targetStatus: WithdrawalStatus;
+  try {
+    targetStatus = getWithdrawalTargetStatus(actionType);
+  } catch {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Unsupported withdrawal action.",
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Unsupported withdrawal action." };
+  }
+
+  const context = await getWithdrawalNotificationContext(withdrawalId);
+
+  if (!context) {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Withdrawal request not found.",
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Withdrawal request not found." };
+  }
+
+  const sender = await getAdminByTelegramCallbackSender(callback);
+  const chatId = String(callback.message?.chat.id ?? "");
+  const chatAllowed =
+    !ADMIN_TELEGRAM_CHAT_ID || !chatId || chatId === String(ADMIN_TELEGRAM_CHAT_ID);
+
+  if (!sender.authorized || !sender.admin || !chatAllowed) {
+    await insertWithdrawalHistory({
+      withdrawalId,
+      actionType: `unauthorized-${actionType}`,
+      previousStatus: context.request.status,
+      nextStatus: context.request.status,
+      source: "telegram-unauthorized",
+      adminUsername: sender.label,
+      note: `Unauthorized Telegram callback attempt from ${sender.label}.`,
+    });
+    revalidateAdmin();
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Not authorized",
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Unauthorized callback sender." };
+  }
+
+  if (!canTransitionWithdrawalStatus(context.request.status, targetStatus)) {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: `Cannot change ${context.request.status} to ${targetStatus}.`,
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Invalid withdrawal transition." };
+  }
+
+  await updateWithdrawalStatus({
+    withdrawalId,
+    status: targetStatus,
+    adminUserId: sender.admin.id,
+    adminNote: `Telegram action by ${sender.label}: ${rawAction}`,
+    source: "telegram",
+  });
+
+  await answerTelegramCallbackSafely({
+    callbackQueryId: callback.id,
+    text: `${formatCleanOperationalWithdrawalStatus(targetStatus)} applied`,
+    showAlert: false,
+  });
+
+  return { ok: true as const, withdrawalId, status: targetStatus };
+}
+
+function parseTelegramSendsCommand(text: string) {
+  const payload = text.replace(/^\/sends(?:@\w+)?\s*/i, "").trim();
+  if (!payload) {
+    return null;
+  }
+
+  const pipeParts = payload.split("|").map((part) => part.trim()).filter(Boolean);
+  if (pipeParts.length >= 2) {
+    return {
+      title: pipeParts[0],
+      body: pipeParts.slice(1).join(" | "),
+    };
+  }
+
+  const lines = payload.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length >= 2) {
+    return {
+      title: lines[0],
+      body: lines.slice(1).join("\n"),
+    };
+  }
+
+  return null;
+}
+
+type TelegramBroadcastDraftPayload = {
+  title?: string;
+  body?: string;
+  targetType?: "all_users" | "telegram_verified_users" | "admin_notice_only";
+  showAsPopup?: boolean;
+  channelEnabled?: boolean;
+};
+
+function getTelegramAdminIdFromMessage(message: NonNullable<TelegramUpdate["message"]>) {
+  return message.from?.id ? String(message.from.id) : "";
+}
+
+function getTelegramAdminIdFromCallback(callback: NonNullable<TelegramUpdate["callback_query"]>) {
+  return callback.from.id ? String(callback.from.id) : "";
+}
+
+function getBroadcastTargetLabel(targetType?: string) {
+  if (targetType === "all_users") {
+    return "All users";
+  }
+  if (targetType === "telegram_verified_users") {
+    return "Verified users";
+  }
+  if (targetType === "admin_notice_only") {
+    return "Admin notice only";
+  }
+  return "Not selected";
+}
+
+function buildTelegramBroadcastDraftPreview(payload: TelegramBroadcastDraftPayload) {
+  const title = payload.title ?? "Broadcast title";
+  const body = payload.body ?? "Broadcast message";
+  return [
+    buildTelegramBilingualCaption({ title, body }),
+    "",
+    `<b>Target:</b> ${escapeTelegramHtml(getBroadcastTargetLabel(payload.targetType))}`,
+    `<b>Popup:</b> ${payload.showAsPopup ? "Yes" : "No"}`,
+    `<b>Channel:</b> ${payload.channelEnabled === false ? "No" : "Yes"}`,
+  ].join("\n");
+}
+
+async function saveTelegramBroadcastSession(input: {
+  telegramAdminId: string;
+  step: string;
+  payload: TelegramBroadcastDraftPayload;
+}) {
+  const timestamp = nowIso();
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  const existing = await queryOne(
+    `select id from telegram_admin_sessions
+     where telegram_admin_id = ? and command = 'sends'
+     limit 1`,
+    [input.telegramAdminId],
+  );
+
+  if (existing?.id) {
+    await execute(
+      `update telegram_admin_sessions set
+        step = ?,
+        payload = ?,
+        expires_at = ?,
+        updated_at = ?
+       where id = ?`,
+      [input.step, toJson(input.payload), expiresAt, timestamp, String(existing.id)],
+    );
+    return String(existing.id);
+  }
+
+  const id = randomUUID();
+  await execute(
+    `insert into telegram_admin_sessions (
+      id, telegram_admin_id, command, step, payload, expires_at, created_at, updated_at
+    ) values (?, ?, 'sends', ?, ?, ?, ?, ?)`,
+    [id, input.telegramAdminId, input.step, toJson(input.payload), expiresAt, timestamp, timestamp],
+  );
+  return id;
+}
+
+async function getTelegramBroadcastSession(telegramAdminId: string) {
+  const row = await queryOne(
+    `select * from telegram_admin_sessions
+     where telegram_admin_id = ? and command = 'sends'
+     limit 1`,
+    [telegramAdminId],
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  if (String(row.expires_at) < nowIso()) {
+    await execute("delete from telegram_admin_sessions where id = ?", [String(row.id)]);
+    return {
+      expired: true as const,
+      id: String(row.id),
+      step: String(row.step),
+      payload: fromJson<TelegramBroadcastDraftPayload>(row.payload) ?? {},
+    };
+  }
+
+  return {
+    expired: false as const,
+    id: String(row.id),
+    step: String(row.step),
+    payload: fromJson<TelegramBroadcastDraftPayload>(row.payload) ?? {},
+  };
+}
+
+async function clearTelegramBroadcastSession(telegramAdminId: string) {
+  await execute(
+    "delete from telegram_admin_sessions where telegram_admin_id = ? and command = 'sends'",
+    [telegramAdminId],
+  );
+}
+
+async function startTelegramSendsConversation(message: NonNullable<TelegramUpdate["message"]>) {
+  const telegramAdminId = getTelegramAdminIdFromMessage(message);
+  await saveTelegramBroadcastSession({
+    telegramAdminId,
+    step: "title",
+    payload: {},
+  });
+  await notifySafely(() =>
+    sendTelegramUserMessage(message.chat.id, "Send broadcast title."),
+  );
+  return { ok: true as const, event: "sends-started" };
+}
+
+async function processTelegramSendsSessionMessage(
+  message: NonNullable<TelegramUpdate["message"]>,
+) {
+  const telegramAdminId = getTelegramAdminIdFromMessage(message);
+  const session = await getTelegramBroadcastSession(telegramAdminId);
+
+  if (!session) {
+    return null;
+  }
+
+  if (session.expired) {
+    await notifySafely(() =>
+      sendTelegramUserMessage(
+        message.chat.id,
+        "Broadcast draft expired. Send /sends to start again.",
+      ),
+    );
+    return { ok: true as const, event: "sends-expired" };
+  }
+
+  const text = String(message.text ?? "").trim();
+  if (!text || text.length > 1200) {
+    await notifySafely(() =>
+      sendTelegramUserMessage(message.chat.id, "Please send text under 1200 characters."),
+    );
+    return { ok: true as const, event: "sends-invalid-text" };
+  }
+
+  if (session.step === "title") {
+    const payload = { ...session.payload, title: text.slice(0, 140) };
+    await saveTelegramBroadcastSession({
+      telegramAdminId,
+      step: "body",
+      payload,
+    });
+    await notifySafely(() =>
+      sendTelegramUserMessage(message.chat.id, "Send broadcast message."),
+    );
+    return { ok: true as const, event: "sends-title-saved" };
+  }
+
+  if (session.step === "body") {
+    const payload = { ...session.payload, body: text.slice(0, 900) };
+    await saveTelegramBroadcastSession({
+      telegramAdminId,
+      step: "target",
+      payload,
+    });
+    await notifySafely(() =>
+      sendTelegramUserMessage(message.chat.id, "Choose target audience.", {
+        replyMarkup: {
+          inline_keyboard: [
+            [
+              { text: "All users", callback_data: "broadcast_target:all_users" },
+              { text: "Verified users", callback_data: "broadcast_target:telegram_verified_users" },
+            ],
+            [{ text: "Admin notice only", callback_data: "broadcast_target:admin_notice_only" }],
+          ],
+        },
+      }),
+    );
+    return { ok: true as const, event: "sends-body-saved" };
+  }
+
+  await notifySafely(() =>
+    sendTelegramUserMessage(message.chat.id, "Please use the buttons to continue."),
+  );
+  return { ok: true as const, event: "sends-awaiting-callback" };
+}
+
+async function processTelegramSendsCommand(message: NonNullable<TelegramUpdate["message"]>) {
+  const sender = await getAdminByTelegramMessageSender(message);
+  const chatAllowed =
+    !ADMIN_TELEGRAM_CHAT_ID || String(message.chat.id) === String(ADMIN_TELEGRAM_CHAT_ID);
+
+  if (!sender.authorized || !sender.admin || !chatAllowed) {
+    await notifySafely(() =>
+      sendTelegramUserMessage(message.chat.id, "Not authorized"),
+    );
+    return { ok: false as const, error: "Unauthorized /sends sender." };
+  }
+
+  const parsed = parseTelegramSendsCommand(message.text ?? "");
+  if (!parsed) {
+    return startTelegramSendsConversation(message);
+  }
+
+  const broadcast = await createBroadcast({
+    adminUserId: sender.admin.id,
+    title: parsed.title,
+    body: parsed.body,
+    type: "admin_notice",
+    priority: "normal",
+    ctaLabel: "Open ReboHrome",
+    ctaUrl: "https://www.rebohrome.com",
+    targetType: "telegram_channel",
+    channels: ["telegram"],
+    status: "draft",
+  });
+
+  if (!broadcast) {
+    await notifySafely(() =>
+      sendTelegramUserMessage(message.chat.id, "Broadcast preview could not be created."),
+    );
+    return { ok: false as const, error: "Broadcast preview could not be created." };
+  }
+
+  await notifySafely(() =>
+    sendTelegramUserMessage(message.chat.id, buildTelegramBilingualCaption(parsed), {
+      replyMarkup: {
+        inline_keyboard: [
+          [
+            {
+              text: "Send broadcast",
+              callback_data: `bc_send:${broadcast.id}`,
+            },
+            {
+              text: "Cancel",
+              callback_data: `bc_cancel:${broadcast.id}`,
+            },
+          ],
+        ],
+      },
+    }),
+  );
+
+  return { ok: true as const, broadcastId: broadcast.id, event: "sends-preview" };
+}
+
+async function processTelegramBroadcastSessionCallback(
+  callback: NonNullable<TelegramUpdate["callback_query"]>,
+) {
+  const sender = await getAdminByTelegramCallbackSender(callback);
+  const chatId = callback.message?.chat.id;
+  const telegramAdminId = getTelegramAdminIdFromCallback(callback);
+
+  if (!sender.authorized || !sender.admin || !chatId) {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Not authorized",
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Unauthorized broadcast session callback." };
+  }
+
+  const data = String(callback.data ?? "");
+
+  if (data === "broadcast_cancel") {
+    await clearTelegramBroadcastSession(telegramAdminId);
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Broadcast canceled.",
+      showAlert: false,
+    });
+    await notifySafely(() => sendTelegramUserMessage(chatId, "Broadcast canceled."));
+    return { ok: true as const, event: "sends-canceled" };
+  }
+
+  const session = await getTelegramBroadcastSession(telegramAdminId);
+  if (!session || session.expired) {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Draft expired.",
+      showAlert: true,
+    });
+    await notifySafely(() =>
+      sendTelegramUserMessage(chatId, "Broadcast draft expired. Send /sends to start again."),
+    );
+    return { ok: true as const, event: "sends-expired" };
+  }
+
+  if (data.startsWith("broadcast_target:")) {
+    const [, target] = data.split(":");
+    const targetType =
+      target === "verified_users" ? "telegram_verified_users" : target;
+    const payload = {
+      ...session.payload,
+      targetType: ["all_users", "telegram_verified_users", "admin_notice_only"].includes(targetType)
+        ? (targetType as TelegramBroadcastDraftPayload["targetType"])
+        : "telegram_verified_users",
+    };
+    await saveTelegramBroadcastSession({
+      telegramAdminId,
+      step: "popup",
+      payload,
+    });
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Target saved.",
+      showAlert: false,
+    });
+    await notifySafely(() =>
+      sendTelegramUserMessage(chatId, "Show as persistent popup?", {
+        replyMarkup: {
+          inline_keyboard: [
+            [
+              { text: "Yes", callback_data: "broadcast_popup:yes" },
+              { text: "No", callback_data: "broadcast_popup:no" },
+            ],
+          ],
+        },
+      }),
+    );
+    return { ok: true as const, event: "sends-target-saved" };
+  }
+
+  if (data.startsWith("broadcast_popup:")) {
+    const payload = {
+      ...session.payload,
+      showAsPopup: data.endsWith(":yes"),
+    };
+    await saveTelegramBroadcastSession({
+      telegramAdminId,
+      step: "channel",
+      payload,
+    });
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Popup choice saved.",
+      showAlert: false,
+    });
+    await notifySafely(() =>
+      sendTelegramUserMessage(chatId, "Duplicate to Telegram channel?", {
+        replyMarkup: {
+          inline_keyboard: [
+            [
+              { text: "Yes", callback_data: "broadcast_channel:yes" },
+              { text: "No", callback_data: "broadcast_channel:no" },
+            ],
+          ],
+        },
+      }),
+    );
+    return { ok: true as const, event: "sends-popup-saved" };
+  }
+
+  if (data.startsWith("broadcast_channel:")) {
+    const payload = {
+      ...session.payload,
+      channelEnabled: data.endsWith(":yes"),
+    };
+    await saveTelegramBroadcastSession({
+      telegramAdminId,
+      step: "preview",
+      payload,
+    });
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Channel choice saved.",
+      showAlert: false,
+    });
+    await notifySafely(() =>
+      sendTelegramUserMessage(chatId, buildTelegramBroadcastDraftPreview(payload), {
+        replyMarkup: {
+          inline_keyboard: [
+            [
+              { text: "Send broadcast", callback_data: "broadcast_send" },
+              { text: "Cancel", callback_data: "broadcast_cancel" },
+            ],
+          ],
+        },
+      }),
+    );
+    return { ok: true as const, event: "sends-preview" };
+  }
+
+  if (data === "broadcast_send") {
+    const payload = session.payload;
+    if (!payload.title || !payload.body || !payload.targetType) {
+      await answerTelegramCallbackSafely({
+        callbackQueryId: callback.id,
+        text: "Draft is incomplete.",
+        showAlert: true,
+      });
+      return { ok: false as const, error: "Incomplete broadcast draft." };
+    }
+
+    const channels = [
+      payload.targetType === "admin_notice_only" ? null : "website",
+      payload.channelEnabled === false ? null : "telegram",
+    ].filter((item): item is string => Boolean(item));
+
+    const broadcast = await createBroadcast({
+      adminUserId: sender.admin.id,
+      title: payload.title,
+      body: payload.body,
+      type: "admin_notice",
+      priority: "normal",
+      ctaLabel: "Open ReboHrome",
+      ctaUrl: "https://www.rebohrome.com",
+      targetType: payload.targetType,
+      targetFilters: {
+        createdFrom: "telegram_bot",
+        telegramAdminId,
+        telegramAdminUsername: callback.from.username ?? null,
+      },
+      channels: channels.length > 0 ? channels : ["telegram"],
+      status: "draft",
+      internalNote: `Created from Telegram bot by ${callback.from.username ?? telegramAdminId}.`,
+      showAsPopup:
+        payload.targetType === "telegram_verified_users" && Boolean(payload.showAsPopup),
+      allowUserDismiss: false,
+    });
+
+    if (!broadcast) {
+      await answerTelegramCallbackSafely({
+        callbackQueryId: callback.id,
+        text: "Failed to create broadcast.",
+        showAlert: true,
+      });
+      return { ok: false as const, error: "Failed to create website broadcast." };
+    }
+
+    try {
+      const result = await sendBroadcastNow({
+        broadcastId: broadcast.id,
+        adminUserId: sender.admin.id,
+      });
+      await clearTelegramBroadcastSession(telegramAdminId);
+      await answerTelegramCallbackSafely({
+        callbackQueryId: callback.id,
+        text: "Broadcast sent.",
+        showAlert: false,
+      });
+      await notifySafely(() =>
+        sendTelegramUserMessage(
+          chatId,
+          [
+            "<b>Broadcast sent</b>",
+            "",
+            `Target: ${escapeTelegramHtml(getBroadcastTargetLabel(payload.targetType))}`,
+            `Delivered: ${result.delivered}`,
+            `Failed: ${result.failed}`,
+            `Skipped: ${result.skipped}`,
+          ].join("\n"),
+        ),
+      );
+      return { ok: true as const, event: "sends-sent", broadcastId: broadcast.id };
+    } catch (error) {
+      await answerTelegramCallbackSafely({
+        callbackQueryId: callback.id,
+        text: "Broadcast failed.",
+        showAlert: true,
+      });
+      await notifySafely(() =>
+        sendTelegramUserMessage(
+          chatId,
+          `Website broadcast created, but delivery failed: ${escapeTelegramHtml(
+            error instanceof Error ? error.message : "Unknown error",
+          )}`,
+        ),
+      );
+      return { ok: false as const, error: "Broadcast delivery failed." };
+    }
+  }
+
+  await answerTelegramCallbackSafely({
+    callbackQueryId: callback.id,
+    text: "Unsupported broadcast action.",
+    showAlert: true,
+  });
+  return { ok: false as const, error: "Unsupported broadcast session action." };
+}
+
+async function processBroadcastTelegramCallback(callback: NonNullable<TelegramUpdate["callback_query"]>) {
+  const [action, broadcastId] = String(callback.data ?? "").split(":");
+  const sender = await getAdminByTelegramCallbackSender(callback);
+  const chatId = String(callback.message?.chat.id ?? "");
+  const chatAllowed =
+    !ADMIN_TELEGRAM_CHAT_ID || !chatId || chatId === String(ADMIN_TELEGRAM_CHAT_ID);
+
+  if (!sender.authorized || !sender.admin || !chatAllowed) {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Not authorized",
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Unauthorized broadcast callback sender." };
+  }
+
+  if (!broadcastId) {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Broadcast not found.",
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Missing broadcast id." };
+  }
+
+  const broadcast = await getBroadcastById(broadcastId);
+  if (!broadcast) {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Broadcast not found.",
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Broadcast not found." };
+  }
+
+  const timestamp = nowIso();
+
+  if (action === "bc_cancel") {
+    await execute(
+      "update broadcasts set status = 'canceled', is_active = 0, updated_at = ? where id = ?",
+      [timestamp, broadcast.id],
+    );
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Broadcast canceled.",
+      showAlert: false,
+    });
+    return { ok: true as const, broadcastId: broadcast.id, status: "canceled" };
+  }
+
+  if (action !== "bc_send") {
+    await answerTelegramCallbackSafely({
+      callbackQueryId: callback.id,
+      text: "Unsupported broadcast action.",
+      showAlert: true,
+    });
+    return { ok: false as const, error: "Unsupported broadcast action." };
+  }
+
+  await sendBroadcastTelegramChannelPost({
+    title: broadcast.title,
+    body: broadcast.body,
+    ctaLabel: broadcast.ctaLabel,
+    ctaUrl: broadcast.ctaUrl,
+  });
+  await execute(
+    "update broadcasts set status = 'sent', sent_at = ?, updated_at = ? where id = ?",
+    [timestamp, timestamp, broadcast.id],
+  );
+  await answerTelegramCallbackSafely({
+    callbackQueryId: callback.id,
+    text: "Broadcast sent.",
+    showAlert: false,
+  });
+
+  return { ok: true as const, broadcastId: broadcast.id, status: "sent" };
 }
 
 export async function processTelegramUpdate(update: TelegramUpdate) {
@@ -2794,7 +5785,30 @@ export async function processTelegramUpdate(update: TelegramUpdate) {
     return { ok: true as const, skipped: false as const, event: "start-linked" };
   }
 
+  if (message?.text?.startsWith("/sends")) {
+    return processTelegramSendsCommand(message);
+  }
+
+  if (message?.text) {
+    const sessionResult = await processTelegramSendsSessionMessage(message);
+    if (sessionResult) {
+      return sessionResult;
+    }
+  }
+
   const callback = update.callback_query;
+
+  if (callback?.data?.startsWith("broadcast_")) {
+    return processTelegramBroadcastSessionCallback(callback);
+  }
+
+  if (callback?.data?.startsWith("bc_")) {
+    return processBroadcastTelegramCallback(callback);
+  }
+
+  if (callback?.data?.startsWith("withdrawal:")) {
+    return processWithdrawalDirectCallback(callback);
+  }
 
   if (!callback?.data || !callback.data.startsWith("wd:")) {
     return { ok: true as const, skipped: true as const };
@@ -2993,6 +6007,10 @@ export async function ensureDatabase() {
           name text not null,
           password_hash text not null,
           status text not null,
+          require_password_reset integer not null default 0,
+          is_deleted integer not null default 0,
+          deleted_at text,
+          deleted_by text,
           created_at text not null,
           updated_at text not null,
           last_login_at text
@@ -3289,7 +6307,13 @@ export async function ensureDatabase() {
           meta_json text,
           created_at text not null,
           updated_at text not null,
-          paid_at text
+          paid_at text,
+          provider_checked_at text,
+          processed_at text,
+          credited_at text,
+          next_check_at text,
+          last_error text,
+          reconciliation_attempts integer not null default 0
         )`,
       );
 
@@ -3323,7 +6347,13 @@ export async function ensureDatabase() {
           id text primary key,
           user_id text not null,
           amount integer not null,
+          requested_amount integer,
+          base_payout_percent integer not null default 60,
+          bonus_payout_percent integer not null default 0,
+          final_payout_percent integer not null default 60,
+          payout_amount integer,
           wallet_address text not null,
+          wallet_usdt_bep20 text,
           telegram_id text not null,
           status text not null,
           source_deposit_id text,
@@ -3337,6 +6367,8 @@ export async function ensureDatabase() {
           telegram_last_error text,
           last_action_source text not null default 'system',
           last_updated_by_admin_id text,
+          status_updated_by text,
+          status_updated_at text,
           created_at text not null,
           updated_at text not null
         )`,
@@ -3435,7 +6467,9 @@ export async function ensureDatabase() {
         )`,
       );
 
+      await ensureArchiveTrustTables();
       await ensureColumn("withdrawal_requests", "telegram_chat_id text");
+      await ensureColumn("users", "require_password_reset integer not null default 0");
       await ensureColumn("profiles", "telegram_chat_id text");
       await ensureColumn("profiles", "telegram_verified integer not null default 0");
       await ensureColumn("profiles", "telegram_verified_at text");
@@ -3507,6 +6541,7 @@ export async function ensureDatabase() {
       await ensureColumn("products", "showcase_float real not null default 1");
       await ensureColumn("products", "showcase_rotation_seconds integer not null default 12");
       await ensureColumn("products", "status text not null default 'active'");
+      await ensureApplicationColumns();
 
       await execute(
         "update withdrawal_requests set status = 'declined' where status = 'rejected'",
@@ -3525,6 +6560,17 @@ export async function ensureDatabase() {
       );
       await execute(
         "update orders set provider_status = payment_state where provider_status is null or provider_status = ''",
+      );
+      await execute(
+        `update withdrawal_requests set
+          requested_amount = coalesce(requested_amount, amount),
+          payout_amount = coalesce(payout_amount, amount),
+          wallet_usdt_bep20 = coalesce(wallet_usdt_bep20, wallet_address),
+          status_updated_at = coalesce(status_updated_at, updated_at)
+         where requested_amount is null
+            or payout_amount is null
+            or wallet_usdt_bep20 is null
+            or status_updated_at is null`,
       );
       await execute(
         "update products set currency = 'USD' where currency is null or currency = ''",
@@ -4176,6 +7222,10 @@ export async function authenticateUser(input: {
     return null;
   }
 
+  if (String(row.status) !== "active") {
+    return null;
+  }
+
   const loginAt = nowIso();
   await execute("update users set last_login_at = ?, updated_at = ? where id = ?", [
     loginAt,
@@ -4231,6 +7281,7 @@ export async function getUserBySessionToken(token: string) {
      inner join users on users.id = sessions.user_id
      inner join profiles on profiles.user_id = users.id
      where sessions.token_hash = ?
+       and coalesce(users.is_deleted, 0) = 0
      limit 1`,
     [hashSessionToken(token)],
   );
@@ -4240,6 +7291,10 @@ export async function getUserBySessionToken(token: string) {
   }
 
   if (new Date(String(row.expires_at)).getTime() <= Date.now()) {
+    return null;
+  }
+
+  if (String(row.status) !== "active") {
     return null;
   }
 
@@ -4891,6 +7946,10 @@ export async function createWithdrawalRequest(input: {
     throw new Error("Add your USDT BEP20 wallet address in settings before requesting a withdrawal.");
   }
 
+  if (!isValidUsdtBep20Wallet(walletAddress)) {
+    throw new Error("Please enter a valid USDT BEP20 wallet address.");
+  }
+
   if (account.balance.available < input.amount) {
     await notifySafely(() =>
       sendTelegramAdminMessage(
@@ -4913,18 +7972,31 @@ export async function createWithdrawalRequest(input: {
   const withdrawalId = createReadableId("WDR");
   const timestamp = nowIso();
   const latestDeposit = await getLatestCompletedDeposit(input.userId);
+  const payout = calculateWithdrawalPayout({
+    requestedAmount: input.amount,
+    totalDepositedUsd: account.balance.totalDeposited,
+  });
 
   await execute(
     `insert into withdrawal_requests (
-      id, user_id, amount, wallet_address, telegram_id, status, source_deposit_id,
+      id, user_id, amount, requested_amount, base_payout_percent,
+      bonus_payout_percent, final_payout_percent, payout_amount, wallet_address,
+      wallet_usdt_bep20, telegram_id, status, source_deposit_id,
       source_card_masked, source_cardholder_name, admin_note, telegram_chat_id,
       telegram_message_id, telegram_sync_status, telegram_synced_at, telegram_last_error,
-      last_action_source, last_updated_by_admin_id, created_at, updated_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      last_action_source, last_updated_by_admin_id, status_updated_by,
+      status_updated_at, created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       withdrawalId,
       input.userId,
       input.amount,
+      payout.requestedAmount,
+      payout.basePayoutPercent,
+      payout.bonusPayoutPercent,
+      payout.finalPayoutPercent,
+      payout.payoutAmount,
+      walletAddress,
       walletAddress,
       account.user.telegramId,
       "pending",
@@ -4939,6 +8011,8 @@ export async function createWithdrawalRequest(input: {
       null,
       "system",
       null,
+      "system",
+      timestamp,
       timestamp,
       timestamp,
     ],
@@ -4962,6 +8036,12 @@ export async function createWithdrawalRequest(input: {
     summary: "Withdrawal request submitted",
     meta: {
       walletAddress,
+      requestedAmount: payout.requestedAmount,
+      basePayoutPercent: payout.basePayoutPercent,
+      bonusPayoutPercent: payout.bonusPayoutPercent,
+      finalPayoutPercent: payout.finalPayoutPercent,
+      payoutAmount: payout.payoutAmount,
+      totalDepositedUsd: account.balance.totalDeposited,
     },
   });
 
@@ -4999,6 +8079,20 @@ export async function createCheckoutPaymentSession(input: {
     throw new Error("Crypto checkout is not available in the TransVoucher flow.");
   }
 
+  const existingSession = await getActivePaymentSession(input.userId, "purchase");
+  if (existingSession) {
+    return {
+      sessionId: existingSession.id,
+      paymentUrl: existingSession.paymentUrl,
+      redirectPath:
+        existingSession.provider === "TransVoucher"
+          ? `/payment/transvoucher?session=${encodeURIComponent(existingSession.id)}`
+          : existingSession.paymentUrl,
+      activeSession: existingSession,
+      reusedExistingSession: true,
+    };
+  }
+
   const account = await getUserAndBalance(input.userId);
 
   if (!account) {
@@ -5027,16 +8121,12 @@ export async function createCheckoutPaymentSession(input: {
   const payment = await createTransVoucherPayment({
     amount: pricing.total,
     currency: input.currency,
-    title: `ReboHrome Order ${orderId}`,
-    description: `${input.items.length} archive collectible${
-      input.items.length === 1 ? "" : "s"
-    }`,
+    title: "ReboHrome Digital Collectible Purchase",
+    description: "Digital collectible card purchase",
     successUrl,
     cancelUrl,
     redirectUrl,
     customerDetails: {
-      username: account.user.username,
-      telegramUsername: account.user.telegramUsername,
       email: account.user.email,
     },
     metadata: {
@@ -5075,7 +8165,7 @@ export async function createCheckoutPaymentSession(input: {
       orderId,
       input.userId,
       "Pending",
-      initialTransactionStatus === "failed" ? "failed" : "pending",
+      ["failed", "expired"].includes(initialTransactionStatus) ? "failed" : "pending",
       pricing.subtotal,
       pricing.shipping,
       pricing.total,
@@ -5090,7 +8180,7 @@ export async function createCheckoutPaymentSession(input: {
       payment.transactionId,
       payment.referenceId,
       providerStatus || null,
-      initialTransactionStatus === "failed"
+      ["failed", "expired"].includes(initialTransactionStatus)
         ? "Unable to initialize TransVoucher payment."
         : null,
       account.balance.available,
@@ -5187,8 +8277,121 @@ export async function createCheckoutPaymentSession(input: {
   return {
     sessionId,
     paymentUrl: payment.paymentUrl,
-    redirectPath: payment.paymentUrl,
+    redirectPath: `/payment/transvoucher?session=${encodeURIComponent(sessionId)}`,
+    activeSession: null,
+    reusedExistingSession: false,
   };
+}
+
+export async function getActivePaymentSession(
+  userId: string,
+  type?: "deposit" | "purchase",
+): Promise<ActivePaymentSessionRecord | null> {
+  await ensureDatabase();
+  const now = nowIso();
+  const activeStatuses = ["created", "pending", "attempting", "processing"];
+  const results: ActivePaymentSessionRecord[] = [];
+
+  if (!type || type === "purchase") {
+    const row = await queryOne(
+      `select * from payment_sessions
+       where user_id = ?
+         and status in (${activeStatuses.map(() => "?").join(", ")})
+         and expires_at > ?
+       order by created_at desc
+       limit 1`,
+      [userId, ...activeStatuses, now],
+    );
+    if (row) {
+      results.push(normalizeActiveCheckoutSession(row));
+    }
+  }
+
+  if (!type || type === "deposit") {
+    const row = await queryOne(
+      `select * from deposit_payment_sessions
+       where user_id = ?
+         and status in (${activeStatuses.map(() => "?").join(", ")})
+         and expires_at > ?
+       order by created_at desc
+       limit 1`,
+      [userId, ...activeStatuses, now],
+    );
+    if (row) {
+      results.push(normalizeActiveDepositSession(row));
+    }
+  }
+
+  return results.sort(
+    (a, b) =>
+      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  )[0] ?? null;
+}
+
+export async function getActivePaymentSessions(userId: string) {
+  const [deposit, purchase] = await Promise.all([
+    getActivePaymentSession(userId, "deposit"),
+    getActivePaymentSession(userId, "purchase"),
+  ]);
+  return [deposit, purchase].filter(
+    (item): item is ActivePaymentSessionRecord => item !== null,
+  );
+}
+
+export async function checkActivePaymentSessionStatus(input: {
+  userId: string;
+  type?: "deposit" | "purchase";
+}) {
+  const session = await getActivePaymentSession(input.userId, input.type);
+  if (!session?.transactionId) {
+    return { session, transaction: null };
+  }
+  const transaction = await refreshTransVoucherTransactionStatus(
+    session.transactionId,
+    input.userId,
+  );
+  return {
+    session: await getActivePaymentSession(input.userId, session.type),
+    transaction,
+  };
+}
+
+export async function cancelActivePaymentSession(input: {
+  userId: string;
+  sessionId: string;
+  type: "deposit" | "purchase";
+}) {
+  await ensureDatabase();
+  const table = input.type === "deposit" ? "deposit_payment_sessions" : "payment_sessions";
+  const row = await queryOne(
+    `select * from ${table} where id = ? and user_id = ? limit 1`,
+    [input.sessionId, input.userId],
+  );
+  if (!row) {
+    throw new Error("Payment session not found.");
+  }
+  const status = String(row.status);
+  if (!["created", "pending", "attempting", "processing"].includes(status)) {
+    throw new Error("This payment session can no longer be canceled.");
+  }
+  const transactionId = row.transaction_id ? String(row.transaction_id) : null;
+  const timestamp = nowIso();
+  await execute(`update ${table} set status = 'canceled', updated_at = ? where id = ?`, [
+    timestamp,
+    input.sessionId,
+  ]);
+  if (transactionId) {
+    await execute(
+      `update transactions set
+        status = 'expired',
+        processed_at = coalesce(processed_at, ?),
+        updated_at = ?
+       where id = ? and user_id = ? and status in ('pending', 'attempting', 'processing')`,
+      [timestamp, timestamp, transactionId, input.userId],
+    );
+  }
+  revalidatePrivate(input.userId);
+  return { ok: true };
 }
 
 export async function createDepositPaymentSession(input: {
@@ -5212,6 +8415,20 @@ export async function createDepositPaymentSession(input: {
     throw new Error("Crypto deposits are not available in the TransVoucher flow.");
   }
 
+  const existingSession = await getActivePaymentSession(input.userId, "deposit");
+  if (existingSession) {
+    return {
+      sessionId: existingSession.id,
+      paymentUrl: existingSession.paymentUrl,
+      redirectPath:
+        existingSession.provider === "TransVoucher"
+          ? `/payment/deposit/transvoucher?session=${encodeURIComponent(existingSession.id)}`
+          : existingSession.paymentUrl,
+      activeSession: existingSession,
+      reusedExistingSession: true,
+    };
+  }
+
   const account = await getUserAndBalance(input.userId);
 
   if (!account) {
@@ -5231,14 +8448,12 @@ export async function createDepositPaymentSession(input: {
   const payment = await createTransVoucherPayment({
     amount: input.amount,
     currency: input.currency,
-    title: `ReboHrome Deposit ${depositId}`,
-    description: `Archive balance funding for ${account.user.username}`,
+    title: "ReboHrome Balance Top-Up",
+    description: "Top up balance",
     successUrl,
     cancelUrl,
     redirectUrl,
     customerDetails: {
-      username: account.user.username,
-      telegramUsername: account.user.telegramUsername,
       email: account.user.email,
     },
     metadata: {
@@ -5285,7 +8500,7 @@ export async function createDepositPaymentSession(input: {
       payment.referenceId,
       "TransVoucher hosted payment",
       paymentReference,
-      initialTransactionStatus === "failed" ? "failed" : "processing",
+      ["failed", "expired"].includes(initialTransactionStatus) ? "failed" : "processing",
       account.balance.available,
       account.balance.available,
       timestamp,
@@ -5368,7 +8583,9 @@ export async function createDepositPaymentSession(input: {
   return {
     sessionId,
     paymentUrl: payment.paymentUrl,
-    redirectPath: payment.paymentUrl,
+    redirectPath: `/payment/deposit/transvoucher?session=${encodeURIComponent(sessionId)}`,
+    activeSession: null,
+    reusedExistingSession: false,
   };
 }
 
@@ -5790,7 +9007,7 @@ async function reconcileTransVoucherPurchase(input: {
     return;
   }
 
-  if (isProviderFailedStatus(input.providerStatus)) {
+  if (isProviderTerminalFailureStatus(input.providerStatus)) {
     const failureReason =
       extractProviderFailureReason(input.rawProviderResponse) ??
       "Payment failed or was declined by TransVoucher.";
@@ -5861,8 +9078,10 @@ async function reconcileTransVoucherPurchase(input: {
         input.paymentUrl,
         input.providerStatus,
         rawProviderResponse,
-        "failed",
-        "Purchase declined",
+        mapProviderStatusToTransactionStatus(input.providerStatus),
+        isProviderExpiredStatus(input.providerStatus)
+          ? "Purchase payment expired"
+          : "Purchase declined",
         toJson({
           ...mergedMeta,
           reason: failureReason,
@@ -6141,7 +9360,7 @@ async function reconcileTransVoucherDeposit(input: {
     return;
   }
 
-  if (isProviderFailedStatus(input.providerStatus)) {
+  if (isProviderTerminalFailureStatus(input.providerStatus)) {
     const failureReason =
       extractProviderFailureReason(input.rawProviderResponse) ??
       "Payment failed or was declined by TransVoucher.";
@@ -6206,8 +9425,10 @@ async function reconcileTransVoucherDeposit(input: {
         input.paymentUrl,
         input.providerStatus,
         rawProviderResponse,
-        "failed",
-        "Deposit failed",
+        mapProviderStatusToTransactionStatus(input.providerStatus),
+        isProviderExpiredStatus(input.providerStatus)
+          ? "Deposit expired"
+          : "Deposit failed",
         toJson({
           ...mergedMeta,
           reason: failureReason,
@@ -6346,6 +9567,14 @@ async function applyTransVoucherPaymentStatus(input: {
   }
 
   const transaction = normalizeTransaction(transactionRow);
+  const normalizedProviderStatus = normalizeProviderStatus(input.providerStatus);
+
+  if (
+    transaction.processedAt &&
+    ["completed", "failed", "expired"].includes(transaction.status)
+  ) {
+    return transaction;
+  }
 
   if (transaction.kind === "purchase") {
     const [orderRow, sessionRow] = await Promise.all([
@@ -6363,7 +9592,7 @@ async function applyTransVoucherPaymentStatus(input: {
       transaction,
       order: normalizeOrder(orderRow),
       session: sessionRow ? normalizeCheckoutPaymentSession(sessionRow) : null,
-      providerStatus: normalizeProviderStatus(input.providerStatus),
+      providerStatus: normalizedProviderStatus,
       providerTransactionId:
         input.providerTransactionId ?? transaction.transvoucherTransactionId,
       providerReferenceId:
@@ -6389,7 +9618,7 @@ async function applyTransVoucherPaymentStatus(input: {
       transaction,
       deposit: normalizeDeposit(depositRow),
       session: sessionRow ? normalizeDepositPaymentSession(sessionRow) : null,
-      providerStatus: normalizeProviderStatus(input.providerStatus),
+      providerStatus: normalizedProviderStatus,
       providerTransactionId:
         input.providerTransactionId ?? transaction.transvoucherTransactionId,
       providerReferenceId:
@@ -6399,6 +9628,35 @@ async function applyTransVoucherPaymentStatus(input: {
       rawProviderResponse: input.rawProviderResponse,
     });
   }
+
+  const timestamp = nowIso();
+  const isFinalProviderState =
+    isProviderCompletedStatus(normalizedProviderStatus) ||
+    isProviderTerminalFailureStatus(normalizedProviderStatus);
+  const nextCheckAt = isFinalProviderState
+    ? null
+    : getNextTransVoucherCheckAt(transaction.createdAt, timestamp);
+
+  await execute(
+    `update transactions set
+      provider_checked_at = ?,
+      processed_at = case when ? = 1 then coalesce(processed_at, ?) else processed_at end,
+      credited_at = case when ? = 1 then coalesce(credited_at, ?) else credited_at end,
+      next_check_at = ?,
+      last_error = null
+     where id = ?`,
+    [
+      timestamp,
+      isFinalProviderState ? 1 : 0,
+      timestamp,
+      transaction.kind === "deposit" && isProviderCompletedStatus(normalizedProviderStatus)
+        ? 1
+        : 0,
+      timestamp,
+      nextCheckAt,
+      transaction.id,
+    ],
+  );
 
   const updatedRow = await queryOne("select * from transactions where id = ? limit 1", [
     transaction.id,
@@ -6433,6 +9691,15 @@ export async function refreshTransVoucherTransactionStatus(
     return transaction;
   }
 
+  await execute(
+    `update transactions set
+      provider_checked_at = ?,
+      reconciliation_attempts = reconciliation_attempts + 1,
+      updated_at = ?
+     where id = ?`,
+    [nowIso(), nowIso(), transaction.id],
+  );
+
   const providerStatus = await getTransVoucherPaymentStatus(
     transaction.transvoucherTransactionId,
   );
@@ -6446,6 +9713,154 @@ export async function refreshTransVoucherTransactionStatus(
     paidAt: providerStatus.paidAt,
     rawProviderResponse: providerStatus.raw,
   });
+}
+
+export async function reconcilePendingTransVoucherPayments(input?: {
+  limit?: number;
+  triggerSource?: "cron" | "manual";
+}) {
+  await ensureDatabase();
+
+  const limit = Math.min(Math.max(Number(input?.limit ?? 50), 1), 200);
+  const runId = randomUUID();
+  const startedAt = nowIso();
+  const baselineAt = await getTransVoucherReconciliationBaselineAt();
+
+  await execute(
+    `insert into payment_reconciliation_runs (
+      id, provider, started_at, trigger_source
+    ) values (?, ?, ?, ?)`,
+    [runId, "TransVoucher", startedAt, input?.triggerSource ?? "cron"],
+  );
+
+  const rows = await queryMany(
+    `select * from transactions
+     where payment_provider = 'TransVoucher'
+       and transvoucher_transaction_id is not null
+       and (? is null or created_at >= ?)
+       and processed_at is null
+       and credited_at is null
+       and (next_check_at is null or next_check_at <= ?)
+       and (
+         status in ('pending', 'attempting', 'processing')
+         or lower(coalesce(provider_status, '')) in ('', 'pending', 'attempting', 'processing', 'created')
+       )
+     order by coalesce(provider_checked_at, created_at) asc
+     limit ?`,
+    [baselineAt, baselineAt, startedAt, limit],
+  );
+
+  const summary = {
+    checked: 0,
+    succeeded: 0,
+    failed: 0,
+    expired: 0,
+    pending: 0,
+    skipped: 0,
+    errors: 0,
+    updated: 0,
+    lastRunAt: startedAt,
+    lastError: null as string | null,
+  };
+
+  for (const row of rows) {
+    const before = normalizeTransaction(row);
+    const ageMs = Date.now() - new Date(before.createdAt).getTime();
+
+    if (ageMs > 24 * 60 * 60 * 1000) {
+      summary.skipped += 1;
+      summary.expired += 1;
+      await applyTransVoucherPaymentStatus({
+        transactionId: before.id,
+        providerTransactionId: before.transvoucherTransactionId,
+        providerReferenceId: before.transvoucherReferenceId,
+        providerStatus: "expired",
+        paymentUrl: before.paymentUrl,
+        paidAt: null,
+        rawProviderResponse: {
+          source: "cron",
+          reason: "Pending TransVoucher transaction exceeded 24 hour reconciliation window.",
+        },
+      });
+      continue;
+    }
+
+    summary.checked += 1;
+
+    try {
+      const after = await refreshTransVoucherTransactionStatus(before.id);
+      const nextStatus = after?.status ?? before.status;
+      if (nextStatus !== before.status || after?.providerStatus !== before.providerStatus) {
+        summary.updated += 1;
+      }
+
+      if (nextStatus === "completed") {
+        summary.succeeded += 1;
+      } else if (nextStatus === "failed") {
+        summary.failed += 1;
+      } else if (nextStatus === "expired") {
+        summary.expired += 1;
+      } else {
+        summary.pending += 1;
+      }
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown reconciliation error.";
+      summary.errors += 1;
+      summary.pending += 1;
+      summary.lastError = errorMessage;
+      await execute(
+        `update transactions set
+          provider_checked_at = ?,
+          reconciliation_attempts = reconciliation_attempts + 1,
+          next_check_at = ?,
+          last_error = ?,
+          meta_json = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          startedAt,
+          getNextTransVoucherCheckAt(before.createdAt, startedAt),
+          errorMessage,
+          toJson({
+            ...getTransactionMeta(before),
+            reconciliationError: errorMessage,
+          }),
+          startedAt,
+          before.id,
+        ],
+      );
+    }
+  }
+
+  await execute(
+    `update payment_reconciliation_runs set
+      finished_at = ?,
+      checked_count = ?,
+      succeeded_count = ?,
+      failed_count = ?,
+      expired_count = ?,
+      pending_count = ?,
+      skipped_count = ?,
+      error_count = ?,
+      last_error = ?
+     where id = ?`,
+    [
+      nowIso(),
+      summary.checked,
+      summary.succeeded,
+      summary.failed,
+      summary.expired,
+      summary.pending,
+      summary.skipped,
+      summary.errors,
+      summary.lastError,
+      runId,
+    ],
+  );
+
+  revalidateAdmin();
+  return summary;
 }
 
 export async function getTransactionById(transactionId: string, userId?: string) {
@@ -6470,7 +9885,7 @@ export function getTransactionResultTarget(transaction: TransactionRecord | null
       return `/success?order=${encodeURIComponent(transaction.referenceId)}`;
     }
 
-    if (transaction.status === "failed") {
+    if (transaction.status === "failed" || transaction.status === "expired") {
       return `/checkout/declined?order=${encodeURIComponent(transaction.referenceId)}`;
     }
 
@@ -6482,7 +9897,7 @@ export function getTransactionResultTarget(transaction: TransactionRecord | null
       return `/dashboard/deposit?receipt=${encodeURIComponent(transaction.referenceId)}`;
     }
 
-    if (transaction.status === "failed") {
+    if (transaction.status === "failed" || transaction.status === "expired") {
       return `/dashboard/deposit?failed=${encodeURIComponent(transaction.referenceId)}`;
     }
 
@@ -7077,6 +10492,76 @@ export async function getAdminUsers() {
   }));
 }
 
+export async function getPaymentReconciliationStatus(): Promise<PaymentReconciliationStatus> {
+  await ensureDatabase();
+  await ensurePaymentReconciliationRunsTable();
+  const baselineAt = await getTransVoucherReconciliationBaselineAt();
+
+  const [lastRun, pendingRow, checkedRow, succeededRow, failedRow, expiredRow] =
+    await Promise.all([
+      queryOne(
+        `select * from payment_reconciliation_runs
+         where provider = 'TransVoucher'
+         order by started_at desc
+         limit 1`,
+      ),
+      queryOne(
+        `select count(*) as count from transactions
+         where payment_provider = 'TransVoucher'
+           and transvoucher_transaction_id is not null
+           and (? is null or created_at >= ?)
+           and processed_at is null
+           and credited_at is null
+           and (
+             status in ('pending', 'attempting', 'processing')
+             or lower(coalesce(provider_status, '')) in ('', 'pending', 'attempting', 'processing', 'created')
+           )`,
+        [baselineAt, baselineAt],
+      ),
+      queryOne(
+        `select count(*) as count from transactions
+         where payment_provider = 'TransVoucher'
+           and (? is null or created_at >= ?)
+           and provider_checked_at >= ?`,
+        [baselineAt, baselineAt, new Date(Date.now() - 60 * 60 * 1000).toISOString()],
+      ),
+      queryOne(
+        `select count(*) as count from transactions
+         where payment_provider = 'TransVoucher'
+           and (? is null or created_at >= ?)
+           and status = 'completed'
+           and processed_at is not null`,
+        [baselineAt, baselineAt],
+      ),
+      queryOne(
+        `select count(*) as count from transactions
+         where payment_provider = 'TransVoucher'
+           and (? is null or created_at >= ?)
+           and status = 'failed'
+           and processed_at is not null`,
+        [baselineAt, baselineAt],
+      ),
+      queryOne(
+        `select count(*) as count from transactions
+         where payment_provider = 'TransVoucher'
+           and (? is null or created_at >= ?)
+           and status = 'expired'
+           and processed_at is not null`,
+        [baselineAt, baselineAt],
+      ),
+    ]);
+
+  return {
+    lastRunAt: lastRun?.started_at ? String(lastRun.started_at) : null,
+    pendingTransactions: Number(pendingRow?.count ?? 0),
+    checkedLastHour: Number(checkedRow?.count ?? 0),
+    succeededByCron: Number(succeededRow?.count ?? 0),
+    failedByCron: Number(failedRow?.count ?? 0),
+    expiredByCron: Number(expiredRow?.count ?? 0),
+    lastError: lastRun?.last_error ? String(lastRun.last_error) : null,
+  };
+}
+
 async function getAdminUserEntryById(userId: string) {
   const row = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
@@ -7108,6 +10593,324 @@ async function getAdminUserEntryById(userId: string) {
       updated_at: row.balance_updated_at,
     }),
   };
+}
+
+function normalizeAdminCreatedStatus(status: UserStatus) {
+  return status === "suspended" ? "blocked" : status;
+}
+
+function getAdminCreatedRoleLabel(role: UserRole) {
+  return role === "admin" ? "administrator" : "collector";
+}
+
+function buildGeneratedTelegramUsername(username: string) {
+  const base = normalizeUsername(username).replace(/[^a-z0-9_]/g, "_");
+  const normalizedBase = base.length >= 4 ? base.slice(0, 24) : `user_${base}`;
+  return normalizeTelegramUsername(`${normalizedBase}_${randomBytes(3).toString("hex")}`);
+}
+
+function buildAdminCreatedUserTelegramMessage(input: {
+  admin: UserRecord;
+  createdUser: UserRecord;
+  initialBalance: number;
+  telegramProvided: boolean;
+  timestamp: string;
+}) {
+  return [
+    "<b>Admin Created User</b>",
+    "",
+    `Admin: ${escapeTelegramHtml(input.admin.username)}`,
+    `New User: ${escapeTelegramHtml(input.createdUser.username)}`,
+    `Email: ${escapeTelegramHtml(input.createdUser.email)}`,
+    `Role: ${escapeTelegramHtml(getAdminCreatedRoleLabel(input.createdUser.role))}`,
+    `Initial Balance: ${escapeTelegramHtml(formatUsd(input.initialBalance))}`,
+    `Telegram: ${escapeTelegramHtml(input.telegramProvided ? input.createdUser.telegramUsername : "Not provided")}`,
+    `Time: ${escapeTelegramHtml(formatUtcDateTime(input.timestamp))} UTC`,
+  ].join("\n");
+}
+
+function buildAdminDeletedUserTelegramMessage(input: {
+  admin: UserRecord;
+  deletedUser: UserRecord;
+  reason: string | null;
+  timestamp: string;
+}) {
+  return [
+    "<b>User Deleted</b>",
+    "",
+    `Admin: ${escapeTelegramHtml(input.admin.username)}`,
+    `Deleted User: ${escapeTelegramHtml(input.deletedUser.username)}`,
+    `Email: ${escapeTelegramHtml(input.deletedUser.email)}`,
+    `Telegram: ${escapeTelegramHtml(input.deletedUser.telegramUsername || "Not provided")}`,
+    `Reason: ${escapeTelegramHtml(input.reason || "Not provided")}`,
+    `Time: ${escapeTelegramHtml(formatUtcDateTime(input.timestamp))} UTC`,
+  ].join("\n");
+}
+
+export async function createAdminManagedUser(input: {
+  adminUserId: string;
+  username: string;
+  email: string;
+  password: string;
+  role: UserRole;
+  status: Exclude<UserStatus, "suspended">;
+  telegramUsername?: string;
+  initialBalance: number;
+  adminNote?: string;
+  requirePasswordReset: boolean;
+  telegramVerified: boolean;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+
+  const admin = await getAdminIdentity(input.adminUserId);
+  const username = normalizeUsername(input.username);
+  const email = normalizeEmail(input.email);
+  const providedTelegramUsername = input.telegramUsername?.trim()
+    ? normalizeTelegramUsername(input.telegramUsername)
+    : "";
+  const telegramUsername = providedTelegramUsername || buildGeneratedTelegramUsername(username);
+  const timestamp = input.timestamp || nowIso();
+  const initialBalance = Number(input.initialBalance || 0);
+
+  if (input.role === "admin" && admin.role !== "admin") {
+    throw new Error("You do not have permission to create administrator accounts.");
+  }
+
+  if (!/^[a-z0-9_]{3,32}$/.test(username)) {
+    throw new Error("Username must be 3-32 lowercase letters, numbers, or underscores.");
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error("Enter a valid email address.");
+  }
+
+  if (input.password.length < 8) {
+    throw new Error("Password must be at least 8 characters.");
+  }
+
+  if (initialBalance < 0) {
+    throw new Error("Initial balance cannot be negative.");
+  }
+
+  if (providedTelegramUsername && !isValidTelegramUsername(providedTelegramUsername)) {
+    throw new Error("Telegram username must start with @ and use 5-32 valid characters.");
+  }
+
+  const [existingUser, existingEmail, existingTelegram] = await Promise.all([
+    queryOne("select id from users where username = ? limit 1", [username]),
+    queryOne("select id from users where email = ? limit 1", [email]),
+    queryOne("select user_id from profiles where telegram_username = ? limit 1", [
+      telegramUsername,
+    ]),
+  ]);
+
+  if (existingUser) {
+    throw new Error("Username already exists.");
+  }
+
+  if (existingEmail) {
+    throw new Error("Email already exists.");
+  }
+
+  if (existingTelegram) {
+    throw new Error(
+      providedTelegramUsername
+        ? "Telegram username already linked."
+        : "Generated Telegram placeholder collided. Try a different username.",
+    );
+  }
+
+  const linkedTelegramIdentity = providedTelegramUsername
+    ? await getTelegramIdentityRowByUsername(providedTelegramUsername)
+    : null;
+
+  if (linkedTelegramIdentity?.linked_user_id) {
+    throw new Error("Telegram username already linked.");
+  }
+
+  const userId = randomUUID();
+  const passwordHash = hashPassword(input.password);
+  const telegramChatId =
+    input.telegramVerified && linkedTelegramIdentity?.chat_id
+      ? String(linkedTelegramIdentity.chat_id)
+      : null;
+  const telegramId =
+    input.telegramVerified && linkedTelegramIdentity?.telegram_id
+      ? normalizeTelegramNumericId(linkedTelegramIdentity.telegram_id)
+      : null;
+  const telegramVerifiedAt = input.telegramVerified ? timestamp : null;
+  const role = input.role;
+  const status = normalizeAdminCreatedStatus(input.status);
+  const adminNote = input.adminNote?.trim() || null;
+
+  await execute(
+    `insert into users (
+      id, username, email, name, password_hash, status, require_password_reset,
+      created_at, updated_at, last_login_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      userId,
+      username,
+      email,
+      username,
+      passwordHash,
+      status,
+      input.requirePasswordReset ? 1 : 0,
+      timestamp,
+      timestamp,
+      null,
+    ],
+  );
+
+  await execute(
+    `insert into profiles (
+      user_id, role, telegram_username, telegram_id, telegram_chat_id,
+      telegram_verified, telegram_verified_at, telegram_linked_at, withdrawal_wallet,
+      verified, created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      userId,
+      role,
+      telegramUsername,
+      telegramId,
+      telegramChatId,
+      input.telegramVerified ? 1 : 0,
+      telegramVerifiedAt,
+      input.telegramVerified ? timestamp : null,
+      null,
+      input.telegramVerified ? 1 : 0,
+      timestamp,
+      timestamp,
+    ],
+  );
+
+  await execute(
+    `insert into balances (
+      user_id, available, pending_withdrawal, total_deposited, total_spent,
+      total_withdrawn, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?)`,
+    [userId, initialBalance, 0, initialBalance, 0, 0, timestamp],
+  );
+
+  if (initialBalance > 0) {
+    await createTransactionRecord({
+      userId,
+      kind: "admin_initial_balance",
+      amount: initialBalance,
+      originalAmount: initialBalance,
+      originalCurrency: "USD",
+      displayCurrency: "USD",
+      creditedAmountUsd: initialBalance,
+      exchangeRate: 1,
+      paymentMethod: "Admin Initial Balance",
+      paymentProvider: "Internal Wallet",
+      status: "completed",
+      referenceId: `admin-initial-${userId}`,
+      summary: `Initial balance assigned by ${admin.username}`,
+      meta: {
+        type: "admin_initial_balance",
+        amount: initialBalance,
+        adminId: admin.id,
+        adminUsername: admin.username,
+        targetUserId: userId,
+        reason: adminNote ?? "Admin-created account initial balance.",
+        timestamp,
+      },
+      paidAt: timestamp,
+    });
+  }
+
+  await logAdminAction(
+    admin.id,
+    "admin_created_user",
+    "user",
+    userId,
+    `Created user ${username}`,
+    {
+      metadata: {
+        adminUserId: admin.id,
+        adminUsername: admin.username,
+        createdUserId: userId,
+        createdUsername: username,
+        roleAssigned: getAdminCreatedRoleLabel(role),
+        status,
+        initialBalance,
+        telegramUsername: providedTelegramUsername || null,
+        telegramVerified: input.telegramVerified,
+        requirePasswordReset: input.requirePasswordReset,
+        adminNote,
+        ipAddress: input.ipAddress,
+        country: input.country,
+        timestamp,
+      },
+    },
+  );
+
+  await insertSecurityAuditEvent({
+    eventType: "admin_created_user",
+    userId,
+    username,
+    telegramUsername: providedTelegramUsername || null,
+    role: getAdminCreatedRoleLabel(role),
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp,
+  });
+
+  if (input.telegramVerified && linkedTelegramIdentity) {
+    await execute(
+      `update telegram_identities set
+        linked_user_id = ?, is_linked = 1, updated_at = ?
+       where id = ?`,
+      [userId, timestamp, String(linkedTelegramIdentity.id)],
+    );
+  }
+
+  const createdEntry = await getAdminUserEntryById(userId);
+
+  if (!createdEntry) {
+    throw new Error("Failed to create account.");
+  }
+
+  await notifySafely(() =>
+    sendTelegramAdminMessage(
+      buildAdminCreatedUserTelegramMessage({
+        admin,
+        createdUser: createdEntry.user,
+        initialBalance,
+        telegramProvided: Boolean(providedTelegramUsername),
+        timestamp,
+      }),
+    ),
+  );
+
+  if (createdEntry.user.telegramChatId && createdEntry.user.telegramVerified) {
+    await notifySafely(() =>
+      sendTelegramUserMessage(
+        createdEntry.user.telegramChatId as string,
+        [
+          "<b>Welcome to ReboHrome</b>",
+          "",
+          `Your account ${escapeTelegramHtml(createdEntry.user.username)} was created by the admin team.`,
+          "You can now sign in with the credentials provided by support.",
+        ].join("\n"),
+      ),
+    );
+  }
+
+  revalidatePrivate(userId);
+  revalidateAdmin();
+
+  return createdEntry;
 }
 
 export async function updateAdminManagedUser(input: {
@@ -7251,6 +11054,143 @@ export async function updateAdminManagedUser(input: {
   revalidateAdmin();
 
   return getAdminUserEntryById(input.userId);
+}
+
+export async function deleteAdminManagedUser(input: {
+  adminUserId: string;
+  userId: string;
+  confirmation: string;
+  reason?: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+
+  const admin = await getAdminIdentity(input.adminUserId);
+
+  if (input.confirmation !== "DELETE USER") {
+    throw new Error("Type DELETE USER to confirm deletion.");
+  }
+
+  if (input.userId === input.adminUserId) {
+    throw new Error("You cannot delete your own admin account.");
+  }
+
+  const entry = await getAdminUserEntryById(input.userId);
+
+  if (!entry) {
+    throw new Error("User not found.");
+  }
+
+  if (entry.user.isDeleted) {
+    throw new Error("User is already deleted.");
+  }
+
+  const timestamp = input.timestamp || nowIso();
+  const reason = input.reason?.trim() || null;
+
+  await execute(
+    `update users set
+      is_deleted = 1,
+      deleted_at = ?,
+      deleted_by = ?,
+      status = 'blocked',
+      updated_at = ?
+     where id = ?`,
+    [timestamp, admin.id, timestamp, input.userId],
+  );
+
+  await execute("delete from sessions where user_id = ?", [input.userId]);
+  await execute(
+    `update telegram_identities set
+      linked_user_id = null,
+      is_linked = 0,
+      updated_at = ?
+     where linked_user_id = ?`,
+    [timestamp, input.userId],
+  );
+  await execute(
+    `delete from telegram_verification_codes
+     where username = ? or email = ? or telegram_username = ?`,
+    [
+      entry.user.username,
+      entry.user.email,
+      entry.user.telegramUsername,
+    ],
+  );
+
+  await logAdminAction(
+    admin.id,
+    "admin_deleted_user",
+    "user",
+    input.userId,
+    `Soft deleted user ${entry.user.username}`,
+    {
+      metadata: {
+        adminUserId: admin.id,
+        adminUsername: admin.username,
+        deletedUserId: entry.user.id,
+        deletedUsername: entry.user.username,
+        deletedEmail: entry.user.email,
+        deletedTelegram: entry.user.telegramUsername,
+        reason,
+        ipAddress: input.ipAddress,
+        country: input.country,
+        userDeleted: true,
+        deletedUserSnapshot: {
+          username: entry.user.username,
+          email: entry.user.email,
+          telegramUsername: entry.user.telegramUsername,
+          deletedAt: timestamp,
+        },
+        timestamp,
+      },
+    },
+  );
+
+  await insertSecurityAuditEvent({
+    eventType: "admin_deleted_user",
+    userId: entry.user.id,
+    username: entry.user.username,
+    telegramUsername: entry.user.telegramUsername,
+    role: entry.user.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp,
+  });
+
+  await notifySafely(() =>
+    sendTelegramAdminMessage(
+      buildAdminDeletedUserTelegramMessage({
+        admin,
+        deletedUser: entry.user,
+        reason,
+        timestamp,
+      }),
+    ),
+  );
+
+  revalidatePrivate(input.userId);
+  revalidateAdmin();
+
+  return {
+    ...entry,
+    user: {
+      ...entry.user,
+      status: "blocked" as const,
+      isDeleted: true,
+      deletedAt: timestamp,
+      deletedBy: admin.id,
+      updatedAt: timestamp,
+    },
+  };
 }
 
 export async function getAdminWithdrawalRequests() {
@@ -7620,6 +11560,381 @@ export async function updateOrderStatus(orderId: string, status: OrderStatus) {
   revalidateAdmin();
 }
 
+export async function sendWithdrawalViaXRocket(input: {
+  withdrawalId: string;
+  adminUserId: string;
+  confirmation: string;
+}) {
+  await ensureDatabase();
+  const admin = await getAdminIdentity(input.adminUserId);
+
+  if (input.confirmation !== "SEND XROCKET") {
+    throw new Error("Type SEND XROCKET to confirm payout.");
+  }
+
+  const row = await queryOne(
+    `select withdrawal_requests.*, users.username
+     from withdrawal_requests
+     inner join users on users.id = withdrawal_requests.user_id
+     where withdrawal_requests.id = ?
+     limit 1`,
+    [input.withdrawalId],
+  );
+
+  if (!row) {
+    throw new Error("Withdrawal request not found.");
+  }
+
+  const request = normalizeWithdrawal(row);
+  const username = String(row.username ?? request.userId);
+  const wallet = request.walletAddress.trim();
+  const amount = Number(request.payoutAmount);
+
+  if (request.status !== "approved") {
+    throw new Error("Only approved withdrawals can be sent via xRocket.");
+  }
+  if (request.xrocketWithdrawalId) {
+    throw new Error("This withdrawal already has an xRocket payout id.");
+  }
+  if (!isValidUsdtBep20Wallet(wallet)) {
+    throw new Error("Withdrawal wallet must be a valid USDT BEP20 address.");
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Final payout amount must be greater than zero.");
+  }
+
+  const startedAt = nowIso();
+  await updateWithdrawalStatus({
+    withdrawalId: request.id,
+    status: "processing",
+    adminUserId: admin.id,
+    adminNote: "xRocket payout started.",
+  });
+  await execute(
+    `update withdrawal_requests set
+      payout_provider = 'xrocket',
+      payout_currency = ?,
+      payout_network = ?,
+      payout_address = ?,
+      payout_error = null,
+      payout_attempts = coalesce(payout_attempts, 0) + 1,
+      xrocket_status = 'processing',
+      xrocket_sent_at = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      XROCKET_DEFAULT_CURRENCY,
+      XROCKET_DEFAULT_NETWORK,
+      wallet,
+      startedAt,
+      startedAt,
+      request.id,
+    ],
+  );
+
+  await notifySafely(() =>
+    sendTelegramAdminMessage(
+      [
+        "<b>xRocket Payout Started</b>",
+        "",
+        `Request ID: ${escapeTelegramHtml(request.id)}`,
+        `User: ${escapeTelegramHtml(username)}`,
+        `Amount: ${escapeTelegramHtml(String(amount))} ${escapeTelegramHtml(XROCKET_DEFAULT_CURRENCY)}`,
+        `Network: ${escapeTelegramHtml(XROCKET_DEFAULT_NETWORK)}`,
+        `Wallet: ${escapeTelegramHtml(maskWallet(wallet))}`,
+        "Status: PROCESSING",
+      ].join("\n"),
+    ),
+  );
+
+  try {
+    const response = await createXRocketWithdrawal({
+      clientWithdrawalId: request.id,
+      amount,
+      address: wallet,
+      network: XROCKET_DEFAULT_NETWORK,
+      currency: XROCKET_DEFAULT_CURRENCY,
+    });
+    const xrocketWithdrawalId = extractXRocketWithdrawalId(response);
+    const xrocketStatus = extractXRocketStatus(response);
+    const txHash = extractXRocketTxHash(response) || null;
+    const paid = isXRocketPaidStatus(xrocketStatus);
+    const failed = isXRocketFailedStatus(xrocketStatus);
+    const confirmedAt = paid ? nowIso() : null;
+
+    await execute(
+      `update withdrawal_requests set
+        xrocket_withdrawal_id = ?,
+        xrocket_status = ?,
+        xrocket_raw_response = ?,
+        xrocket_confirmed_at = ?,
+        payout_tx_hash = ?,
+        payout_error = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        xrocketWithdrawalId || null,
+        xrocketStatus,
+        toJson(response),
+        confirmedAt,
+        txHash,
+        failed ? "xRocket payout failed. Review provider response." : null,
+        nowIso(),
+        request.id,
+      ],
+    );
+
+    if (paid) {
+      await updateWithdrawalStatus({
+        withdrawalId: request.id,
+        status: "completed",
+        adminUserId: admin.id,
+        adminNote: "xRocket payout confirmed.",
+      });
+    } else if (failed) {
+      await execute(
+        "update withdrawal_requests set status = 'approved', updated_at = ? where id = ?",
+        [nowIso(), request.id],
+      );
+      await execute(
+        `update transactions set status = 'pending', updated_at = ?
+         where reference_id = ? and kind = 'withdrawal'`,
+        [nowIso(), request.id],
+      );
+      await insertWithdrawalHistory({
+        withdrawalId: request.id,
+        actionType: "xrocket-payout-failed",
+        previousStatus: "processing",
+        nextStatus: "approved",
+        source: "admin",
+        adminUserId: admin.id,
+        adminUsername: admin.username,
+        adminTelegramUsername: admin.telegramUsername,
+        note: "xRocket payout failed. Withdrawal returned to approved state.",
+      });
+    }
+
+    await appendArchiveLedgerEntry({
+      eventType: paid ? "withdrawal_paid" : "withdrawal_status_changed",
+      adminId: admin.id,
+      userId: request.userId,
+      entityType: "withdrawal",
+      entityId: request.id,
+      title: paid ? "xRocket payout paid" : "xRocket payout submitted",
+      description: `xRocket payout ${xrocketStatus} for withdrawal ${request.id}.`,
+      metadata: {
+        provider: "xrocket",
+        xrocketWithdrawalId,
+        xrocketStatus,
+        txHash,
+        amount,
+        currency: XROCKET_DEFAULT_CURRENCY,
+        network: XROCKET_DEFAULT_NETWORK,
+      },
+    });
+
+    await notifySafely(() =>
+      sendTelegramAdminMessage(
+        [
+          `<b>xRocket Payout ${paid ? "Paid" : failed ? "Failed" : "Submitted"}</b>`,
+          "",
+          `Request ID: ${escapeTelegramHtml(request.id)}`,
+          `Amount: ${escapeTelegramHtml(String(amount))} ${escapeTelegramHtml(XROCKET_DEFAULT_CURRENCY)}`,
+          txHash ? `Tx Hash: ${escapeTelegramHtml(txHash)}` : null,
+          `Status: ${escapeTelegramHtml(xrocketStatus.toUpperCase())}`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      ),
+    );
+
+    revalidateAdmin();
+    revalidatePrivate(request.userId);
+    return { ok: true as const, xrocketStatus, xrocketWithdrawalId };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "xRocket payout failed.";
+    await execute(
+      `update withdrawal_requests set
+        status = 'approved',
+        xrocket_status = 'failed',
+        payout_error = ?,
+        updated_at = ?
+       where id = ?`,
+      [message, nowIso(), request.id],
+    );
+    await execute(
+      `update transactions set status = 'pending', updated_at = ?
+       where reference_id = ? and kind = 'withdrawal'`,
+      [nowIso(), request.id],
+    );
+    await insertWithdrawalHistory({
+      withdrawalId: request.id,
+      actionType: "xrocket-payout-failed",
+      previousStatus: "processing",
+      nextStatus: "approved",
+      source: "admin",
+      adminUserId: admin.id,
+      adminUsername: admin.username,
+      adminTelegramUsername: admin.telegramUsername,
+      note: "xRocket payout failed. Provider error stored internally.",
+    });
+    await notifySafely(() =>
+      sendTelegramAdminMessage(
+        [
+          "<b>xRocket Payout Failed</b>",
+          "",
+          `Request ID: ${escapeTelegramHtml(request.id)}`,
+          `Error: ${escapeTelegramHtml(message)}`,
+          "Status: FAILED",
+        ].join("\n"),
+      ),
+    );
+    revalidateAdmin();
+    revalidatePrivate(request.userId);
+    throw new Error("xRocket payout failed. Review internal payout error.");
+  }
+}
+
+export async function updateXRocketWithdrawalFromPayload(payload: Record<string, unknown>) {
+  await ensureDatabase();
+  const xrocketWithdrawalId = extractXRocketWithdrawalId(payload);
+  const xrocketStatus = extractXRocketStatus(payload);
+  const txHash = extractXRocketTxHash(payload) || null;
+  const clientWithdrawalId = String(
+    payload.clientWithdrawalId ??
+      payload.externalId ??
+      (typeof payload.data === "object" && payload.data
+        ? (payload.data as Record<string, unknown>).clientWithdrawalId ??
+          (payload.data as Record<string, unknown>).externalId
+        : "") ??
+      "",
+  );
+
+  const row = await queryOne(
+    `select * from withdrawal_requests
+     where xrocket_withdrawal_id = ?
+        or id = ?
+     limit 1`,
+    [xrocketWithdrawalId, clientWithdrawalId],
+  );
+
+  if (!row) {
+    return { ok: false as const, reason: "not_found" };
+  }
+
+  const request = normalizeWithdrawal(row);
+  const paid = isXRocketPaidStatus(xrocketStatus);
+  const failed = isXRocketFailedStatus(xrocketStatus);
+  const nextStatus: WithdrawalStatus = paid
+    ? "completed"
+    : failed
+      ? "approved"
+      : "processing";
+  const timestamp = nowIso();
+
+  await execute(
+    `update withdrawal_requests set
+      status = ?,
+      xrocket_withdrawal_id = coalesce(xrocket_withdrawal_id, ?),
+      xrocket_status = ?,
+      xrocket_raw_response = ?,
+      xrocket_confirmed_at = ?,
+      payout_tx_hash = ?,
+      payout_error = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      paid ? request.status : nextStatus,
+      xrocketWithdrawalId || null,
+      xrocketStatus,
+      toJson(payload),
+      paid ? timestamp : null,
+      txHash,
+      failed ? "xRocket payout failed. Review provider response." : null,
+      timestamp,
+      request.id,
+    ],
+  );
+
+  if (paid && request.status !== "completed") {
+    const seedAdminRow = await getUserRowByUsername(ADMIN_SEED_USERNAME);
+    const adminUserId =
+      request.statusUpdatedBy ??
+      request.lastUpdatedByAdminId ??
+      (seedAdminRow?.id ? String(seedAdminRow.id) : null);
+    if (!adminUserId) {
+      throw new Error("Unable to resolve admin identity for xRocket status update.");
+    }
+    await updateWithdrawalStatus({
+      withdrawalId: request.id,
+      status: "completed",
+      adminUserId,
+      adminNote: "xRocket payout confirmed by provider.",
+    });
+  }
+
+  await appendArchiveLedgerEntry({
+    eventType: paid ? "withdrawal_paid" : "withdrawal_status_changed",
+    userId: request.userId,
+    entityType: "withdrawal",
+    entityId: request.id,
+    title: "xRocket payout status updated",
+    description: `xRocket status updated to ${xrocketStatus}.`,
+    metadata: {
+      provider: "xrocket",
+      xrocketWithdrawalId,
+      xrocketStatus,
+      txHash,
+    },
+  });
+
+  revalidateAdmin();
+  revalidatePrivate(request.userId);
+  return { ok: true as const, withdrawalId: request.id, status: nextStatus };
+}
+
+export async function reconcileXRocketWithdrawals() {
+  await ensureDatabase();
+  const rows = await queryMany(
+    `select * from withdrawal_requests
+     where status = 'processing'
+       and payout_provider = 'xrocket'
+       and xrocket_withdrawal_id is not null
+     order by updated_at asc
+     limit 25`,
+  );
+  let checked = 0;
+  let updated = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    const request = normalizeWithdrawal(row);
+    if (!request.xrocketWithdrawalId) {
+      continue;
+    }
+    checked += 1;
+    try {
+      const payload = await getXRocketWithdrawalInfo(request.xrocketWithdrawalId);
+      const result = await updateXRocketWithdrawalFromPayload(payload);
+      if (result.ok) {
+        updated += 1;
+      }
+    } catch (error) {
+      failed += 1;
+      await execute(
+        `update withdrawal_requests set payout_error = ?, updated_at = ? where id = ?`,
+        [
+          error instanceof Error ? error.message : "xRocket reconciliation failed.",
+          nowIso(),
+          request.id,
+        ],
+      );
+    }
+  }
+
+  return { checked, updated, failed };
+}
+
 export async function updateWithdrawalStatus(input: {
   withdrawalId: string;
   status: WithdrawalRecord["status"];
@@ -7656,6 +11971,8 @@ export async function updateWithdrawalStatus(input: {
         telegram_last_error = null,
         last_action_source = ?,
         last_updated_by_admin_id = ?,
+        status_updated_by = ?,
+        status_updated_at = ?,
         updated_at = ?
        where id = ?`,
       [
@@ -7663,6 +11980,8 @@ export async function updateWithdrawalStatus(input: {
         "pending",
         source,
         admin.id,
+        admin.id,
+        noteTimestamp,
         noteTimestamp,
         request.id,
       ],
@@ -7732,7 +12051,7 @@ export async function updateWithdrawalStatus(input: {
         total_withdrawn = total_withdrawn + ?,
         updated_at = ?
        where user_id = ?`,
-      [request.amount, request.amount, timestamp, request.userId],
+      [request.amount, request.payoutAmount, timestamp, request.userId],
     );
 
     await execute(
@@ -7776,6 +12095,8 @@ export async function updateWithdrawalStatus(input: {
       telegram_last_error = null,
       last_action_source = ?,
       last_updated_by_admin_id = ?,
+      status_updated_by = ?,
+      status_updated_at = ?,
       updated_at = ?
      where id = ?`,
     [
@@ -7784,6 +12105,8 @@ export async function updateWithdrawalStatus(input: {
       "pending",
       source,
       admin.id,
+      admin.id,
+      timestamp,
       timestamp,
       request.id,
     ],
@@ -7802,6 +12125,11 @@ export async function updateWithdrawalStatus(input: {
     adminTelegramUsername: admin.telegramUsername,
     adminUsername: admin.username,
     adminNote: nextNote,
+    requestedAmount: request.requestedAmount,
+    payoutAmount: request.payoutAmount,
+    basePayoutPercent: request.basePayoutPercent,
+    bonusPayoutPercent: request.bonusPayoutPercent,
+    finalPayoutPercent: request.finalPayoutPercent,
     previousStatus: request.status,
     status: input.status,
     source,
@@ -7826,6 +12154,9 @@ export async function updateWithdrawalStatus(input: {
       nextStatus: input.status,
         metadata: {
           amount: request.amount,
+          requestedAmount: request.requestedAmount,
+          payoutAmount: request.payoutAmount,
+          finalPayoutPercent: request.finalPayoutPercent,
           walletAddress: request.walletAddress,
           adminNote: nextNote,
         },

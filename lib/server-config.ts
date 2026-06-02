@@ -6,6 +6,14 @@ export const ADMIN_TELEGRAM_CHAT_ID =
   process.env.ADMIN_TELEGRAM_CHAT_ID?.trim() ??
   process.env.TELEGRAM_CHAT_ID?.trim() ??
   "";
+export const TELEGRAM_CHANNEL_CHAT_ID =
+  process.env.TELEGRAM_CHANNEL_CHAT_ID?.trim() ??
+  process.env.BROADCAST_TELEGRAM_CHANNEL_ID?.trim() ??
+  "-1003810371054";
+export const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS ?? "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 export const TELEGRAM_BOT_USERNAME =
   process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME?.trim() ??
   process.env.TELEGRAM_BOT_USERNAME?.trim() ??
@@ -22,6 +30,17 @@ export const TELEGRAM_CALLBACK_SECRET =
     .digest("hex");
 export const MAINTENANCE_BYPASS_SECRET =
   process.env.MAINTENANCE_BYPASS_SECRET?.trim() ?? "";
+export const CRON_SECRET = process.env.CRON_SECRET?.trim() ?? "";
+export const XROCKET_API_KEY = process.env.XROCKET_API_KEY?.trim() ?? "";
+export const XROCKET_API_BASE_URL =
+  process.env.XROCKET_API_BASE_URL?.trim() ??
+  "https://pay.api.xrocket.exchange";
+export const XROCKET_WEBHOOK_SECRET =
+  process.env.XROCKET_WEBHOOK_SECRET?.trim() ?? "";
+export const XROCKET_DEFAULT_NETWORK =
+  process.env.XROCKET_DEFAULT_NETWORK?.trim() ?? "BSC";
+export const XROCKET_DEFAULT_CURRENCY =
+  process.env.XROCKET_DEFAULT_CURRENCY?.trim() ?? "USDT";
 
 export const ADMIN_SEED_USERNAME =
   process.env.ADMIN_SEED_USERNAME ?? "monohrome_admin";

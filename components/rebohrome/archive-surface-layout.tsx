@@ -32,12 +32,12 @@ export function ArchiveSurfaceLayout({
       >
         {sidebar}
       </aside>
-      <section className="min-w-0 border-b border-line bg-[linear-gradient(180deg,#ffffff_0%,#fcfcfa_100%)] xl:border-b-0 xl:border-r">
+      <section className="min-w-0 border-b border-line bg-[linear-gradient(180deg,rgba(14,20,34,0.84)_0%,rgba(9,13,22,0.94)_100%)] xl:border-b-0 xl:border-r">
         {children}
       </section>
       <aside
         className={cn(
-          "min-w-0 border-t border-line bg-[linear-gradient(180deg,#ffffff_0%,#fbfbf9_100%)] xl:border-t-0",
+          "min-w-0 border-t border-line bg-[linear-gradient(180deg,rgba(17,24,39,0.82)_0%,rgba(9,13,22,0.94)_100%)] xl:border-t-0",
           rightRailClassName,
         )}
       >

@@ -1,9 +1,17 @@
-import { changeEmailAction, saveProfileAction } from "@/app/actions/marketplace";
+import {
+  acceptArchiveRulesAction,
+  changeEmailAction,
+  saveProfileAction,
+} from "@/app/actions/marketplace";
 import { DashboardShell } from "@/components/rebohrome/shells/dashboard-shell";
 import { Button } from "@/components/ui/button";
-import { getUserById } from "@/lib/db/repository";
+import { getBalanceByUserId, getUserById } from "@/lib/db/repository";
 import { requireUserSession } from "@/lib/session";
-import { formatDisplayDate } from "@/lib/rebohrome-data";
+import {
+  formatDisplayDate,
+  formatUsd,
+  getPayoutTierProgress,
+} from "@/lib/rebohrome-data";
 
 type DashboardSettingsPageProps = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -16,9 +24,14 @@ export default async function DashboardSettingsPage({
 }: DashboardSettingsPageProps) {
   const params = await searchParams;
   const session = await requireUserSession("/login");
-  const user = await getUserById(session.userId);
+  const [user, balance] = await Promise.all([
+    getUserById(session.userId),
+    getBalanceByUserId(session.userId),
+  ]);
+  const tierProgress = getPayoutTierProgress(balance?.totalDeposited ?? 0);
   const wasSaved = params.saved === "1";
   const emailUpdated = params.emailUpdated === "1";
+  const archiveRulesAccepted = params.archiveRulesAccepted === "1";
   const emailError = typeof params.emailError === "string" ? params.emailError : null;
 
   return (
@@ -42,12 +55,20 @@ export default async function DashboardSettingsPage({
           {emailError}
         </div>
       ) : null}
+      {archiveRulesAccepted ? (
+        <div className="mb-6 rounded-[20px] border border-emerald-300/50 bg-emerald-100/70 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-500/10 dark:text-emerald-300">
+          Archive Economy Rules accepted. Vault Integrity has been refreshed.
+        </div>
+      ) : null}
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="space-y-6">
           <form action={saveProfileAction} className="rounded-[24px] border border-line bg-panel-strong p-5">
             <div className="text-lg font-semibold text-foreground">
-              Account profile
+              Payout Details
             </div>
+            <p className="mt-2 text-sm leading-6 text-muted">
+              Telegram and a valid USDT BEP20 wallet are required before creating a withdrawal request.
+            </p>
             <div className="mt-4 space-y-3">
               <input
                 className="w-full rounded-2xl border border-line bg-panel px-4 py-3 text-sm text-foreground outline-none"
@@ -73,9 +94,100 @@ export default async function DashboardSettingsPage({
               />
             </div>
             <div className="mt-6">
-              <Button type="submit">Save settings</Button>
+              <Button type="submit">Save payout details</Button>
             </div>
           </form>
+
+          <section className="rounded-[24px] border border-line bg-panel-strong p-5">
+            <div className="text-lg font-semibold text-foreground">
+              Vault Integrity
+            </div>
+            <div className="mt-4 rounded-2xl border border-line bg-panel px-4 py-4">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.2em] text-muted">
+                    Archive readiness
+                  </div>
+                  <div className="mt-2 text-3xl font-semibold text-foreground">
+                    {user?.vaultIntegrityScore ?? 0}%
+                  </div>
+                </div>
+                <div className="rounded-full border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-1 text-sm font-medium text-[var(--accent)]">
+                  {user?.vaultIntegrityStatus ?? "Unstable"}
+                </div>
+              </div>
+              <p className="mt-4 text-sm leading-7 text-muted">
+                Your archive profile reflects verified contact details, completed
+                profile setup, account security, platform alignment, and active
+                collector readiness.
+              </p>
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-[var(--background-soft)]">
+                <div
+                  className="h-full rounded-full bg-[linear-gradient(90deg,#8b5cf6,#b388ff)]"
+                  style={{ width: `${user?.vaultIntegrityScore ?? 0}%` }}
+                />
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-[24px] border border-line bg-panel-strong p-5">
+            <div className="text-lg font-semibold text-foreground">
+              Archive Rules
+            </div>
+            <p className="mt-2 text-sm leading-6 text-muted">
+              Review the latest Archive Economy Rules to keep your profile aligned
+              with platform standards.
+            </p>
+            <div className="mt-4 rounded-2xl border border-line bg-panel px-4 py-4">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.2em] text-muted">
+                    Status
+                  </div>
+                  <div className="mt-2 text-base font-semibold text-foreground">
+                    {user?.archiveRulesAcceptedAt ? "Accepted" : "Not accepted"}
+                  </div>
+                </div>
+                <Button asChild variant="secondary">
+                  <a href="/archive-rules">Review rules</a>
+                </Button>
+              </div>
+              {!user?.archiveRulesAcceptedAt ? (
+                <form action={acceptArchiveRulesAction} className="mt-4">
+                  <Button type="submit">Accept Archive Rules</Button>
+                </form>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="rounded-[24px] border border-line bg-panel-strong p-5">
+            <div className="text-lg font-semibold text-foreground">
+              Payout Tier Progress
+            </div>
+            <div className="mt-4 rounded-2xl border border-line bg-panel px-4 py-4">
+              <div className="flex items-center justify-between gap-4 text-sm">
+                <span className="text-muted">Progress</span>
+                <span className="font-semibold text-foreground">
+                  {formatUsd(balance?.totalDeposited ?? 0)} / {formatUsd(tierProgress.nextThreshold)}
+                </span>
+              </div>
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-[var(--background-soft)]">
+                <div
+                  className="h-full rounded-full bg-[linear-gradient(90deg,#111827,#7266ff)]"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      ((balance?.totalDeposited ?? 0) / tierProgress.nextThreshold) * 100,
+                    )}%`,
+                  }}
+                />
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <InfoPill label="Current bonus" value={`+${tierProgress.currentBonus}%`} />
+                <InfoPill label="Next bonus at" value={formatUsd(tierProgress.nextThreshold)} />
+              </div>
+            </div>
+          </section>
 
           <form action={changeEmailAction} className="rounded-[24px] border border-line bg-panel-strong p-5">
             <div className="text-lg font-semibold text-foreground">
@@ -163,5 +275,14 @@ export default async function DashboardSettingsPage({
         </div>
       </div>
     </DashboardShell>
+  );
+}
+
+function InfoPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-line bg-panel-strong px-4 py-3">
+      <div className="text-xs uppercase tracking-[0.2em] text-muted">{label}</div>
+      <div className="mt-2 text-sm font-semibold text-foreground">{value}</div>
+    </div>
   );
 }

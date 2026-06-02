@@ -1,0 +1,553 @@
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\api\health\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\api\\health\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.e7hw9hwe8k5'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.e7hw9hwe8k5'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\api\health\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\api\\health\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.xn8m2n1djtn'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.xn8m2n1djtn'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.2x206geue8'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.2x206geue8'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\edge\chunks\_9fc7c2fb._.js']
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.m1n8gg6vjm'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.m1n8gg6vjm'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.6g8rpox3zt'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.6g8rpox3zt'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.ex8tbt5ezc8'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.ex8tbt5ezc8'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.pts51dqylun'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.pts51dqylun'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.x39bxcdnvdq'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.x39bxcdnvdq'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\static\development\_buildManifest.js.tmp.835fhzv2gov'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\static\\development\\_buildManifest.js.tmp.835fhzv2gov'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\favicon.ico\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\favicon.ico\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\api\cart\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\api\\cart\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\api\cart\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\api\\cart\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ Error: Cannot find module '../../../../chunks/[turbopack]_runtime.js'
+Require stack:
+- D:\etsy_parser\rebohrome-site\.next\server\app\api\notifications\active-popups\route.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\require.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\load-components.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\utils.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\options.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\index.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\next-config-ts\transpile-config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\next.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\lib\start-server.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\api\notifications\active-popups\route.js:1:7) {
+  code: 'MODULE_NOT_FOUND',
+  requireStack: [Array],
+  page: '/api/notifications/active-popups'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+Error: Cannot find module '../../../../chunks/[turbopack]_runtime.js'
+Require stack:
+- D:\etsy_parser\rebohrome-site\.next\server\app\api\notifications\active-popups\route.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\require.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\load-components.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\utils.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\options.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\swc\index.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\build\next-config-ts\transpile-config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\config.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\next.js
+- D:\etsy_parser\rebohrome-site\node_modules\next\dist\server\lib\start-server.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\api\notifications\active-popups\route.js:1:7) {
+  code: 'MODULE_NOT_FOUND',
+  requireStack: [Array],
+  page: '/api/notifications/active-popups'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\favicon.ico\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\favicon.ico\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\favicon.ico\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\favicon.ico\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\favicon.ico\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\favicon.ico\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+Error: Failed to load chunk server/chunks/ssr/node_modules_48ae3c95._.js from runtime for chunk server/app/(public)/page.js
+    at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+  page: '/',
+  [cause]: Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\chunks\ssr\node_modules_48ae3c95._.js'
+      at Object.<anonymous> (D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page.js:19:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'open',
+    path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\chunks\\ssr\\node_modules_48ae3c95._.js'
+  }
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\favicon.ico\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\favicon.ico\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\favicon.ico\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\favicon.ico\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\favicon.ico\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\favicon.ico\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\favicon.ico\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\favicon.ico\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\(public)\page\app-build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\(public)\\page\\app-build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+[Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\pages\_app\build-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\pages\\_app\\build-manifest.json'
+}
+ ⨯ [Error: ENOENT: no such file or directory, open 'D:\etsy_parser\rebohrome-site\.next\server\app\favicon.ico\[__metadata_id__]\route\app-paths-manifest.json'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: 'D:\\etsy_parser\\rebohrome-site\\.next\\server\\app\\favicon.ico\\[__metadata_id__]\\route\\app-paths-manifest.json'
+}

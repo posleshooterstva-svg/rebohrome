@@ -1,0 +1,82 @@
+
+> rebohrome-site@0.1.0 dev
+> next dev --turbopack -p 3001
+
+   ▲ Next.js 15.5.18 (Turbopack)
+   - Local:        http://localhost:3001
+   - Network:      http://172.18.0.1:3001
+   - Environments: .env.local
+
+ ✓ Starting...
+Creating turbopack project { dir: 'D:\\etsy_parser\\rebohrome-site', testMode: true }
+ ✓ Compiled middleware in 183ms
+ ✓ Ready in 2.1s
+ ○ Compiling /admin/broadcasts ...
+ ✓ Compiled /admin/broadcasts in 5.1s
+ GET /admin/broadcasts 200 in 20855ms
+ ○ Compiling /favicon.ico ...
+ GET /favicon.ico?favicon.0b3bf435.ico 200 in 986ms
+ ✓ Compiled /favicon.ico in 1107ms
+ GET /api/cart 200 in 4076ms
+ GET /api/notifications/active-popups 200 in 4368ms
+ PUT /api/cart 200 in 561ms
+ GET /admin/broadcasts?error=NEXT_REDIRECT 200 in 2630ms
+ POST /admin/broadcasts 303 in 7397ms
+ GET /admin/broadcasts?error=NEXT_REDIRECT 200 in 2594ms
+ POST /admin/broadcasts?error=NEXT_REDIRECT 303 in 8502ms
+ GET /admin/broadcasts?error=NEXT_REDIRECT 200 in 2313ms
+ GET /admin/broadcasts?error=NEXT_REDIRECT 200 in 2518ms
+ GET /api/notifications/active-popups 200 in 806ms
+ GET /api/notifications/active-popups 200 in 808ms
+ GET /api/notifications/active-popups 200 in 1065ms
+ GET /api/notifications/active-popups 200 in 1024ms
+ GET /admin/broadcasts?deleted=1 200 in 2599ms
+ POST /admin/broadcasts?error=NEXT_REDIRECT 303 in 3939ms
+ GET /admin/broadcasts?deleted=1 200 in 2300ms
+ POST /admin/broadcasts?deleted=1 303 in 3557ms
+ GET /admin/broadcasts?deleted=1 200 in 1924ms
+ POST /admin/broadcasts?deleted=1 303 in 2970ms
+ GET /api/notifications/active-popups 200 in 1005ms
+ ✓ Compiled in 461ms
+ ✓ Compiled /admin/broadcasts in 150ms
+ GET /admin/broadcasts?deleted=1 200 in 1779ms
+ ✓ Compiled in 416ms
+ ✓ Compiled /admin/broadcasts in 110ms
+ GET /admin/broadcasts?deleted=1 200 in 1917ms
+ GET /api/notifications/active-popups 200 in 15555ms
+ ✓ Compiled in 321ms
+ ✓ Compiled /admin/broadcasts in 104ms
+ GET /admin/broadcasts?deleted=1 200 in 987ms
+ GET /api/notifications/active-popups 200 in 5466ms
+ GET /api/notifications/active-popups 200 in 990ms
+ ✓ Compiled in 847ms
+ ✓ Compiled /admin/broadcasts in 139ms
+ GET /admin/broadcasts?deleted=1 200 in 1104ms
+ ✓ Compiled in 551ms
+ ✓ Compiled /admin/broadcasts in 120ms
+ GET /admin/broadcasts?deleted=1 200 in 1133ms
+ GET /api/notifications/active-popups 200 in 4585ms
+ ✓ Compiled in 402ms
+ ✓ Compiled /admin/broadcasts in 102ms
+ GET /admin/broadcasts?deleted=1 200 in 984ms
+ ✓ Compiled in 432ms
+ ✓ Compiled /admin/broadcasts in 99ms
+ GET /admin/broadcasts?deleted=1 200 in 931ms
+ GET /api/notifications/active-popups 200 in 4660ms
+ ✓ Compiled in 419ms
+ ✓ Compiled /admin/broadcasts in 101ms
+ GET /admin/broadcasts?deleted=1 200 in 999ms
+ GET /api/notifications/active-popups 200 in 4694ms
+ ✓ Compiled in 515ms
+ ✓ Compiled /admin/broadcasts in 131ms
+ GET /admin/broadcasts?deleted=1 200 in 1136ms
+ ✓ Compiled in 464ms
+ ✓ Compiled /admin/broadcasts in 102ms
+ GET /admin/broadcasts?deleted=1 200 in 1019ms
+ GET /api/notifications/active-popups 200 in 4769ms
+ ✓ Compiled in 451ms
+ ✓ Compiled /admin/broadcasts in 111ms
+ GET /admin/broadcasts?deleted=1 200 in 970ms
+ ✓ Compiled in 246ms
+ GET /api/notifications/active-popups 200 in 4296ms
+[?25h

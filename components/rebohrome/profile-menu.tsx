@@ -77,7 +77,7 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
       <button
         aria-expanded={open}
         aria-haspopup="menu"
-        className="flex items-center gap-2 rounded-[10px] border border-line bg-white px-2.5 py-2 text-sm text-foreground shadow-[0_10px_24px_rgba(15,23,42,0.06)] transition hover:border-[var(--line-strong)] hover:bg-[var(--background-soft)]"
+        className="flex items-center gap-2 rounded-[10px] border border-white/10 bg-[rgba(12,10,24,0.82)] px-2.5 py-2 text-sm text-foreground shadow-[0_16px_42px_rgba(0,0,0,0.26)] backdrop-blur-xl transition hover:border-violet-300/35 hover:bg-[rgba(22,18,42,0.92)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/45"
         onClick={() => setOpen((value) => !value)}
         type="button"
       >
@@ -97,50 +97,50 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
         {open ? (
           <motion.div
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            className="absolute right-0 z-[140] mt-3 w-[332px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[16px] border border-line bg-[rgba(255,255,255,0.98)] p-3 shadow-[0_18px_40px_rgba(15,23,42,0.08)] backdrop-blur"
+            className="absolute right-0 z-[140] mt-3 w-[332px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[18px] border border-violet-300/20 bg-[rgba(8,7,18,0.94)] p-3 shadow-[0_28px_90px_rgba(0,0,0,0.42),0_0_42px_rgba(124,58,237,0.12)] backdrop-blur-2xl"
             exit={{ opacity: 0, y: -8, scale: 0.98 }}
             initial={{ opacity: 0, y: -10, scale: 0.98 }}
             role="menu"
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
           >
-            <div className="rounded-[14px] border border-line bg-[linear-gradient(180deg,#ffffff_0%,#fafbfd_100%)] p-4">
+            <div className="rounded-[15px] border border-white/10 bg-[linear-gradient(180deg,rgba(28,23,50,0.92)_0%,rgba(14,12,27,0.94)_100%)] p-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-base font-semibold text-foreground">
                       {account.user.username}
                     </span>
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[var(--accent-soft)] px-2 py-1 text-[11px] font-medium text-[var(--accent)]">
-                    <ShieldCheck className="size-3" />
-                    Verified
-                  </span>
+                    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300/25 bg-emerald-400/10 px-2 py-1 text-[11px] font-medium text-emerald-200">
+                      <ShieldCheck className="size-3" />
+                      Verified
+                    </span>
                   </div>
                   <div className="mt-1 text-sm text-muted">
                     {account.user.telegramUsername}
                   </div>
                 </div>
                 {account.user.role === "admin" ? (
-                  <span className="rounded-full bg-sky-100 px-2 py-1 text-[11px] font-medium text-sky-700">
+                  <span className="rounded-full border border-sky-300/25 bg-sky-400/10 px-2 py-1 text-[11px] font-medium text-sky-200">
                     Admin
                   </span>
                 ) : null}
               </div>
 
-              <div className="mt-4 rounded-[12px] border border-line bg-[var(--background-soft)] px-4 py-4">
+              <div className="mt-4 rounded-[13px] border border-violet-300/16 bg-[rgba(8,7,18,0.72)] px-4 py-4 shadow-[0_18px_44px_rgba(0,0,0,0.22)]">
                 <div className="text-xs uppercase tracking-[0.2em] text-muted">
                   Current Balance
                 </div>
                 <div className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-foreground">
                   {balanceLabel}
                 </div>
-                <div className="mt-2 text-sm text-cyan-600">
+                <div className="mt-2 text-sm text-cyan-200">
                   Synced with your archive wallet
                 </div>
               </div>
 
               <div className="mt-4 grid grid-cols-2 gap-2">
                 <Link
-                  className="inline-flex items-center justify-center gap-2 rounded-[10px] bg-foreground px-4 py-3 text-sm font-medium text-white transition hover:opacity-92"
+                  className="inline-flex items-center justify-center gap-2 rounded-[10px] bg-[linear-gradient(135deg,#a78bfa,#6d4df2)] px-4 py-3 text-sm font-medium text-white shadow-[0_14px_34px_rgba(139,92,246,0.28)] transition hover:-translate-y-0.5 hover:shadow-[0_18px_44px_rgba(139,92,246,0.36)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/45"
                   href="/dashboard/deposit"
                   onClick={() => setOpen(false)}
                 >
@@ -148,7 +148,7 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
                   Deposit Funds
                 </Link>
                 <Link
-                  className="inline-flex items-center justify-center gap-2 rounded-[10px] border border-line bg-white px-4 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--background-strong)]"
+                  className="inline-flex items-center justify-center gap-2 rounded-[10px] border border-white/12 bg-white/[0.045] px-4 py-3 text-sm font-medium text-foreground transition hover:-translate-y-0.5 hover:border-violet-300/30 hover:bg-white/[0.075] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/35"
                   href="/withdraw"
                   onClick={() => setOpen(false)}
                 >
@@ -158,11 +158,11 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
               </div>
             </div>
 
-            <div className="mt-3 rounded-[14px] border border-line bg-white p-2">
+            <div className="mt-3 rounded-[15px] border border-white/10 bg-[rgba(13,11,26,0.82)] p-2">
               {quickLinks.map((item) => (
                 <Link
                   key={item.href}
-                  className="flex items-center justify-between rounded-[10px] px-3 py-3 text-sm text-muted transition hover:bg-[var(--background-soft)] hover:text-foreground"
+                  className="flex items-center justify-between rounded-[10px] px-3 py-3 text-sm text-muted transition hover:bg-white/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/30"
                   href={item.href}
                   onClick={() => setOpen(false)}
                 >
@@ -173,7 +173,7 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
 
               {account.user.role === "admin" ? (
                 <Link
-                  className="flex items-center justify-between rounded-[10px] px-3 py-3 text-sm text-muted transition hover:bg-[var(--background-soft)] hover:text-foreground"
+                  className="flex items-center justify-between rounded-[10px] px-3 py-3 text-sm text-muted transition hover:bg-white/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/30"
                   href="/admin"
                   onClick={() => setOpen(false)}
                 >
@@ -185,7 +185,7 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
               <form action={logoutAction}>
                 <input name="redirectTo" type="hidden" value="/" />
                 <button
-                  className="mt-1 flex w-full items-center justify-between rounded-[10px] px-3 py-3 text-sm text-muted transition hover:bg-[var(--background-soft)] hover:text-foreground"
+                  className="mt-1 flex w-full items-center justify-between rounded-[10px] px-3 py-3 text-sm text-muted transition hover:bg-rose-500/10 hover:text-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300/30"
                   type="submit"
                 >
                   <span>Logout</span>

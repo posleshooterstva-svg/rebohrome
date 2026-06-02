@@ -5,7 +5,13 @@ import { getSessionState } from "@/lib/session";
 
 const withdrawSchema = z.object({
   amount: z.number().positive(),
-  walletAddress: z.string().min(4).optional(),
+  walletAddress: z
+    .string()
+    .optional()
+    .refine(
+      (value) => !value || /^0x[a-fA-F0-9]{40}$/.test(value.trim()),
+      "Please enter a valid USDT BEP20 wallet address.",
+    ),
 });
 
 export async function POST(request: Request) {

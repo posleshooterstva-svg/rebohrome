@@ -15,8 +15,6 @@ export type TransVoucherPaymentCreatePayload = {
   cancelUrl: string;
   redirectUrl: string;
   customerDetails: {
-    username: string;
-    telegramUsername?: string | null;
     email?: string | null;
   };
   metadata: Record<string, unknown>;
@@ -122,16 +120,25 @@ export function buildTransVoucherReturnUrls(transactionId: string) {
 
 async function transVoucherRequest<T>(pathname: string, init?: RequestInit): Promise<T> {
   const config = getTransVoucherConfig();
-  const response = await fetch(`${config.baseUrl}${pathname}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-Key": config.apiKey,
-      "X-API-Secret": config.apiSecret,
-      ...(init?.headers ?? {}),
-    },
-    cache: "no-store",
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+
+  let response: Response;
+  try {
+    response = await fetch(`${config.baseUrl}${pathname}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": config.apiKey,
+        "X-API-Secret": config.apiSecret,
+        ...(init?.headers ?? {}),
+      },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
@@ -168,7 +175,7 @@ export async function createTransVoucherPayment(
       redirect_url: payload.redirectUrl,
       customer_details: payload.customerDetails,
       metadata: payload.metadata,
-      theme: payload.theme ?? "light",
+      theme: payload.theme ?? "dark",
       lang: payload.lang ?? "en",
       default_payment_method: payload.defaultPaymentMethod,
       payment_method_forced: payload.paymentMethodForced,

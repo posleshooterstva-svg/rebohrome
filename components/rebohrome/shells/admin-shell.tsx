@@ -2,10 +2,13 @@ import Link from "next/link";
 import {
   BarChart3,
   Boxes,
+  History,
   LayoutDashboard,
+  Megaphone,
   ReceiptText,
   Settings2,
   ShieldCheck,
+  Signal,
   Upload,
   Users,
 } from "lucide-react";
@@ -23,6 +26,14 @@ const adminNav = [
   { href: "/admin/products", label: "Products", icon: Boxes, id: "products" },
   { href: "/admin/orders", label: "Orders", icon: ReceiptText, id: "orders" },
   { href: "/admin/users", label: "Users", icon: Users, id: "users" },
+  { href: "/admin/ledger", label: "Ledger", icon: History, id: "ledger" },
+  {
+    href: "/admin/provider-intelligence",
+    label: "Provider Intel",
+    icon: Signal,
+    id: "provider-intelligence",
+  },
+  { href: "/admin/broadcasts", label: "Broadcasts", icon: Megaphone, id: "broadcasts" },
   { href: "/admin/analytics", label: "Analytics", icon: BarChart3, id: "analytics" },
   { href: "/admin/upload", label: "Upload", icon: Upload, id: "upload" },
   { href: "/admin/settings", label: "System", icon: Settings2, id: "settings" },

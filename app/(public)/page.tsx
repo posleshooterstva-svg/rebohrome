@@ -238,7 +238,7 @@ export default async function HomePage() {
               </div>
             </section>
 
-            <section className="rounded-[18px] border border-line bg-[linear-gradient(180deg,#ffffff_0%,#f7f8fb_100%)] p-4 shadow-[0_24px_52px_rgba(15,23,42,0.05)] sm:p-6">
+            <section className="rounded-[18px] border border-line bg-[linear-gradient(180deg,rgba(17,24,39,0.78)_0%,rgba(9,13,22,0.92)_100%)] p-4 shadow-[0_24px_72px_rgba(0,0,0,0.28)] sm:p-6">
               <FeaturedHeroProduct product={heroCard} />
             </section>
           </div>

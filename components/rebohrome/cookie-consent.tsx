@@ -19,7 +19,7 @@ export function CookieConsent() {
 
   return (
     <div className="pointer-events-none fixed bottom-4 right-4 z-[140] w-[calc(100%-2rem)] max-w-[360px] sm:right-6 lg:right-8">
-      <div className="pointer-events-auto flex w-full flex-col gap-4 rounded-[14px] border border-line bg-[rgba(255,255,255,0.96)] px-5 py-4 shadow-[0_18px_42px_rgba(15,23,42,0.08)] backdrop-blur">
+      <div className="pointer-events-auto flex w-full flex-col gap-4 rounded-[14px] border border-line bg-[rgba(14,20,34,0.92)] px-5 py-4 shadow-[0_22px_70px_rgba(0,0,0,0.36)] backdrop-blur-xl">
         <div className="max-w-3xl">
           <div className="text-sm font-semibold text-foreground">
             Cookies & analytics

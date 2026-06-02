@@ -22,7 +22,7 @@ export default async function PaymentDeclinedPage({
   const transaction =
     tx && session.userId ? await getTransactionById(tx, session.userId) : null;
 
-  const isFailed = transaction?.status === "failed";
+  const isFailed = transaction?.status === "failed" || transaction?.status === "expired";
   const isPending = Boolean(transaction) && !isFailed && transaction?.status !== "completed";
 
   return (
@@ -42,9 +42,9 @@ export default async function PaymentDeclinedPage({
         </h1>
         <p className="mx-auto mt-4 max-w-2xl text-sm leading-7 text-muted">
           {isFailed
-            ? "This transaction is marked as failed. No archive items were assigned and no balance changes were finalized."
+            ? "This transaction is marked as failed or expired. No archive items were assigned and no balance changes were finalized."
             : isPending
-              ? "We have not finalized this payment yet. Refresh the payment status after a few moments if the provider has already shown a result."
+              ? "Your payment is being verified. This usually takes a few seconds, and background reconciliation will continue even if you close this page."
               : tx
                 ? "We could not load a finalized payment record for this reference. You can return to checkout or sign in and refresh the status safely."
                 : "Open this page from a failed or canceled payment attempt to review the payment state."}

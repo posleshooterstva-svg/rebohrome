@@ -1,6 +1,7 @@
 import { type HeaderAccount } from "@/lib/rebohrome-data";
 import { cn } from "@/lib/utils";
 import { ArchiveSurfaceLayout } from "../archive-surface-layout";
+import { PersistentArchiveNotice } from "../persistent-archive-notice";
 import { WorkspaceTopbar } from "../workspace-topbar";
 
 type AppShellProps = {
@@ -93,6 +94,7 @@ export function AppShell({
       </ArchiveSurfaceLayout>
       </div>
       </main>
+      {account ? <PersistentArchiveNotice /> : null}
       {mobileNavigation}
     </>
   );

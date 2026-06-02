@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import {
+  sendWithdrawalViaXRocketAction,
   retryWithdrawalTelegramSyncAction,
   updateWithdrawalStatusAction,
 } from "@/app/actions/marketplace";
@@ -9,6 +10,7 @@ import { AdminShell } from "@/components/rebohrome/shells/admin-shell";
 import {
   getAdminUsers,
   getAdminWithdrawalRequests,
+  getPaymentReconciliationStatus,
   trackUsersPageVisit,
 } from "@/lib/db/repository";
 import {
@@ -86,9 +88,10 @@ export default async function AdminUsersPage({
   const session = await requireAdminSession("/");
   const params = await searchParams;
   const meta = await getRequestMeta("/admin/users");
-  const [users, withdrawals] = await Promise.all([
+  const [users, withdrawals, reconciliationStatus] = await Promise.all([
     getAdminUsers(),
     getAdminWithdrawalRequests(),
+    getPaymentReconciliationStatus(),
   ]);
 
   await trackUsersPageVisit({
@@ -123,7 +126,10 @@ export default async function AdminUsersPage({
         </Banner>
       ) : null}
 
-      <AdminUsersManager initialUsers={users} />
+      <AdminUsersManager
+        initialReconciliationStatus={reconciliationStatus}
+        initialUsers={users}
+      />
 
       <section className="mt-6 rounded-[28px] border border-line bg-panel-strong p-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -155,6 +161,8 @@ export default async function AdminUsersPage({
                     : request.telegramSyncStatus === "stale"
                       ? "Sync stale"
                       : "Sync pending";
+              const canSendXRocket =
+                request.status === "approved" && !request.xrocketWithdrawalId;
 
               return (
                 <div
@@ -181,10 +189,15 @@ export default async function AdminUsersPage({
                     </div>
 
                     <div className="grid gap-3 text-sm text-muted sm:grid-cols-2 lg:min-w-[320px]">
-                      <InfoBlock label="Amount" value={formatUsd(request.amount)} />
+                      <InfoBlock label="Requested" value={formatUsd(request.requestedAmount)} />
+                      <InfoBlock label="Final payout" value={formatUsd(request.payoutAmount)} />
                       <InfoBlock
-                        label="Requested"
+                        label="Created"
                         value={formatDisplayDateTime(request.createdAt)}
+                      />
+                      <InfoBlock
+                        label="Payout formula"
+                        value={`${request.basePayoutPercent}% + ${request.bonusPayoutPercent}% = ${request.finalPayoutPercent}%`}
                       />
                     </div>
                   </div>
@@ -207,6 +220,30 @@ export default async function AdminUsersPage({
                         entry.balance.pendingWithdrawal,
                       )}`}
                     />
+                  </div>
+
+                  <div className="mt-5 grid gap-3 rounded-[24px] border border-line bg-panel-strong p-4 lg:grid-cols-4">
+                    <InfoBlock
+                      label="xRocket status"
+                      value={request.xrocketStatus ?? "Not sent"}
+                    />
+                    <InfoBlock
+                      label="Provider payout"
+                      value={`${request.payoutCurrency ?? "USDT"} / ${request.payoutNetwork ?? "BEP20"}`}
+                    />
+                    <InfoBlock
+                      label="xRocket ID"
+                      value={request.xrocketWithdrawalId ?? "Not assigned"}
+                    />
+                    <InfoBlock
+                      label="Tx hash"
+                      value={request.payoutTxHash ?? "Not confirmed"}
+                    />
+                    {request.payoutError ? (
+                      <div className="lg:col-span-4 rounded-2xl border border-rose-300/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+                        {request.payoutError}
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="mt-5 grid gap-4 xl:grid-cols-[1.2fr_auto]">
@@ -250,6 +287,33 @@ export default async function AdminUsersPage({
                       </button>
                     </form>
                   </div>
+
+                  <form
+                    action={sendWithdrawalViaXRocketAction}
+                    className="mt-4 grid gap-3 rounded-[24px] border border-amber-300/20 bg-amber-500/10 p-4 md:grid-cols-[1fr_0.8fr_auto]"
+                  >
+                    <input name="withdrawalId" type="hidden" value={request.id} />
+                    <div className="text-sm text-amber-50">
+                      <div className="font-semibold">Send via xRocket</div>
+                      <div className="mt-1 text-amber-100/80">
+                        Final payout: {formatUsd(request.payoutAmount)} USDT to{" "}
+                        {request.walletAddress.slice(0, 6)}...{request.walletAddress.slice(-4)}
+                      </div>
+                    </div>
+                    <input
+                      className="rounded-2xl border border-amber-300/20 bg-panel px-4 py-3 text-sm text-foreground outline-none"
+                      disabled={!canSendXRocket}
+                      name="confirmation"
+                      placeholder="Type SEND XROCKET"
+                    />
+                    <button
+                      className="rounded-2xl border border-amber-300/30 bg-amber-400/20 px-4 py-3 text-sm font-semibold text-amber-50 transition hover:bg-amber-400/30 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={!canSendXRocket}
+                      type="submit"
+                    >
+                      Send via xRocket
+                    </button>
+                  </form>
 
                   <div className="mt-5 rounded-[24px] border border-line bg-panel-strong p-4">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

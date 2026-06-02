@@ -15,7 +15,7 @@ function SkeletonBlock({
   return (
     <div
       className={cn(
-        "animate-pulse rounded-[14px] bg-[linear-gradient(90deg,rgba(236,238,244,0.8)_0%,rgba(246,247,251,0.96)_45%,rgba(236,238,244,0.8)_100%)]",
+        "animate-pulse rounded-[14px] bg-[linear-gradient(90deg,rgba(255,255,255,0.045)_0%,rgba(139,92,246,0.12)_45%,rgba(255,255,255,0.045)_100%)]",
         className,
       )}
     />
@@ -59,7 +59,7 @@ export function SurfaceSkeleton({
           </aside>
         ) : null}
 
-        <section className="min-w-0 border-b border-line bg-[linear-gradient(180deg,#ffffff_0%,#fcfcfa_100%)] p-6 sm:p-8 xl:border-b-0 xl:border-r">
+        <section className="min-w-0 border-b border-line bg-[linear-gradient(180deg,rgba(14,20,34,0.86)_0%,rgba(9,13,22,0.92)_100%)] p-6 sm:p-8 xl:border-b-0 xl:border-r">
           <SkeletonBlock className="h-4 w-28 rounded-full" />
           <SkeletonBlock className={cn("mt-4 h-12 rounded-[16px]", titleWidth)} />
           <SkeletonBlock className="mt-4 h-4 w-full max-w-[560px] rounded-full" />
@@ -68,7 +68,7 @@ export function SurfaceSkeleton({
             {Array.from({ length: cardCount }).map((_, index) => (
               <div
                 key={index}
-                className="rounded-[16px] border border-line bg-white p-4"
+                className="rounded-[16px] border border-line bg-panel-strong p-4"
               >
                 <SkeletonBlock className="aspect-[4/5] w-full rounded-[14px]" />
                 <SkeletonBlock className="mt-4 h-4 w-3/4 rounded-full" />
@@ -79,7 +79,7 @@ export function SurfaceSkeleton({
         </section>
 
         {showRightRail ? (
-          <aside className="space-y-4 bg-[linear-gradient(180deg,#ffffff_0%,#fbfbf9_100%)] p-5">
+          <aside className="space-y-4 bg-[linear-gradient(180deg,rgba(17,24,39,0.84)_0%,rgba(9,13,22,0.94)_100%)] p-5">
             <SkeletonBlock className="h-[190px] w-full rounded-[16px]" />
             <SkeletonBlock className="h-[214px] w-full rounded-[16px]" />
             <SkeletonBlock className="h-[190px] w-full rounded-[16px]" />

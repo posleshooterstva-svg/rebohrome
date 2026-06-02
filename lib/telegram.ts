@@ -1,13 +1,16 @@
 import "server-only";
 
+import { readFile } from "fs/promises";
 import {
   ADMIN_TELEGRAM_CHAT_ID,
+  TELEGRAM_CHANNEL_CHAT_ID,
   TELEGRAM_BOT_TOKEN,
 } from "@/lib/server-config";
 
 export type TelegramInlineButton = {
   text: string;
-  callback_data: string;
+  callback_data?: string;
+  url?: string;
 };
 
 export type TelegramReplyMarkup = {
@@ -100,6 +103,33 @@ async function callTelegramApi<T>(method: string, body: Record<string, unknown>)
   return { ok: true as const, skipped: false as const, result: payload.result };
 }
 
+async function callTelegramMultipartApi<T>(method: string, body: FormData) {
+  const endpoint = buildEndpoint(method);
+
+  if (!endpoint) {
+    return { ok: false as const, skipped: true as const, result: null as T | null };
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    body,
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Telegram API ${method} failed: ${text}`);
+  }
+
+  const payload = (await response.json()) as { ok: boolean; result: T };
+
+  if (!payload.ok) {
+    throw new Error(`Telegram API ${method} returned an unsuccessful response.`);
+  }
+
+  return { ok: true as const, skipped: false as const, result: payload.result };
+}
+
 export async function sendTelegramMessage(input: {
   text: string;
   chatId: string | number;
@@ -112,6 +142,45 @@ export async function sendTelegramMessage(input: {
     disable_web_page_preview: true,
     reply_markup: input.replyMarkup,
   });
+}
+
+export async function sendTelegramPhoto(input: {
+  chatId: string | number;
+  photo: string;
+  caption: string;
+  replyMarkup?: TelegramReplyMarkup;
+}) {
+  return callTelegramApi<TelegramMessageResult>("sendPhoto", {
+    chat_id: input.chatId,
+    photo: input.photo,
+    caption: input.caption,
+    parse_mode: "HTML",
+    reply_markup: input.replyMarkup,
+  });
+}
+
+export async function sendTelegramPhotoFile(input: {
+  chatId: string | number;
+  photoPath: string;
+  caption: string;
+  filename?: string;
+  replyMarkup?: TelegramReplyMarkup;
+}) {
+  const file = await readFile(input.photoPath);
+  const form = new FormData();
+  form.append("chat_id", String(input.chatId));
+  form.append("caption", input.caption);
+  form.append("parse_mode", "HTML");
+  if (input.replyMarkup) {
+    form.append("reply_markup", JSON.stringify(input.replyMarkup));
+  }
+  form.append(
+    "photo",
+    new Blob([new Uint8Array(file)], { type: "image/png" }),
+    input.filename ?? "rebohrome-notification.png",
+  );
+
+  return callTelegramMultipartApi<TelegramMessageResult>("sendPhoto", form);
 }
 
 export async function sendTelegramUserMessage(
@@ -183,6 +252,75 @@ export async function sendTelegramAdminMessage(
 
   return sendTelegramMessage({
     chatId: ADMIN_TELEGRAM_CHAT_ID,
+    text: message,
+    replyMarkup: options?.replyMarkup,
+  });
+}
+
+export async function sendTelegramChannelPhoto(
+  caption: string,
+  options?: {
+    photo?: string;
+    replyMarkup?: TelegramReplyMarkup;
+  },
+) {
+  if (!TELEGRAM_CHANNEL_CHAT_ID) {
+    return {
+      ok: false as const,
+      skipped: true as const,
+      result: null as TelegramMessageResult | null,
+    };
+  }
+
+  return sendTelegramPhoto({
+    chatId: TELEGRAM_CHANNEL_CHAT_ID,
+    photo: options?.photo ?? "",
+    caption,
+    replyMarkup: options?.replyMarkup,
+  });
+}
+
+export async function sendTelegramChannelPhotoFile(
+  caption: string,
+  options: {
+    photoPath: string;
+    filename?: string;
+    replyMarkup?: TelegramReplyMarkup;
+  },
+) {
+  if (!TELEGRAM_CHANNEL_CHAT_ID) {
+    return {
+      ok: false as const,
+      skipped: true as const,
+      result: null as TelegramMessageResult | null,
+    };
+  }
+
+  return sendTelegramPhotoFile({
+    chatId: TELEGRAM_CHANNEL_CHAT_ID,
+    photoPath: options.photoPath,
+    filename: options.filename,
+    caption,
+    replyMarkup: options.replyMarkup,
+  });
+}
+
+export async function sendTelegramChannelMessage(
+  message: string,
+  options?: {
+    replyMarkup?: TelegramReplyMarkup;
+  },
+) {
+  if (!TELEGRAM_CHANNEL_CHAT_ID) {
+    return {
+      ok: false as const,
+      skipped: true as const,
+      result: null as TelegramMessageResult | null,
+    };
+  }
+
+  return sendTelegramMessage({
+    chatId: TELEGRAM_CHANNEL_CHAT_ID,
     text: message,
     replyMarkup: options?.replyMarkup,
   });

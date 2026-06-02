@@ -4,7 +4,11 @@ create table if not exists public.users (
   email text not null unique,
   name text not null,
   password_hash text not null,
-  status text not null check (status in ('active', 'suspended')) default 'active',
+  status text not null check (status in ('active', 'under_review', 'frozen', 'blocked', 'suspended')) default 'active',
+  require_password_reset boolean not null default false,
+  is_deleted boolean not null default false,
+  deleted_at timestamptz,
+  deleted_by uuid,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   last_login_at timestamptz
@@ -115,14 +119,22 @@ create table if not exists public.cart_items (
 create table if not exists public.transactions (
   id text primary key,
   user_id uuid not null references public.users(id) on delete cascade,
-  kind text not null check (kind in ('deposit', 'purchase', 'withdrawal')),
+  kind text not null check (kind in ('deposit', 'purchase', 'withdrawal', 'refund', 'admin_initial_balance')),
   amount integer not null,
-  status text not null check (status in ('completed', 'pending', 'failed')),
+  provider_status text,
+  status text not null check (status in ('completed', 'pending', 'attempting', 'processing', 'failed', 'expired')),
   reference_id text not null,
   summary text not null,
   meta_json jsonb,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  paid_at timestamptz,
+  provider_checked_at timestamptz,
+  processed_at timestamptz,
+  credited_at timestamptz,
+  next_check_at timestamptz,
+  last_error text,
+  reconciliation_attempts integer not null default 0
 );
 
 create table if not exists public.deposits (
@@ -143,13 +155,21 @@ create table if not exists public.withdrawal_requests (
   id text primary key,
   user_id uuid not null references public.users(id) on delete cascade,
   amount integer not null,
+  requested_amount integer,
+  base_payout_percent integer not null default 60,
+  bonus_payout_percent integer not null default 0,
+  final_payout_percent integer not null default 60,
+  payout_amount integer,
   wallet_address text not null,
+  wallet_usdt_bep20 text,
   telegram_id text not null,
-  status text not null check (status in ('pending', 'approved', 'rejected', 'paid')),
+  status text not null check (status in ('pending', 'approved', 'processing', 'completed', 'declined', 'rejected', 'paid')),
   source_deposit_id text references public.deposits(id) on delete set null,
   source_card_masked text,
   source_cardholder_name text,
   admin_note text,
+  status_updated_by uuid,
+  status_updated_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -162,6 +182,22 @@ create table if not exists public.admin_logs (
   entity_id text not null,
   message text not null,
   created_at timestamptz not null default now()
+);
+
+create table if not exists public.payment_reconciliation_runs (
+  id uuid primary key default gen_random_uuid(),
+  provider text not null,
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  checked_count integer not null default 0,
+  succeeded_count integer not null default 0,
+  failed_count integer not null default 0,
+  expired_count integer not null default 0,
+  pending_count integer not null default 0,
+  skipped_count integer not null default 0,
+  error_count integer not null default 0,
+  last_error text,
+  trigger_source text not null default 'cron'
 );
 
 create index if not exists idx_orders_user_id on public.orders(user_id);

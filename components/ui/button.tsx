@@ -9,11 +9,13 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "bg-[var(--foreground)] px-5 py-3 text-[var(--background)] shadow-[0_8px_20px_rgba(15,23,42,0.08)] hover:opacity-92",
+          "bg-[linear-gradient(135deg,var(--accent-primary),#6d4df2)] px-5 py-3 text-white shadow-[0_14px_32px_rgba(139,92,246,0.28)] hover:-translate-y-0.5 hover:shadow-[0_18px_42px_rgba(139,92,246,0.36)]",
         secondary:
-          "border border-line-strong bg-panel-strong px-5 py-3 text-[var(--foreground)] hover:bg-[var(--background-strong)]",
+          "border border-line-strong bg-panel-strong px-5 py-3 text-[var(--foreground)] shadow-[0_1px_0_rgba(255,255,255,0.06)_inset] hover:-translate-y-0.5 hover:border-[rgba(167,139,250,0.34)] hover:bg-[rgba(255,255,255,0.075)]",
+        destructive:
+          "border border-red-400/30 bg-red-500/12 px-5 py-3 text-red-200 shadow-[0_12px_28px_rgba(239,68,68,0.14)] hover:-translate-y-0.5 hover:bg-red-500/18",
         ghost:
-          "px-4 py-3 text-muted hover:bg-[var(--background-strong)] hover:text-[var(--foreground)]",
+          "px-4 py-3 text-muted hover:bg-[rgba(255,255,255,0.06)] hover:text-[var(--foreground)]",
       },
       size: {
         default: "h-11",

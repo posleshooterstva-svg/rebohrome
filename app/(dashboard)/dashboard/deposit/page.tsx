@@ -1,9 +1,11 @@
 import { DepositPageClient } from "@/components/dashboard/deposit-page-client";
 import { DepositSidebarRail } from "@/components/dashboard/deposit-sidebar-rail";
+import { ActivePaymentSessionCard } from "@/components/payment/active-payment-session-card";
 import { DashboardShell } from "@/components/rebohrome/shells/dashboard-shell";
 import {
   getBalanceByUserId,
   getDepositOutcomeById,
+  getActivePaymentSession,
   getUserTransactions,
 } from "@/lib/db/repository";
 import { requireUserSession } from "@/lib/session";
@@ -23,10 +25,11 @@ export default async function DashboardDepositPage({
   const failedId = typeof params.failed === "string" ? params.failed : null;
   const outcomeId = receiptId || failedId;
 
-  const [balance, recentTransactions, initialOutcome] = await Promise.all([
+  const [balance, recentTransactions, initialOutcome, activePaymentSession] = await Promise.all([
     getBalanceByUserId(session.userId),
     getUserTransactions(session.userId, 5),
     outcomeId ? getDepositOutcomeById(session.userId, outcomeId) : Promise.resolve(null),
+    getActivePaymentSession(session.userId, "deposit"),
   ]);
 
   return (
@@ -43,7 +46,12 @@ export default async function DashboardDepositPage({
         />
       }
     >
-      <DepositPageClient initialOutcome={initialOutcome} userId={session.userId} />
+      <div className="space-y-5">
+        {activePaymentSession ? (
+          <ActivePaymentSessionCard session={activePaymentSession} />
+        ) : null}
+        <DepositPageClient initialOutcome={initialOutcome} userId={session.userId} />
+      </div>
     </DashboardShell>
   );
 }

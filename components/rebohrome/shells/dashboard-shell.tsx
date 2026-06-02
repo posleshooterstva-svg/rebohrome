@@ -33,6 +33,7 @@ type DashboardShellProps = {
   showQuickAction?: boolean;
   quickActionHref?: string;
   searchPlaceholder?: string;
+  notificationHref?: string;
 };
 
 export async function DashboardShell({
@@ -46,6 +47,7 @@ export async function DashboardShell({
   showQuickAction = true,
   quickActionHref = "/marketplace",
   searchPlaceholder = "Search collectibles, collections...",
+  notificationHref = "/notifications",
 }: DashboardShellProps) {
   const session = await getSessionState();
   const [account, financialOverview, user] = await Promise.all([
@@ -112,7 +114,7 @@ export async function DashboardShell({
       description={description}
       eyebrow="Archive Workspace"
       hideIntro={hideIntro}
-      notificationHref="/dashboard/transactions"
+      notificationHref={notificationHref}
       quickActionHref={quickActionHref}
       rightRail={
           rightRail ?? (

@@ -63,7 +63,7 @@ export default async function RootLayout({
   return (
     <html suppressHydrationWarning lang="en">
       <body className={`${manrope.variable} ${sora.variable} antialiased`}>
-        <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
+        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
           <CartSync />
           {maintenance.enabled && isAdmin ? (
             <MaintenanceAdminBanner

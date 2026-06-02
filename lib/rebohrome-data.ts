@@ -2,7 +2,7 @@ export type Rarity = "Legendary" | "Epic" | "Rare";
 export type CardShape = "spire" | "void" | "halo" | "crescent" | "shard";
 export type DeliveryType = "digital" | "physical";
 export type UserRole = "user" | "admin";
-export type UserStatus = "active" | "suspended";
+export type UserStatus = "active" | "under_review" | "frozen" | "blocked" | "suspended";
 export type ProductStatus = "active" | "inactive";
 export type OrderStatus = "Completed" | "Processing" | "Pending" | "Declined";
 export type PaymentState = "completed" | "pending" | "failed";
@@ -18,13 +18,19 @@ export type PaymentProviderName =
   | "TransVoucher";
 export type PaymentProviderSlug = "internal-wallet" | "transvoucher";
 export type CryptoNetwork = "USDT" | "BTC" | "ETH";
-export type TransactionKind = "deposit" | "purchase" | "withdrawal" | "refund";
+export type TransactionKind =
+  | "deposit"
+  | "purchase"
+  | "withdrawal"
+  | "refund"
+  | "admin_initial_balance";
 export type TransactionStatus =
   | "completed"
   | "pending"
   | "attempting"
   | "processing"
-  | "failed";
+  | "failed"
+  | "expired";
 export type DepositStatus = "processing" | "completed" | "failed";
 export type CheckoutPaymentSessionStatus =
   | "pending"
@@ -137,6 +143,109 @@ export type UserRecord = {
   createdAt: string;
   updatedAt: string;
   lastLoginAt: string | null;
+  requirePasswordReset: boolean;
+  isDeleted: boolean;
+  deletedAt: string | null;
+  deletedBy: string | null;
+  vaultIntegrityScore: number;
+  vaultIntegrityStatus: "Unstable" | "Basic" | "Verified" | "Excellent";
+  vaultIntegrityUpdatedAt: string | null;
+  archiveRulesAcceptedAt: string | null;
+  latestTermsAcceptedAt: string | null;
+};
+
+export type VaultIntegrityReport = {
+  score: number;
+  status: UserRecord["vaultIntegrityStatus"];
+  factors: string[];
+  issues: string[];
+  updatedAt: string | null;
+};
+
+export type ArchiveLedgerRecord = {
+  id: string;
+  ledgerId: string;
+  eventType: string;
+  userId: string | null;
+  adminId: string | null;
+  entityType: string;
+  entityId: string;
+  relatedOrderId: string | null;
+  relatedTransactionId: string | null;
+  relatedProductId: string | null;
+  title: string;
+  description: string;
+  metadata: string | null;
+  previousHash: string | null;
+  eventHash: string;
+  createdAt: string;
+};
+
+export type UserNotificationRecord = {
+  id: string;
+  userId: string;
+  broadcastId: string | null;
+  type: string;
+  title: string;
+  body: string;
+  ctaLabel: string | null;
+  ctaUrl: string | null;
+  showAsPopup: boolean;
+  dismissedAt: string | null;
+  readAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+};
+
+export type BroadcastRecord = {
+  id: string;
+  broadcastId: string;
+  title: string;
+  body: string;
+  previewText: string | null;
+  type: string;
+  priority: string;
+  ctaLabel: string | null;
+  ctaUrl: string | null;
+  targetType: string;
+  targetFilters: string | null;
+  channels: string;
+  status: string;
+  scheduledAt: string | null;
+  sentAt: string | null;
+  expiresAt: string | null;
+  createdBy: string | null;
+  telegramChannelEnabled: boolean;
+  telegramChannelId: string | null;
+  telegramChannelMessageId: string | null;
+  telegramChannelStatus: string | null;
+  telegramChannelError: string | null;
+  telegramChannelSentAt: string | null;
+  telegramChannelCaption: string | null;
+  telegramChannelTranslated: boolean;
+  telegramChannelImagePath: string | null;
+  showAsPopup: boolean;
+  popupPosition: string;
+  allowUserDismiss: boolean;
+  isActive: boolean;
+  deletedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ActivePaymentSessionRecord = {
+  id: string;
+  type: "deposit" | "purchase";
+  provider: string;
+  transactionId: string | null;
+  providerTransactionId: string | null;
+  paymentUrl: string | null;
+  amount: number;
+  currency: SupportedCurrency;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
 };
 
 export type BalanceRecord = {
@@ -173,6 +282,22 @@ export type TransactionRecord = {
   createdAt: string;
   updatedAt: string;
   paidAt: string | null;
+  providerCheckedAt: string | null;
+  processedAt: string | null;
+  creditedAt: string | null;
+  nextCheckAt: string | null;
+  lastError: string | null;
+  reconciliationAttempts: number;
+};
+
+export type PaymentReconciliationStatus = {
+  lastRunAt: string | null;
+  pendingTransactions: number;
+  checkedLastHour: number;
+  succeededByCron: number;
+  failedByCron: number;
+  expiredByCron: number;
+  lastError: string | null;
 };
 
 export type DepositRecord = {
@@ -201,6 +326,11 @@ export type WithdrawalRecord = {
   id: string;
   userId: string;
   amount: number;
+  requestedAmount: number;
+  basePayoutPercent: number;
+  bonusPayoutPercent: number;
+  finalPayoutPercent: number;
+  payoutAmount: number;
   walletAddress: string;
   telegramId: string;
   status: WithdrawalStatus;
@@ -215,6 +345,20 @@ export type WithdrawalRecord = {
   telegramLastError: string | null;
   lastActionSource: WithdrawalActionSource;
   lastUpdatedByAdminId: string | null;
+  statusUpdatedBy: string | null;
+  statusUpdatedAt: string | null;
+  payoutProvider: string | null;
+  payoutCurrency: string | null;
+  payoutNetwork: string | null;
+  payoutAddress: string | null;
+  xrocketWithdrawalId: string | null;
+  xrocketStatus: string | null;
+  xrocketRawResponse: string | null;
+  xrocketSentAt: string | null;
+  xrocketConfirmedAt: string | null;
+  payoutTxHash: string | null;
+  payoutError: string | null;
+  payoutAttempts: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -577,6 +721,44 @@ export function formatUsd(value: number) {
   return formatCurrency(value, "USD");
 }
 
+export const PAYOUT_TIER_STEP_USD = 20_000;
+export const BASE_WITHDRAWAL_PAYOUT_PERCENT = 60;
+
+export function getPayoutBonusPercent(totalDepositedUsd: number) {
+  return Math.max(0, Math.floor(Number(totalDepositedUsd || 0) / PAYOUT_TIER_STEP_USD));
+}
+
+export function getPayoutTierProgress(totalDepositedUsd: number) {
+  const normalized = Math.max(0, Number(totalDepositedUsd || 0));
+  const currentBonus = getPayoutBonusPercent(normalized);
+  const nextThreshold = (currentBonus + 1) * PAYOUT_TIER_STEP_USD;
+
+  return {
+    currentBonus,
+    currentThreshold: currentBonus * PAYOUT_TIER_STEP_USD,
+    nextThreshold,
+    progressInTier: normalized,
+    remainingToNext: Math.max(0, nextThreshold - normalized),
+  };
+}
+
+export function calculateWithdrawalPayout(input: {
+  requestedAmount: number;
+  totalDepositedUsd: number;
+}) {
+  const requestedAmount = Number(input.requestedAmount || 0);
+  const bonusPayoutPercent = getPayoutBonusPercent(input.totalDepositedUsd);
+  const finalPayoutPercent = BASE_WITHDRAWAL_PAYOUT_PERCENT + bonusPayoutPercent;
+
+  return {
+    requestedAmount,
+    basePayoutPercent: BASE_WITHDRAWAL_PAYOUT_PERCENT,
+    bonusPayoutPercent,
+    finalPayoutPercent,
+    payoutAmount: Number(((requestedAmount * finalPayoutPercent) / 100).toFixed(2)),
+  };
+}
+
 export function formatCurrencyPair(
   amount: number,
   currency: SupportedCurrency,
@@ -621,7 +803,9 @@ export function createProductId(title: string) {
   return slugify(title) || crypto.randomUUID();
 }
 
-export function createReadableId(prefix: "ORD" | "DEP" | "WDR" | "TXN") {
+export function createReadableId(
+  prefix: "ORD" | "DEP" | "WDR" | "TXN" | "ARCH" | "BRC",
+) {
   const year = new Date().getFullYear();
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let suffix = "";
