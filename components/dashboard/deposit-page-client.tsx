@@ -7,7 +7,6 @@ import { Check, LockKeyhole, ShieldCheck } from "lucide-react";
 import { CinematicLoadingOverlay } from "@/components/rebohrome/cinematic-loading-overlay";
 import { PaymentSuccessModal, type PaymentSuccessRow } from "@/components/rebohrome/payment-success-modal";
 import {
-  type ActivePaymentSessionRecord,
   depositPaymentOptions,
   formatCurrency,
   formatDisplayDateTime,
@@ -40,10 +39,8 @@ type DepositDraft = {
 type DepositSessionResponse =
   | {
       sessionId: string;
-      paymentUrl?: string | null;
+      paymentUrl?: string;
       redirectPath: string;
-      activeSession?: ActivePaymentSessionRecord | null;
-      reusedExistingSession?: boolean;
     }
   | { error?: string };
 
@@ -63,11 +60,6 @@ export function DepositPageClient({
   const [provider, setProvider] = useState<PaymentProviderName | "">("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [openedPayment, setOpenedPayment] = useState<{
-    sessionId: string;
-    paymentUrl: string;
-    reusedExistingSession: boolean;
-  } | null>(null);
   const [mounted, setMounted] = useState(false);
   const [showReceipt, setShowReceipt] = useState(
     initialOutcome?.deposit.status === "completed",
@@ -245,7 +237,6 @@ export function DepositPageClient({
 
     setIsSubmitting(true);
     setError(null);
-    setOpenedPayment(null);
 
     try {
       const response = await fetch("/api/deposit/session", {
@@ -268,25 +259,14 @@ export function DepositPageClient({
         );
       }
 
-      const paymentUrl = payload.paymentUrl || payload.redirectPath;
-      if (!paymentUrl) {
-        throw new Error("Payment page could not be created.");
-      }
-
-      window.open(paymentUrl, "_blank", "noreferrer");
-      setOpenedPayment({
-        sessionId: payload.sessionId,
-        paymentUrl,
-        reusedExistingSession: Boolean(payload.reusedExistingSession),
-      });
-      router.refresh();
+      const paymentLink = payload.paymentUrl ?? payload.redirectPath;
+      window.open(paymentLink, "_blank");
     } catch (depositError) {
       setError(
         depositError instanceof Error
           ? depositError.message
-          : "Payment page could not be created. Please try again.",
+          : "Unable to continue to secure payment.",
       );
-    } finally {
       setIsSubmitting(false);
     }
   }
@@ -463,44 +443,6 @@ export function DepositPageClient({
           </div>
         ) : null}
 
-        {openedPayment ? (
-          <div className="rounded-[18px] border border-emerald-300/25 bg-emerald-400/10 p-5 text-sm text-emerald-50 shadow-[0_24px_70px_rgba(16,185,129,0.08)]">
-            <div className="text-lg font-semibold text-foreground">
-              {openedPayment.reusedExistingSession
-                ? "Active payment session opened"
-                : "Payment session created"}
-            </div>
-            <p className="mt-2 max-w-2xl leading-7 text-muted">
-              Your secure payment page was opened in a new tab. We will verify
-              your payment automatically, so you can return here after completing
-              payment.
-            </p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                className="rounded-[12px] bg-[linear-gradient(135deg,#a78bfa,#6d4df2)] px-4 py-3 text-sm font-medium text-white"
-                onClick={() => window.open(openedPayment.paymentUrl, "_blank", "noreferrer")}
-                type="button"
-              >
-                Open payment page again
-              </button>
-              <button
-                className="rounded-[12px] border border-white/10 bg-white/[0.05] px-4 py-3 text-sm font-medium text-foreground"
-                onClick={() => router.refresh()}
-                type="button"
-              >
-                Check payment status
-              </button>
-              <button
-                className="rounded-[12px] border border-white/10 bg-white/[0.05] px-4 py-3 text-sm font-medium text-foreground"
-                onClick={() => router.push("/dashboard")}
-                type="button"
-              >
-                Back to dashboard
-              </button>
-            </div>
-          </div>
-        ) : null}
-
         <button
           className="inline-flex w-full items-center justify-center gap-2 rounded-[12px] bg-[linear-gradient(135deg,#141922,#0f1420)] px-5 py-4 text-sm font-medium text-white shadow-[0_16px_40px_rgba(17,19,24,0.12)] transition hover:opacity-92 disabled:cursor-not-allowed disabled:opacity-55"
           disabled={!provider || isSubmitting || amount <= 0}
@@ -513,7 +455,8 @@ export function DepositPageClient({
         <div className="flex items-center justify-center gap-2 text-sm text-muted">
           <ShieldInfoIcon />
           <span>
-            Your secure payment provider page will open in a new browser tab.
+            You will be redirected to our secure payment provider to complete your
+            deposit.
           </span>
         </div>
       </section>
