@@ -10,7 +10,6 @@ import { Button } from "@/components/ui/button";
 import { getCartSummary } from "@/lib/cart";
 import { GLOBAL_COLLECTIBLE_DISCLAIMER } from "@/lib/legal-content";
 import {
-  type ActivePaymentSessionRecord,
   checkoutPaymentOptions,
   composePaymentLabel,
   formatCurrency,
@@ -54,10 +53,8 @@ type CheckoutResult =
 type CheckoutSessionResponse =
   | {
       sessionId: string;
-      paymentUrl?: string | null;
+      paymentUrl?: string;
       redirectPath: string;
-      activeSession?: ActivePaymentSessionRecord | null;
-      reusedExistingSession?: boolean;
     }
   | { error?: string };
 
@@ -79,11 +76,6 @@ export function CheckoutPageClient({
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [openedPayment, setOpenedPayment] = useState<{
-    sessionId: string;
-    paymentUrl: string;
-    reusedExistingSession: boolean;
-  } | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -173,7 +165,6 @@ export function CheckoutPageClient({
 
     setIsSubmitting(true);
     setError(null);
-    setOpenedPayment(null);
 
     try {
       if (paymentMethod === "Archive Balance") {
@@ -258,25 +249,14 @@ export function CheckoutPageClient({
         );
       }
 
-      const paymentUrl = payload.paymentUrl || payload.redirectPath;
-      if (!paymentUrl) {
-        throw new Error("Payment page could not be created.");
-      }
-
-      window.open(paymentUrl, "_blank", "noreferrer");
-      setOpenedPayment({
-        sessionId: payload.sessionId,
-        paymentUrl,
-        reusedExistingSession: Boolean(payload.reusedExistingSession),
-      });
-      router.refresh();
+      const paymentLink = payload.paymentUrl ?? payload.redirectPath;
+      window.open(paymentLink, "_blank");
     } catch (checkoutError) {
       setError(
         checkoutError instanceof Error
           ? checkoutError.message
-          : "Payment page could not be created. Please try again.",
+          : "Unable to continue to secure payment.",
       );
-    } finally {
       setIsSubmitting(false);
     }
   }
@@ -569,42 +549,6 @@ export function CheckoutPageClient({
           ) : null}
           {error ? (
             <p className="mt-4 text-sm leading-6 text-rose-600">{error}</p>
-          ) : null}
-          {openedPayment ? (
-            <div className="mt-4 rounded-[16px] border border-emerald-300/25 bg-emerald-400/10 px-4 py-4 text-sm text-emerald-50">
-              <div className="font-semibold text-foreground">
-                {openedPayment.reusedExistingSession
-                  ? "Active payment session opened"
-                  : "Payment session created"}
-              </div>
-              <p className="mt-2 leading-6 text-muted">
-                Your secure payment page was opened in a new tab. We will verify
-                your payment automatically after provider confirmation.
-              </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  className="rounded-[12px] bg-[linear-gradient(135deg,#a78bfa,#6d4df2)] px-4 py-3 text-sm font-medium text-white"
-                  onClick={() => window.open(openedPayment.paymentUrl, "_blank", "noreferrer")}
-                  type="button"
-                >
-                  Open payment page again
-                </button>
-                <button
-                  className="rounded-[12px] border border-white/10 bg-white/[0.05] px-4 py-3 text-sm font-medium text-foreground"
-                  onClick={() => router.refresh()}
-                  type="button"
-                >
-                  Check payment status
-                </button>
-                <button
-                  className="rounded-[12px] border border-white/10 bg-white/[0.05] px-4 py-3 text-sm font-medium text-foreground"
-                  onClick={() => router.push("/dashboard")}
-                  type="button"
-                >
-                  Back to dashboard
-                </button>
-              </div>
-            </div>
           ) : null}
 
           <div className="sticky bottom-4 mt-6 space-y-3 rounded-[18px] border border-line bg-[rgba(255,255,255,0.96)] p-3 shadow-[0_18px_48px_rgba(15,23,42,0.08)] backdrop-blur lg:static lg:rounded-none lg:border-0 lg:bg-transparent lg:p-0 lg:shadow-none lg:backdrop-blur-0">
