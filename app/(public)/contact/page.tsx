@@ -13,7 +13,7 @@ export default function ContactPage() {
           </h1>
           <p className="mt-4 text-sm leading-7 text-muted">
             Reach the ReboHrome team for transaction support, account updates,
-            withdrawal reviews, compliance questions, and purchase assistance.
+            compliance questions, and purchase assistance.
           </p>
         </div>
 
@@ -45,7 +45,7 @@ export default function ContactPage() {
               </Link>
             </p>
             <p className="mt-3 text-sm leading-7 text-muted">
-              Best for collector communication, withdrawal coordination, and
+              Best for collector communication, account questions, and
               quick support follow-up.
             </p>
           </article>
@@ -62,7 +62,7 @@ export default function ContactPage() {
           <article className="rounded-[26px] border border-line bg-panel-strong px-5 py-5">
             <div className="text-sm font-semibold text-foreground">Response time</div>
             <p className="mt-3 text-sm leading-7 text-muted">
-              Typical response window is within 24 hours. Withdrawal and compliance
+              Typical response window is within 24 hours. Compliance
               cases may require additional review time.
             </p>
           </article>

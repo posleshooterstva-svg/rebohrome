@@ -6,6 +6,7 @@ import { getOrderById } from "@/lib/db/repository";
 import {
   formatCurrency,
   formatDisplayDateTime,
+  getPublicProductTitle,
 } from "@/lib/rebohrome-data";
 import { requireUserSession } from "@/lib/session";
 
@@ -92,7 +93,7 @@ export default async function DeclinedPage({
                     compact
                   />
                   <div className="mt-3 text-sm font-semibold text-foreground">
-                    {item.product.title}
+                    {getPublicProductTitle(item.product.title)}
                   </div>
                   <div className="mt-1 text-xs text-muted">
                     Qty {item.quantity} · {item.product.rarity}

@@ -1,4 +1,4 @@
-// Import a wider sample of CollectorCrypt cards (price range ~$15–$5000).
+﻿// Import a wider sample of graded collectible cards (price range ~$15вЂ“$5000).
 //
 // Each entry below is [title, price, solana_asset_id]. The script fetches each
 // asset page and extracts the CloudFront image key from the rendered HTML.
@@ -25,6 +25,10 @@ function loadEnv() {
 const env = loadEnv();
 if (!env.DATABASE_URL || !env.DATABASE_AUTH_TOKEN) {
   throw new Error("Missing DATABASE_URL or DATABASE_AUTH_TOKEN in .env.local");
+}
+const ASSET_PAGE_BASE_URL = env.SOURCE_ASSET_PAGE_BASE_URL;
+if (!ASSET_PAGE_BASE_URL) {
+  throw new Error("Missing SOURCE_ASSET_PAGE_BASE_URL in .env.local");
 }
 
 // [title, price USD, solana asset id]
@@ -138,7 +142,7 @@ function extractGrade(title) {
 }
 
 async function fetchImageKey(solanaId) {
-  const url = `https://collectorcrypt.com/assets/solana/${solanaId}`;
+  const url = `${ASSET_PAGE_BASE_URL}/${solanaId}`;
   const res = await fetch(url, {
     headers: {
       "User-Agent":
@@ -196,13 +200,13 @@ function buildProduct(entry, index) {
     price: entry.price,
     currency: "USD",
     stock: 1,
-    collection: "Pokémon",
+    collection: "PokГ©mon",
     category: "Trading Card",
-    description: `Authentic graded ${grade} trading card sourced from CollectorCrypt's insured vault. Listed value at the time of import: $${entry.price.toLocaleString("en-US")}.`,
+    description: `Authentic graded ${grade} trading card sourced from ReboHrome's fulfillment vault. Listed value at the time of import: $${entry.price.toLocaleString("en-US")}.`,
     tagline: `Graded ${grade}`,
     defaultDeliveryType: "physical",
     deliveryDigital: "Digital twin delivered to your Rebohrome vault after settlement.",
-    deliveryPhysical: "Sealed and shipped from CollectorCrypt's secure vault with full insurance and tracking.",
+    deliveryPhysical: "Sealed and shipped from ReboHrome's secure fulfillment vault with full insurance and tracking.",
     edition: grade,
     shape,
     imageUrl,

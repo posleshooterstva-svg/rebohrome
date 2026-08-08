@@ -32,7 +32,7 @@ export default async function SuccessPage({ searchParams }: SuccessPageProps) {
           </p>
           <div className="mt-8">
             <Button asChild>
-              <Link href="/marketplace">Return to marketplace</Link>
+              <Link href="/dashboard/marketplace">Return to marketplace</Link>
             </Button>
           </div>
         </section>

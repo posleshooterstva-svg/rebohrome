@@ -20,7 +20,7 @@ export default async function CheckoutPage() {
   ]);
 
   return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+    <main className="min-h-dvh w-full overflow-x-hidden px-4 py-6 sm:px-6 lg:px-8">
       <div className="space-y-5">
         {activePaymentSession ? (
           <ActivePaymentSessionCard session={activePaymentSession} />

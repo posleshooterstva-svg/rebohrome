@@ -4,12 +4,14 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Archive,
   ChevronDown,
   CreditCard,
+  HelpCircle,
   LogOut,
+  ReceiptText,
+  Settings,
   ShieldCheck,
-  Sparkles,
-  Wallet,
 } from "lucide-react";
 import { logoutAction } from "@/app/actions/auth";
 import { formatUsd, type HeaderAccount } from "@/lib/rebohrome-data";
@@ -20,13 +22,14 @@ type ProfileMenuProps = {
 };
 
 const quickLinks = [
-  { href: "/dashboard/collection", label: "My Collection" },
-  { href: "/dashboard/orders", label: "Orders" },
-  { href: "/dashboard/transactions", label: "Transactions" },
-  { href: "/dashboard/settings", label: "Settings" },
+  { href: "/dashboard/collection", label: "Collection", icon: Archive },
+  { href: "/dashboard/transactions", label: "Transactions", icon: ReceiptText },
+  { href: "/dashboard/deposit", label: "Deposit", icon: CreditCard },
+  { href: "/dashboard/settings", label: "Settings", icon: Settings },
+  { href: "/faq", label: "FAQ", icon: HelpCircle },
 ];
 
-export function ProfileMenu({ account }: ProfileMenuProps) {
+export function AccountFloatingProfile({ account }: ProfileMenuProps) {
   const [open, setOpen] = useState(false);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const primeAccount = useAccountExperienceStore((state) => state.primeAccount);
@@ -47,8 +50,6 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
       [],
     );
   }, [account, primeAccount]);
-
-  const balanceLabel = formatUsd(liveAccount?.balance.available ?? account.balance.available);
 
   useEffect(() => {
     function handlePointer(event: MouseEvent) {
@@ -72,108 +73,94 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
     };
   }, []);
 
+  const balanceLabel = formatUsd(
+    liveAccount?.balance.available ?? account.balance.available,
+  );
+  const displayName = account.user.username || "Archive User";
+  const avatarLetter = displayName.slice(0, 1).toUpperCase();
+
   return (
     <div className="relative z-[130] isolate" ref={shellRef}>
       <button
         aria-expanded={open}
         aria-haspopup="menu"
-        className="flex items-center gap-2 rounded-[10px] border border-white/10 bg-[rgba(12,10,24,0.82)] px-2.5 py-2 text-sm text-foreground shadow-[0_16px_42px_rgba(0,0,0,0.26)] backdrop-blur-xl transition hover:border-violet-300/35 hover:bg-[rgba(22,18,42,0.92)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/45"
+        className="group flex h-11 items-center gap-2.5 rounded-[16px] border border-white/[0.09] bg-[rgba(12,13,28,0.62)] px-2.5 pr-2 text-sm text-foreground shadow-[0_14px_38px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-2xl transition duration-200 hover:-translate-y-0.5 hover:border-violet-200/28 hover:bg-[rgba(18,18,38,0.74)] hover:shadow-[0_18px_48px_rgba(0,0,0,0.28),0_0_26px_rgba(139,92,246,0.11)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/40 sm:h-12 sm:min-w-[156px] sm:pr-3"
         onClick={() => setOpen((value) => !value)}
         type="button"
       >
-        <div className="flex size-8 items-center justify-center rounded-full bg-[radial-gradient(circle_at_top,rgba(153,141,255,0.85),rgba(86,112,255,0.62))] text-white">
-          {account.user.username.slice(0, 1).toUpperCase()}
+        <div className="relative flex size-8 shrink-0 items-center justify-center rounded-full bg-[radial-gradient(circle_at_35%_20%,rgba(236,233,255,0.92),rgba(135,113,255,0.72)_48%,rgba(69,56,164,0.84))] text-sm font-semibold text-white shadow-[0_8px_20px_rgba(109,77,242,0.24)] ring-1 ring-white/12 sm:size-9">
+          {avatarLetter}
+          <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,0.7)]" />
         </div>
-          <span className="hidden text-left sm:block">
-          <span className="block text-xs text-muted">Archive User</span>
-          <span className="block font-medium text-foreground">
+        <span className="hidden min-w-0 text-left sm:block">
+          <span className="block max-w-[118px] truncate text-[12px] font-medium leading-4 text-foreground/82">
+            {displayName}
+          </span>
+          <span className="block text-[13px] font-semibold leading-4 tracking-[-0.02em] text-foreground">
             {balanceLabel}
           </span>
         </span>
-        <ChevronDown className="size-4 text-muted" />
+        <ChevronDown
+          className={`size-4 shrink-0 text-muted transition duration-200 group-hover:text-foreground/85 ${
+            open ? "rotate-180" : ""
+          }`}
+        />
       </button>
 
       <AnimatePresence initial={false}>
         {open ? (
           <motion.div
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            className="absolute right-0 z-[140] mt-3 w-[332px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[18px] border border-violet-300/20 bg-[rgba(8,7,18,0.94)] p-3 shadow-[0_28px_90px_rgba(0,0,0,0.42),0_0_42px_rgba(124,58,237,0.12)] backdrop-blur-2xl"
+            className="absolute right-0 z-[140] mt-3 w-[286px] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-[20px] border border-white/[0.09] bg-[rgba(8,9,20,0.82)] p-2.5 shadow-[0_24px_72px_rgba(0,0,0,0.38),0_0_34px_rgba(124,58,237,0.1),inset_0_1px_0_rgba(255,255,255,0.045)] backdrop-blur-2xl"
             exit={{ opacity: 0, y: -8, scale: 0.98 }}
             initial={{ opacity: 0, y: -10, scale: 0.98 }}
             role="menu"
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
           >
-            <div className="rounded-[15px] border border-white/10 bg-[linear-gradient(180deg,rgba(28,23,50,0.92)_0%,rgba(14,12,27,0.94)_100%)] p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-base font-semibold text-foreground">
-                      {account.user.username}
+            <div className="rounded-[16px] border border-white/[0.08] bg-[linear-gradient(180deg,rgba(26,24,48,0.72)_0%,rgba(12,13,28,0.72)_100%)] p-3">
+              <div className="flex items-center gap-3">
+                <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[radial-gradient(circle_at_35%_20%,rgba(236,233,255,0.92),rgba(135,113,255,0.72)_48%,rgba(69,56,164,0.84))] text-base font-semibold text-white shadow-[0_10px_26px_rgba(109,77,242,0.22)] ring-1 ring-white/12">
+                  {avatarLetter}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-sm font-semibold text-foreground">
+                      {displayName}
                     </span>
-                    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300/25 bg-emerald-400/10 px-2 py-1 text-[11px] font-medium text-emerald-200">
-                      <ShieldCheck className="size-3" />
-                      Verified
-                    </span>
+                    <ShieldCheck className="size-3.5 shrink-0 text-emerald-300" />
                   </div>
-                  <div className="mt-1 text-sm text-muted">
-                    {account.user.telegramUsername}
+                  <div className="mt-0.5 truncate text-lg font-semibold tracking-[-0.04em] text-foreground">
+                    {balanceLabel}
                   </div>
                 </div>
-                {account.user.role === "admin" ? (
-                  <span className="rounded-full border border-sky-300/25 bg-sky-400/10 px-2 py-1 text-[11px] font-medium text-sky-200">
-                    Admin
-                  </span>
-                ) : null}
               </div>
-
-              <div className="mt-4 rounded-[13px] border border-violet-300/16 bg-[rgba(8,7,18,0.72)] px-4 py-4 shadow-[0_18px_44px_rgba(0,0,0,0.22)]">
-                <div className="text-xs uppercase tracking-[0.2em] text-muted">
-                  Current Balance
+              {account.user.role === "admin" ? (
+                <div className="mt-3 inline-flex rounded-full border border-sky-300/16 bg-sky-300/8 px-2.5 py-1 text-[11px] font-medium text-sky-100">
+                  Administrator
                 </div>
-                <div className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-foreground">
-                  {balanceLabel}
-                </div>
-                <div className="mt-2 text-sm text-cyan-200">
-                  Synced with your archive wallet
-                </div>
-              </div>
-
-              <div className="mt-4 grid grid-cols-2 gap-2">
-                <Link
-                  className="inline-flex items-center justify-center gap-2 rounded-[10px] bg-[linear-gradient(135deg,#a78bfa,#6d4df2)] px-4 py-3 text-sm font-medium text-white shadow-[0_14px_34px_rgba(139,92,246,0.28)] transition hover:-translate-y-0.5 hover:shadow-[0_18px_44px_rgba(139,92,246,0.36)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/45"
-                  href="/dashboard/deposit"
-                  onClick={() => setOpen(false)}
-                >
-                  <CreditCard className="size-4" />
-                  Deposit Funds
-                </Link>
-                <Link
-                  className="inline-flex items-center justify-center gap-2 rounded-[10px] border border-white/12 bg-white/[0.045] px-4 py-3 text-sm font-medium text-foreground transition hover:-translate-y-0.5 hover:border-violet-300/30 hover:bg-white/[0.075] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/35"
-                  href="/withdraw"
-                  onClick={() => setOpen(false)}
-                >
-                  <Wallet className="size-4" />
-                  Withdraw
-                </Link>
-              </div>
+              ) : null}
             </div>
 
-            <div className="mt-3 rounded-[15px] border border-white/10 bg-[rgba(13,11,26,0.82)] p-2">
-              {quickLinks.map((item) => (
-                <Link
-                  key={item.href}
-                  className="flex items-center justify-between rounded-[10px] px-3 py-3 text-sm text-muted transition hover:bg-white/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/30"
-                  href={item.href}
-                  onClick={() => setOpen(false)}
-                >
-                  <span>{item.label}</span>
-                  <Sparkles className="size-4" />
-                </Link>
-              ))}
+            <div className="mt-2 rounded-[16px] border border-white/[0.07] bg-[rgba(12,13,28,0.58)] p-1.5">
+              {quickLinks.map((item) => {
+                const Icon = item.icon;
+
+                return (
+                  <Link
+                    className="group/menu flex items-center justify-between rounded-[12px] px-3 py-2.5 text-sm text-muted transition hover:bg-white/[0.055] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/30"
+                    href={item.href}
+                    key={item.href}
+                    onClick={() => setOpen(false)}
+                  >
+                    <span>{item.label}</span>
+                    <Icon className="size-4 opacity-70 transition group-hover/menu:opacity-100" />
+                  </Link>
+                );
+              })}
 
               {account.user.role === "admin" ? (
                 <Link
-                  className="flex items-center justify-between rounded-[10px] px-3 py-3 text-sm text-muted transition hover:bg-white/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/30"
+                  className="flex items-center justify-between rounded-[12px] px-3 py-2.5 text-sm text-muted transition hover:bg-white/[0.055] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/30"
                   href="/admin"
                   onClick={() => setOpen(false)}
                 >
@@ -185,7 +172,7 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
               <form action={logoutAction}>
                 <input name="redirectTo" type="hidden" value="/" />
                 <button
-                  className="mt-1 flex w-full items-center justify-between rounded-[10px] px-3 py-3 text-sm text-muted transition hover:bg-rose-500/10 hover:text-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300/30"
+                  className="mt-1 flex w-full items-center justify-between rounded-[12px] px-3 py-2.5 text-sm text-muted transition hover:bg-rose-500/10 hover:text-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300/30"
                   type="submit"
                 >
                   <span>Logout</span>
@@ -198,4 +185,8 @@ export function ProfileMenu({ account }: ProfileMenuProps) {
       </AnimatePresence>
     </div>
   );
+}
+
+export function ProfileMenu(props: ProfileMenuProps) {
+  return <AccountFloatingProfile {...props} />;
 }

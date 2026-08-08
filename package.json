@@ -7,17 +7,27 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "typecheck": "tsc --noEmit",
     "db:setup": "node scripts/db-setup.mjs",
     "db:seed": "node scripts/db-setup.mjs --seed",
+    "db:reset-financial": "node scripts/reset-financial-balances.mjs",
     "telegram:poll": "node scripts/telegram-poll.mjs",
     "telegram:poll:watch": "node scripts/telegram-poll.mjs --watch",
     "telegram:poll:takeover": "node scripts/telegram-poll.mjs --takeover",
-    "telegram:withdrawal-smoke": "node scripts/telegram-withdrawal-smoke.mjs"
+    "telegram:withdrawal-smoke": "node scripts/telegram-withdrawal-smoke.mjs",
+    "compile:contracts": "hardhat compile",
+    "contracts:test": "hardhat test",
+    "deploy:bsc-mainnet": "hardhat run scripts/deploy-bsc-mainnet.ts --network bsc",
+    "verify:bsc-mainnet": "hardhat run scripts/verify-bsc-mainnet.ts --network bsc"
   },
   "dependencies": {
+    "@coinflowlabs/react": "^5.15.0",
     "@libsql/client": "^0.17.3",
     "@radix-ui/react-slot": "^1.2.4",
+    "@solana/web3.js": "^1.98.4",
     "@supabase/supabase-js": "^2.105.4",
+    "@wert-io/widget-initializer": "^7.0.2",
+    "@wert-io/widget-sc-signer": "^3.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.38.0",
@@ -27,19 +37,24 @@
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "tailwind-merge": "^3.6.0",
+    "viem": "^2.52.2",
     "zod": "^4.4.3",
     "zustand": "^5.0.13"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
+    "@nomicfoundation/hardhat-toolbox": "^6.1.2",
+    "@openzeppelin/contracts": "^5.6.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "^15.5.18",
+    "hardhat": "^2.26.0",
     "playwright": "^1.60.0",
     "tailwindcss": "^4",
+    "ts-node": "^10.9.2",
     "typescript": "^5"
   }
 }

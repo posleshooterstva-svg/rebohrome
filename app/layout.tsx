@@ -23,16 +23,28 @@ const sora = Sora({
 export const metadata: Metadata = {
   title: "ReboHrome",
   description: "Premium galactic collectible cards marketplace.",
+  icons: {
+    icon: [
+      { url: "/favicon.ico" },
+      { url: "/favicon.png", type: "image/png" },
+      { url: "/icon.png", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-icon.png", type: "image/png" }],
+  },
 };
 
 function canAccessDuringMaintenance(pathname: string) {
   return (
     pathname === "/maintenance" ||
     pathname === "/login" ||
-    pathname === "/contact" ||
     pathname === "/status" ||
     pathname.startsWith("/admin") ||
+    pathname.startsWith("/api/admin") ||
+    pathname.startsWith("/api/auth") ||
+    pathname.startsWith("/api/cron") ||
     pathname.startsWith("/api/webhooks/") ||
+    pathname.startsWith("/api/payment/webhook") ||
+    pathname.startsWith("/api/telegram") ||
     pathname === "/api/telegram/webhook" ||
     pathname === "/api/health"
   );

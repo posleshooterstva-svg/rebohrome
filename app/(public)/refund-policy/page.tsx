@@ -1,15 +1,13 @@
-import { LegalDocumentPage } from "@/components/rebohrome/legal-document";
-import {
-  GLOBAL_COLLECTIBLE_DISCLAIMER,
-  refundPolicyDocument,
-} from "@/lib/legal-content";
+import { LegalMarkdownDocumentPage } from "@/components/rebohrome/legal-markdown-document";
+import { getLegalMarkdownDocument } from "@/lib/legal-markdown";
 
-export default function RefundPolicyPage() {
+export default async function RefundPolicyPage() {
+  const markdown = await getLegalMarkdownDocument("refund");
+
   return (
-    <LegalDocumentPage
-      document={refundPolicyDocument}
+    <LegalMarkdownDocumentPage
       eyebrow="Refund Policy"
-      footerNote={GLOBAL_COLLECTIBLE_DISCLAIMER}
+      markdown={markdown}
     />
   );
 }

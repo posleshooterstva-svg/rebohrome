@@ -53,7 +53,7 @@ export default async function AdminAnalyticsPage({
     <AdminShell
       active="analytics"
       title="Transaction Logs"
-      description="Audit deposits, purchases, and withdrawals with collector attribution, payment routing, and currency context."
+      description="Audit deposits and purchases with collector attribution, payment routing, and currency context."
     >
       {params.refreshed === "1" ? (
         <div className="mb-6 rounded-[20px] border border-emerald-300/50 bg-emerald-100/70 px-4 py-3 text-sm text-emerald-700">

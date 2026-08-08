@@ -1,16 +1,25 @@
-import Link from "next/link";
+﻿import Link from "next/link";
+import type { Metadata } from "next";
 import { ArrowRight, Headset, Sparkles } from "lucide-react";
 import { RebohromeLogo } from "@/components/rebohrome/logo";
 import { Button } from "@/components/ui/button";
 import { getMaintenanceModeConfig } from "@/lib/db/repository";
 import { formatDisplayDateTime } from "@/lib/rebohrome-data";
+import Image from "next/image";
 
 export const dynamic = "force-dynamic";
+export const metadata: Metadata = {
+  robots: {
+    index: false,
+    follow: false,
+  },
+};
 
 export default async function MaintenancePage() {
   const maintenance = await getMaintenanceModeConfig();
-  const title = maintenance.title;
-  const message = maintenance.message;
+  const title = "We'll be back soon";
+  const message =
+    "ReboHrome is currently undergoing scheduled maintenance. Marketplace access, checkout, deposits, withdrawals, and public account pages are temporarily paused while we complete system updates.";
   const estimatedReturn = maintenance.estimatedReturnAt
     ? formatDisplayDateTime(maintenance.estimatedReturnAt)
     : null;
@@ -18,7 +27,7 @@ export default async function MaintenancePage() {
   return (
     <main className="min-h-dvh bg-[radial-gradient(circle_at_top,rgba(139,124,255,0.12),transparent_30%),linear-gradient(180deg,#fdfdff_0%,#f7f7fb_52%,#f5f6fa_100%)] px-4 py-8 sm:px-6 lg:px-8">
       <div className="mx-auto flex min-h-[calc(100dvh-4rem)] w-full max-w-6xl flex-col justify-between">
-        <div className="flex justify-center sm:justify-start">
+        <div className="flex justify-center opacity-95 sm:justify-start [&_span]:text-slate-950">
           <RebohromeLogo />
         </div>
 
@@ -26,12 +35,12 @@ export default async function MaintenancePage() {
           <section className="order-2 lg:order-1">
             <div className="inline-flex items-center gap-2 rounded-full border border-[rgba(139,124,255,0.16)] bg-[rgba(139,124,255,0.08)] px-4 py-2 text-[11px] uppercase tracking-[0.24em] text-[var(--accent)]">
               <Sparkles className="size-3.5" />
-              System Status
+              SYSTEM STATUS
             </div>
-            <h1 className="mt-5 text-4xl font-semibold tracking-[-0.06em] text-foreground sm:text-5xl lg:text-6xl">
+            <h1 className="mt-5 text-4xl font-semibold tracking-[-0.06em] text-slate-950 sm:text-5xl lg:text-6xl">
               {title}
             </h1>
-            <p className="mt-5 max-w-2xl text-base leading-8 text-muted sm:text-lg">
+            <p className="mt-5 max-w-2xl text-base leading-8 text-slate-600 sm:text-lg">
               {message}
             </p>
             {estimatedReturn ? (
@@ -42,7 +51,7 @@ export default async function MaintenancePage() {
 
             <div className="mt-8 flex flex-wrap gap-3">
               <Button asChild type="button">
-                <Link href="/contact">
+                <Link href="mailto:support@rebohrome.com">
                   <Headset className="size-4" />
                   Contact Support
                 </Link>
@@ -58,7 +67,7 @@ export default async function MaintenancePage() {
               <div className="pointer-events-none absolute left-1/2 top-[12%] h-72 w-72 -translate-x-1/2 rounded-full border border-[rgba(139,124,255,0.06)]" />
 
               <div className="relative z-10 flex w-full max-w-[320px] flex-col items-center gap-6">
-                <div className="rounded-full border border-white/90 bg-white/88 px-4 py-1.5 text-[11px] uppercase tracking-[0.22em] text-muted shadow-[0_12px_24px_rgba(15,23,42,0.04)]">
+                <div className="rounded-full border border-white/90 bg-slate-700 px-4 py-1.5 text-[11px] uppercase tracking-[0.22em] text-white shadow-[0_12px_24px_rgba(15,23,42,0.08)]">
                   Archive Maintenance
                 </div>
 
@@ -67,8 +76,14 @@ export default async function MaintenancePage() {
                   <div className="mx-auto h-[240px] w-[188px] rounded-[20px] border border-[rgba(15,23,42,0.08)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(244,246,251,0.94))] p-3 shadow-[0_30px_56px_rgba(15,23,42,0.08)]">
                     <div className="flex h-full items-center justify-center rounded-[16px] border border-[rgba(228,232,243,0.96)] bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.96),rgba(244,246,251,0.9)_56%,rgba(237,240,247,0.94)_100%)]">
                       <div className="relative flex size-24 items-center justify-center">
-                        <div className="absolute inset-0 rotate-45 rounded-[26px] border border-[rgba(139,124,255,0.18)] bg-[rgba(139,124,255,0.08)]" />
-                        <div className="absolute inset-[14px] rotate-45 rounded-[18px] border border-white bg-[linear-gradient(135deg,rgba(255,255,255,0.98),rgba(232,228,255,0.94))]" />
+                        <Image
+                          alt="ReboHrome"
+                          className="h-full w-full object-contain"
+                          height={128}
+                          priority
+                          src="/uploads/rebohrome-veriff-logo-icon.png"
+                          width={128}
+                        />
                       </div>
                     </div>
                   </div>
@@ -76,13 +91,13 @@ export default async function MaintenancePage() {
 
                 <div className="mx-auto h-10 w-[78%] rounded-b-[14px] border border-line bg-[linear-gradient(180deg,#ffffff_0%,#eceff5_100%)] shadow-[0_8px_18px_rgba(15,23,42,0.05)]" />
 
-                <div className="w-full rounded-[22px] border border-white/84 bg-white/86 px-5 py-4 shadow-[0_18px_34px_rgba(15,23,42,0.06)] backdrop-blur">
+                <div className="w-full rounded-[22px] border border-slate-200/70 bg-slate-700 px-5 py-4 shadow-[0_18px_34px_rgba(15,23,42,0.14)] backdrop-blur">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <div className="text-[10px] uppercase tracking-[0.24em] text-muted">
+                      <div className="text-[10px] uppercase tracking-[0.24em] text-slate-300">
                         Archive Status
                       </div>
-                      <div className="mt-2 text-base font-semibold tracking-[-0.03em] text-foreground">
+                      <div className="mt-2 text-base font-semibold tracking-[-0.03em] text-white">
                         Scheduled service window
                       </div>
                     </div>
@@ -91,9 +106,9 @@ export default async function MaintenancePage() {
                       <ArrowRight className="size-4" />
                     </div>
                   </div>
-                  <p className="mt-3 text-sm leading-6 text-muted">
-                    Core services are being prepared for a clean return. Payments and
-                    system callbacks stay protected while the public archive is paused.
+                  <p className="mt-3 text-sm leading-6 text-slate-300">
+                    Core services are being prepared for a clean return. Payment callbacks
+                    and admin tools remain protected while the public archive is paused.
                   </p>
                 </div>
               </div>

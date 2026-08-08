@@ -60,6 +60,8 @@ create table if not exists public.products (
   edition text not null,
   shape text not null check (shape in ('spire', 'void', 'halo', 'crescent', 'shard')),
   image_url text,
+  is_randomized boolean not null default false,
+  randomized_outcomes_json text not null default '[]',
   archived boolean not null default false,
   palette_glow text not null,
   palette_glow_soft text not null,

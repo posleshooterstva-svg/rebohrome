@@ -71,20 +71,20 @@ export default async function PaymentDeclinedPage({
           {tx ? <PaymentStatusRefreshButton tx={tx} /> : null}
           <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
             <Link
-              className="inline-flex min-w-[220px] items-center justify-center rounded-2xl border border-line bg-panel px-5 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--foreground-soft)]"
+              className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl border border-line bg-panel px-5 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--foreground-soft)] sm:w-auto sm:min-w-[220px]"
               href="/checkout"
             >
               Return to checkout
             </Link>
             <Link
-              className="inline-flex min-w-[220px] items-center justify-center rounded-2xl border border-line bg-panel px-5 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--foreground-soft)]"
-              href={session.userId ? "/dashboard" : "/marketplace"}
+              className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl border border-line bg-panel px-5 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--foreground-soft)] sm:w-auto sm:min-w-[220px]"
+              href={session.userId ? "/dashboard" : "/dashboard/marketplace"}
             >
               {session.userId ? "Open dashboard" : "Return to marketplace"}
             </Link>
             {!session.userId ? (
               <Link
-                className="inline-flex min-w-[220px] items-center justify-center rounded-2xl border border-line bg-panel px-5 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--foreground-soft)]"
+                className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl border border-line bg-panel px-5 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--foreground-soft)] sm:w-auto sm:min-w-[220px]"
                 href={tx ? `/login?redirectTo=/payment/declined?tx=${encodeURIComponent(tx)}` : "/login"}
               >
                 Sign in to check status

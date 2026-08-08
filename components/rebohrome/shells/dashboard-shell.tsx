@@ -5,7 +5,6 @@ import { CollectorRail } from "@/components/rebohrome/collector-rail";
 import {
   getFinancialOverview,
   getHeaderAccount,
-  getUserById,
 } from "@/lib/db/repository";
 import {
   formatCurrency,
@@ -18,17 +17,21 @@ type DashboardShellProps = {
   active:
     | "dashboard"
     | "marketplace"
+    | "collections"
+    | "drops"
     | "collection"
+    | "vault"
+    | "watchlist"
     | "orders"
     | "transactions"
     | "deposit"
-    | "withdraw"
     | "settings";
   title: string;
   description: string;
   children: React.ReactNode;
   hideIntro?: boolean;
   rightRail?: React.ReactNode;
+  showRightRail?: boolean;
   showCart?: boolean;
   showQuickAction?: boolean;
   quickActionHref?: string;
@@ -43,18 +46,22 @@ export async function DashboardShell({
   children,
   hideIntro = false,
   rightRail,
+  showRightRail = true,
   showCart = false,
   showQuickAction = true,
-  quickActionHref = "/marketplace",
+  quickActionHref = "/dashboard/marketplace",
   searchPlaceholder = "Search collectibles, collections...",
   notificationHref = "/notifications",
 }: DashboardShellProps) {
   const session = await getSessionState();
-  const [account, financialOverview, user] = await Promise.all([
+  const shouldLoadRightRailData = showRightRail && !rightRail;
+  const [account, financialOverview] = await Promise.all([
     session.userId ? getHeaderAccount(session.userId) : Promise.resolve(null),
-    session.userId ? getFinancialOverview(session.userId) : Promise.resolve(null),
-    session.userId ? getUserById(session.userId) : Promise.resolve(null),
+    session.userId && shouldLoadRightRailData
+      ? getFinancialOverview(session.userId)
+      : Promise.resolve(null),
   ]);
+  const user = account?.user ?? null;
 
   const activityItems =
     financialOverview?.recentTransactions.slice(0, 4).map((transaction) => ({
@@ -64,8 +71,6 @@ export async function DashboardShell({
           ? "Deposit"
           : transaction.kind === "purchase"
             ? "Purchase"
-            : transaction.kind === "withdrawal"
-              ? "Withdrawal"
               : "Refund",
       meta: transaction.summary,
       amount: `${transaction.amount >= 0 ? "+" : ""}${formatCurrency(
@@ -94,12 +99,6 @@ export async function DashboardShell({
       tone: user?.telegramChatId ? ("positive" as const) : ("warning" as const),
     },
     {
-      id: "wallet",
-      label: "Withdrawal Wallet",
-      status: user?.withdrawalWallet ? "Connected" : "Missing",
-      tone: user?.withdrawalWallet ? ("positive" as const) : ("warning" as const),
-    },
-    {
       id: "role",
       label: "Archive Access",
       status: user?.role === "admin" ? "Admin" : "Collector",
@@ -117,11 +116,12 @@ export async function DashboardShell({
       notificationHref={notificationHref}
       quickActionHref={quickActionHref}
       rightRail={
-          rightRail ?? (
+        showRightRail
+          ? rightRail ?? (
             <CollectorRail
               activityItems={activityItems}
-              balanceNote="Archive funds are available for direct purchases and manual withdrawal review."
-              emptyActivity="Your deposits, purchases, and withdrawal updates will appear here."
+              balanceNote="Available balance."
+              emptyActivity="Your deposits, purchases, and balance updates will appear here."
               initialBalance={{
                 available: account?.balance.available ?? 0,
                 pendingWithdrawal: account?.balance.pendingWithdrawal ?? 0,
@@ -131,12 +131,13 @@ export async function DashboardShell({
               }}
               primaryActionHref="/dashboard/deposit"
               primaryActionLabel="Deposit"
-              secondaryActionHref="/withdraw"
-              secondaryActionLabel="Withdraw"
+              secondaryActionHref="/dashboard/transactions"
+              secondaryActionLabel="History"
               securityItems={securityItems}
               userId={account?.user.id ?? null}
             />
-        )
+          )
+          : null
       }
       searchPlaceholder={searchPlaceholder}
       showCart={showCart}

@@ -3,10 +3,12 @@ import { AdminShell } from "@/components/rebohrome/shells/admin-shell";
 import { Button } from "@/components/ui/button";
 import { getAdminOrders, getAdminStats } from "@/lib/db/repository";
 import { formatDisplayDate, formatUsd } from "@/lib/rebohrome-data";
+import { withPerf } from "@/lib/server/perf";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdminPage() {
+  return withPerf("route=/admin", async () => {
   const [adminOrders, adminStats] = await Promise.all([
     getAdminOrders(),
     getAdminStats(),
@@ -81,4 +83,5 @@ export default async function AdminPage() {
       </div>
     </AdminShell>
   );
+  });
 }

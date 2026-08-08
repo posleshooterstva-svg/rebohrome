@@ -10,12 +10,12 @@ export async function SiteHeader() {
       : null;
 
   return (
-    <header className="relative z-[120] mx-auto w-full max-w-[1540px] px-4 pt-6 sm:px-6 lg:px-8">
+    <header className="relative z-[120] w-full border-b border-line/70 bg-[rgba(7,10,18,0.78)] px-4 py-3 backdrop-blur-xl sm:px-6 lg:px-8">
       <WorkspaceTopbar
         account={account}
         cartHref="/cart"
         notificationHref={
-          account ? "/dashboard/transactions" : "/login?redirectTo=/dashboard/transactions"
+          account ? "/dashboard/transactions" : "/login?next=/dashboard/transactions"
         }
         showLogo
       />

@@ -1,4 +1,4 @@
-import type { NextConfig } from "next";
+﻿import type { NextConfig } from "next";
 
 type RemotePattern = {
   protocol: "http" | "https";
@@ -8,7 +8,7 @@ type RemotePattern = {
 
 const supabaseStorageUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const remotePatterns: RemotePattern[] = [
-  // CollectorCrypt / gacha card artwork (imported product images).
+  // Imported collectible card artwork.
   {
     protocol: "https",
     hostname: "d1xpxki1g4htqu.cloudfront.net",

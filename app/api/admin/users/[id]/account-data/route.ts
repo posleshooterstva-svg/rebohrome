@@ -1,0 +1,68 @@
+import { NextResponse } from "next/server";
+import { updateAdminUserAccountData } from "@/lib/db/repository";
+import { getRequestMeta, getSessionState } from "@/lib/session";
+
+export const runtime = "nodejs";
+
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const session = await getSessionState();
+
+    if (!session.isAdminAuthenticated || !session.userId) {
+      return NextResponse.json(
+        { ok: false, error: "Admin authentication required." },
+        { status: 401 },
+      );
+    }
+
+    const { id } = await params;
+    const payload = (await request.json()) as Record<string, unknown>;
+    const meta = await getRequestMeta(`/api/admin/users/${id}/account-data`);
+    const userEntry = await updateAdminUserAccountData({
+      adminUserId: session.userId,
+      targetUserId: id,
+      availableBalance: payload.availableBalance,
+      pendingWithdrawal: 0,
+      totalDeposited: payload.totalDeposited,
+      totalSpent: payload.totalSpent,
+      totalWithdrawn: 0,
+      payoutBonusOverrideEnabled: false,
+      payoutBonusPercent: null,
+      telegramUsername: payload.telegramUsername,
+      telegramId: payload.telegramId,
+      telegramChatId: payload.telegramChatId,
+      telegramVerified: payload.telegramVerified,
+      telegramVerifiedAt: payload.telegramVerifiedAt,
+      gate2FirstName: payload.gate2FirstName,
+      gate2LastName: payload.gate2LastName,
+      gate2Phone: payload.gate2Phone,
+      email: payload.email,
+      role: payload.role,
+      status: payload.status,
+      verificationStatus: payload.verificationStatus,
+      requirePasswordReset: payload.requirePasswordReset,
+      reason: payload.reason,
+      ...meta,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      message: "Account data saved.",
+      userEntry,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Unable to save account data.",
+      },
+      { status: 400 },
+    );
+  }
+}

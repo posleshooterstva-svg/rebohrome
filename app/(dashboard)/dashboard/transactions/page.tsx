@@ -7,8 +7,8 @@ import {
 import {
   getUserDeposits,
   getUserTransactions,
-  getUserWithdrawals,
 } from "@/lib/db/repository";
+import { withPerf } from "@/lib/server/perf";
 import { requireUserSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -43,18 +43,18 @@ function renderDepositAmount(deposit: Awaited<ReturnType<typeof getUserDeposits>
 }
 
 export default async function DashboardTransactionsPage() {
+  return withPerf("route=/dashboard/transactions", async () => {
   const session = await requireUserSession("/login");
-  const [transactions, deposits, withdrawals] = await Promise.all([
+  const [transactions, deposits] = await Promise.all([
     getUserTransactions(session.userId, 16),
     getUserDeposits(session.userId, 6),
-    getUserWithdrawals(session.userId, 6),
   ]);
 
   return (
     <DashboardShell
       active="transactions"
       title="Transaction History"
-      description="Review every deposit, purchase, and withdrawal with linked payment details and archive records."
+      description="Review every deposit and purchase with linked payment details and archive records."
     >
       <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
         <section className="rounded-[28px] border border-line bg-panel-strong p-5">
@@ -62,7 +62,7 @@ export default async function DashboardTransactionsPage() {
           <div className="mt-5 space-y-3">
             {transactions.length === 0 ? (
               <div className="rounded-[22px] border border-dashed border-line bg-panel px-4 py-6 text-sm text-muted">
-                No transactions yet. Deposits, purchases, and withdrawals will appear here.
+                No transactions yet. Deposits and purchases will appear here.
               </div>
             ) : (
               transactions.map((transaction) => (
@@ -123,7 +123,7 @@ export default async function DashboardTransactionsPage() {
             <div className="mt-5 space-y-3">
               {deposits.length === 0 ? (
                 <div className="rounded-[22px] border border-dashed border-line bg-panel px-4 py-6 text-sm text-muted">
-                  No transactions yet. Deposits, purchases, and withdrawals will appear here.
+                  No transactions yet. Deposits and purchases will appear here.
                 </div>
               ) : (
                 deposits.map((deposit) => (
@@ -153,35 +153,9 @@ export default async function DashboardTransactionsPage() {
               )}
             </div>
           </section>
-
-          <section className="rounded-[28px] border border-line bg-panel-strong p-5">
-            <div className="text-lg font-semibold text-foreground">Recent Withdrawals</div>
-            <div className="mt-5 space-y-3">
-              {withdrawals.length === 0 ? (
-                <div className="rounded-[22px] border border-dashed border-line bg-panel px-4 py-6 text-sm text-muted">
-                  No transactions yet. Deposits, purchases, and withdrawals will appear here.
-                </div>
-              ) : (
-                withdrawals.map((withdrawal) => (
-                  <div
-                    key={withdrawal.id}
-                    className="rounded-[22px] border border-line bg-panel px-4 py-4 text-sm"
-                  >
-                    <div className="flex items-center justify-between gap-4">
-                      <div className="font-semibold text-foreground">{withdrawal.id}</div>
-                      <div className="capitalize text-foreground">{withdrawal.status}</div>
-                    </div>
-                    <div className="mt-2 text-muted">{withdrawal.walletAddress}</div>
-                    <div className="mt-2 font-medium text-foreground">
-                      {formatUsd(withdrawal.amount)}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
         </div>
       </div>
     </DashboardShell>
   );
+  });
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AlertCircle, ExternalLink, RefreshCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,85 @@ export function ActivePaymentSessionCard({
   const router = useRouter();
   const [busyAction, setBusyAction] = useState<"check" | "cancel" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [liveStatus, setLiveStatus] = useState(session.status);
+  const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null);
+  const [isFinal, setIsFinal] = useState(false);
+
+  const fetchSessionStatus = useCallback(async () => {
+    const response = await fetch(
+      `/api/payments/session-status?sessionId=${encodeURIComponent(session.id)}&type=${encodeURIComponent(session.type)}`,
+      { cache: "no-store" },
+    );
+    const payload = (await response.json()) as {
+      ok?: boolean;
+      error?: string;
+      status?: string | null;
+      transactionStatus?: string | null;
+      lastCheckedAt?: string | null;
+      message?: string;
+      final?: boolean;
+    };
+
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.error || "Unable to check payment status.");
+    }
+
+    setLiveStatus(payload.transactionStatus ?? payload.status ?? session.status);
+    setLastCheckedAt(payload.lastCheckedAt ?? null);
+    if (payload.message) {
+      setMessage(payload.message);
+    }
+    if (payload.final) {
+      setIsFinal(true);
+      router.refresh();
+    }
+
+    return payload;
+  }, [router, session.id, session.status, session.type]);
+
+  useEffect(() => {
+    let canceled = false;
+    const startedAt = Date.now();
+    const maxDurationMs = 3 * 60 * 1000;
+    let timeoutId: number | null = null;
+
+    async function poll() {
+      if (canceled || isFinal || Date.now() - startedAt > maxDurationMs) {
+        return;
+      }
+
+      if (document.visibilityState === "hidden") {
+        timeoutId = window.setTimeout(poll, 30_000);
+        return;
+      }
+
+      let final = false;
+      try {
+        const payload = await fetchSessionStatus();
+        final = Boolean(payload.final);
+      } catch (error) {
+        if (!canceled) {
+          setMessage(
+            error instanceof Error
+              ? error.message
+              : "Still waiting for provider confirmation.",
+          );
+        }
+      }
+
+      if (!canceled && !final && !isFinal) {
+        timeoutId = window.setTimeout(poll, 30_000);
+      }
+    }
+
+    timeoutId = window.setTimeout(poll, 10_000);
+    return () => {
+      canceled = true;
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [fetchSessionStatus, isFinal, session.id, session.type]);
 
   async function runStatusCheck() {
     setBusyAction("check");
@@ -28,13 +107,16 @@ export function ActivePaymentSessionCard({
       const response = await fetch("/api/payments/check-status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: session.type }),
+        body: JSON.stringify({ sessionId: session.id, type: session.type }),
       });
       const payload = await response.json();
       if (!response.ok) {
         throw new Error(payload.error || "Unable to check payment status.");
       }
-      setMessage("Payment status refreshed. Balance updates automatically after provider confirmation.");
+      setLiveStatus(payload.transactionStatus ?? payload.status ?? session.status);
+      setLastCheckedAt(payload.lastCheckedAt ?? null);
+      setIsFinal(Boolean(payload.final));
+      setMessage(payload.message ?? "Payment status refreshed.");
       router.refresh();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to check payment status.");
@@ -74,8 +156,7 @@ export function ActivePaymentSessionCard({
             Active Payment Session
           </div>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
-            This payment is still being verified. You can continue it, refresh
-            its status, cancel it locally, or create another payment if needed.
+            Complete the payment or check its status.
           </p>
           <div className="mt-4 grid gap-2 text-sm text-muted sm:grid-cols-2 lg:grid-cols-4">
             <div>
@@ -96,9 +177,17 @@ export function ActivePaymentSessionCard({
               <span className="block text-[11px] uppercase tracking-[0.18em] text-muted">
                 Status
               </span>
-              <span className="text-foreground">{session.status}</span>
+              <span className="text-foreground">{liveStatus}</span>
             </div>
             <div>
+              <span className="block text-[11px] uppercase tracking-[0.18em] text-muted">
+                Last check
+              </span>
+              <span className="text-foreground">
+                {lastCheckedAt ? formatDisplayDateTime(lastCheckedAt) : "Checking..."}
+              </span>
+            </div>
+            <div className="lg:col-start-4">
               <span className="block text-[11px] uppercase tracking-[0.18em] text-muted">
                 Created
               </span>
@@ -116,7 +205,7 @@ export function ActivePaymentSessionCard({
         <div className="flex flex-wrap gap-2 lg:justify-end">
           {session.paymentUrl ? (
             <Button
-              onClick={() => window.open(session.paymentUrl!, "_blank", "noreferrer")}
+              onClick={() => window.open(session.paymentUrl!, "_blank")}
               size="sm"
               type="button"
             >

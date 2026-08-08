@@ -1,5 +1,5 @@
-// Replace the current homepage-featured product (Warcraft Random Pack) with
-// a Pokémon-themed gacha pack that uses real artwork from CollectorCrypt.
+﻿// Replace the current homepage-featured product (Warcraft Random Pack) with
+// a PokГ©mon-themed gacha pack that uses real artwork from ReboHrome.
 
 import { createClient } from "@libsql/client";
 import { readFileSync } from "fs";
@@ -14,21 +14,21 @@ const c = createClient({ url: env.DATABASE_URL, authToken: env.DATABASE_AUTH_TOK
 
 const PACK = {
   id: "elite-pokemon-gacha-pack",
-  title: "Elite Pokémon Gacha Pack",
+  title: "Elite PokГ©mon Gacha Pack",
   rarity: "Legendary",
   price: 999,
   currency: "USD",
   stock: 25,
-  collection: "Pokémon",
+  collection: "PokГ©mon",
   category: "Gacha Pack",
   description:
-    "Premium sealed gacha pack containing one authenticated Pokémon card with an expected value north of $999. Every pull is graded (PSA, CGC, or BGS) and shipped from CollectorCrypt's insured vault. ~20% chance of a Big Win pull worth multiples of the pack price.",
-  tagline: "1 graded card per pack · 20% Big Win chance",
+    "Premium sealed gacha pack containing one authenticated PokГ©mon card with an expected value north of $999. Every pull is graded (PSA, CGC, or BGS) and shipped from ReboHrome's fulfillment vault. ~20% chance of a Big Win pull worth multiples of the pack price.",
+  tagline: "1 graded card per pack В· 20% Big Win chance",
   defaultDeliveryType: "physical",
   deliveryDigital:
     "Digital twin of the pulled card is delivered to your Rebohrome vault immediately after the reveal.",
   deliveryPhysical:
-    "The physical graded card is sealed and shipped from CollectorCrypt's insured vault with tracking.",
+    "The physical graded card is sealed and shipped from ReboHrome's fulfillment vault with tracking.",
   edition: "Limited Drop",
   shape: "halo",
   imageUrl:

@@ -1,5 +1,5 @@
-// Import top Pokémon cards from gacha.collectorcrypt.com into the products table.
-// Data captured from the public site (https://gacha.collectorcrypt.com/).
+﻿// Import top PokГ©mon cards from external source site into the products table.
+// Data captured from the public site (https://external source site/).
 //
 // Usage:
 //   node scripts/import-gacha-cards.mjs            # dry run, prints what would be inserted
@@ -111,15 +111,15 @@ function buildProduct(card, index) {
     price,
     currency: "USD",
     stock: 1,
-    collection: "Pokémon",
+    collection: "PokГ©mon",
     category: "Trading Card",
-    description: `Authentic graded ${grade} trading card sourced from CollectorCrypt's insured vault. Insured value at the time of import: $${price.toLocaleString("en-US")}.`,
+    description: `Authentic graded ${grade} trading card sourced from ReboHrome's fulfillment vault. Insured value at the time of import: $${price.toLocaleString("en-US")}.`,
     tagline: `Graded ${grade}`,
     defaultDeliveryType: "physical",
     deliveryDigital:
       "Digital twin delivered to your Rebohrome vault after settlement.",
     deliveryPhysical:
-      "Sealed and shipped from CollectorCrypt's secure vault with full insurance and tracking.",
+      "Sealed and shipped from ReboHrome's secure fulfillment vault with full insurance and tracking.",
     edition: grade,
     shape,
     imageUrl,

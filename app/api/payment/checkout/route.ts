@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { finalizeCheckoutPaymentSession } from "@/lib/db/repository";
+import {
+  DocumentAcceptanceRequiredError,
+  finalizeCheckoutPaymentSession,
+} from "@/lib/db/repository";
+import { getMaintenanceApiResponse } from "@/lib/server/maintenance-guard";
 import { getSessionState } from "@/lib/session";
 
 const cryptoNetworks = ["USDT", "BTC", "ETH"] as const;
@@ -17,6 +21,11 @@ const paymentSchema = z.object({
 
 export async function POST(request: Request) {
   try {
+    const maintenanceResponse = await getMaintenanceApiResponse();
+    if (maintenanceResponse) {
+      return maintenanceResponse;
+    }
+
     const payload = paymentSchema.parse(await request.json());
     const session = await getSessionState();
 
@@ -31,6 +40,18 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof DocumentAcceptanceRequiredError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "DOCUMENT_ACCEPTANCE_REQUIRED",
+          message: "Required documents must be accepted before continuing.",
+          error: "Please accept the required ReboHrome documents before continuing.",
+        },
+        { status: 403 },
+      );
+    }
+
     return NextResponse.json(
       {
         error:

@@ -1,4 +1,4 @@
-import { readFile, unlink, writeFile } from "fs/promises";
+﻿import { readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 import { createHash, randomBytes, randomInt, randomUUID } from "crypto";
 import { revalidatePath } from "next/cache";
@@ -9,6 +9,7 @@ import {
   ADMIN_TELEGRAM_CHAT_ID,
   ADMIN_TELEGRAM_IDS,
   APP_BASE_URL,
+  SITE_BASE_URL,
   TELEGRAM_CHANNEL_CHAT_ID,
   TELEGRAM_CALLBACK_SECRET,
   TELEGRAM_BOT_TOKEN,
@@ -29,28 +30,33 @@ import {
   type TelegramUpdate,
 } from "@/lib/telegram";
 import {
+  createXRocketAppDeposit,
   createXRocketWithdrawal,
   extractXRocketStatus,
   extractXRocketTxHash,
+  extractXRocketWithdrawalFee,
   extractXRocketWithdrawalId,
+  getXRocketWithdrawalQuotas,
   getXRocketWithdrawalInfo,
   isXRocketFailedStatus,
   isXRocketPaidStatus,
 } from "@/lib/xrocket";
 import {
   buildPlaceholderEmail,
-  calculateWithdrawalPayout,
   createProductId,
   createReadableId,
   formatCurrency,
   formatUsd,
   formatUtcDateTime,
   getPayoutTierProgress,
+  getEffectivePayoutBonusPercent,
   getPaletteByRarity,
+  hasValidRandomizedProductOdds,
   isValidTelegramUsername,
   maskCardNumber,
   normalizeTelegramUsername,
   normalizeUsername,
+  normalizeRandomizedProductOutcomes,
   type BalanceRecord,
   type CheckoutPaymentSessionRecord,
   type CheckoutPaymentSessionStatus,
@@ -58,6 +64,7 @@ import {
   type CryptoNetwork,
   type DashboardStat,
   type DeliveryType,
+  type DocumentAcceptanceStatusRecord,
   type DepositPaymentSessionRecord,
   type DepositPaymentSessionStatus,
   type DepositRecord,
@@ -68,14 +75,19 @@ import {
   type PaymentState,
   type PaymentMethodName,
   type PaymentProviderName,
+  type PaymentGateAccessRecord,
+  type PaymentProviderKey,
   type PaymentReconciliationStatus,
+  type KycStatus,
   type ProductInput,
   type ProductRecord,
+  type RandomizedProductDisclosure,
   type Rarity,
   type SupportedCurrency,
   type TransactionRecord,
   type TelegramSyncStatus,
   type UserRecord,
+  type UserKycProfileRecord,
   type UserRole,
   type UserStatus,
   type ActivePaymentSessionRecord,
@@ -88,13 +100,52 @@ import {
   type WithdrawalStatus,
   type WithdrawalStatusHistoryRecord,
 } from "@/lib/rebohrome-data";
+import { isKycVerified } from "@/lib/rebohrome-data";
 import { validateProductImageFile } from "@/lib/product-image";
 import {
   buildTransVoucherReturnUrls,
   createTransVoucherPayment,
   getTransVoucherPaymentStatus,
   mapTransVoucherMethod,
+  normalizeTransVoucherStatus,
 } from "@/lib/transvoucher";
+import {
+  createVeriffSession,
+  extractVeriffWebhookFields,
+  extractVeriffUserId,
+  fetchVeriffSessionStatus,
+  getVeriffWebhookAuthClientIsValid,
+  normalizeVeriffStatus,
+  verifyVeriffWebhookSignature,
+} from "@/lib/veriff";
+import {
+  createCleffoPaymentLink,
+  getCleffoPaymentLinkStatus,
+} from "@/lib/server/payments/providers/cleffo";
+import {
+  createWertSignedWidgetOptions,
+  hashWertSignature,
+  lookupWertOrderStatus,
+  type WertWidgetOptions,
+} from "@/lib/server/payments/providers/wert";
+import {
+  buildCoinflowChargebackProtectionData,
+  buildCoinflowWebhookInfo,
+  createCoinflowCheckoutToken,
+  getCoinflowPublicConfig,
+  sanitizeCoinflowResponse,
+} from "@/lib/server/payments/coinflow-client";
+import {
+  coinflowStatusMessage,
+  mapCoinflowToProviderStatus,
+  normalizeCoinflowStatus,
+} from "@/lib/server/payments/coinflow-status";
+import {
+  getCoinflowData,
+  getCoinflowEventId,
+  getCoinflowEventType,
+  getCoinflowWebhookInfo,
+} from "@/lib/server/payments/coinflow-webhooks";
 import {
   getDbClient,
   getDbRuntimeConfig,
@@ -102,6 +153,7 @@ import {
   shouldAutoSeedDatabase,
   shouldAutoSetupDatabase,
 } from "./client";
+import { withPerf } from "@/lib/server/perf";
 import {
   isSupabaseManagedImageUrl,
   isSupabaseStorageAvailable,
@@ -130,6 +182,28 @@ type MaintenanceModeConfig = {
 
 let initialized = false;
 let initializationPromise: Promise<void> | null = null;
+let paymentLookupIndexesPromise: Promise<void> | null = null;
+const activeDepositSessionCache = new Map<
+  string,
+  { session: ActivePaymentSessionRecord; cachedUntil: number }
+>();
+
+export const REQUIRED_DOCUMENT_VERSIONS = {
+  terms: process.env.REBOHROME_TERMS_VERSION || "2026-06",
+  privacy: process.env.REBOHROME_PRIVACY_VERSION || "2026-06",
+  refund: process.env.REBOHROME_REFUND_VERSION || "2026-06",
+  aml: process.env.REBOHROME_AML_VERSION || "2026-06",
+  legalConfirmation: process.env.REBOHROME_LEGAL_CONFIRMATION_VERSION || "2026-06",
+} as const;
+
+export class DocumentAcceptanceRequiredError extends Error {
+  code = "DOCUMENT_ACCEPTANCE_REQUIRED";
+
+  constructor(message = "Required documents must be accepted before continuing.") {
+    super(message);
+    this.name = "DocumentAcceptanceRequiredError";
+  }
+}
 
 const REQUIRED_TABLES = [
   "users",
@@ -163,6 +237,9 @@ const REQUIRED_TABLES = [
   "provider_health_logs",
   "webhook_events",
   "security_audit_events",
+  "user_kyc_profiles",
+  "payment_providers",
+  "user_payment_gate_access",
 ] as const;
 
 type SecurityAuditEventType =
@@ -172,11 +249,59 @@ type SecurityAuditEventType =
   | "user_email_changed"
   | "admin_created_user"
   | "admin_deleted_user"
+  | "user_withdraw_access_disabled"
+  | "user_withdraw_access_enabled"
   | "archive_rules_accepted"
   | "broadcast_created"
   | "broadcast_sent"
   | "broadcast_deleted"
-  | "transvoucher_invalid_signature";
+  | "admin_user_account_data_updated"
+  | "transvoucher_invalid_signature"
+  | "kyc_profile_created"
+  | "kyc_profile_updated"
+  | "kyc_session_created"
+  | "kyc_webhook_received"
+  | "kyc_manual_veriff_sync"
+  | "kyc_user_veriff_sync"
+  | "veriff_webhook_approved"
+  | "kyc_approved"
+  | "kyc_declined"
+  | "kyc_expired"
+  | "kyc_review"
+  | "callback_viewed"
+  | "verification_started"
+  | "verification_result_viewed"
+  | "verification_abandoned"
+  | "admin_manual_approved"
+  | "kyc_manual_approved"
+  | "kyc_manual_declined"
+  | "kyc_manual_rejected"
+  | "kyc_false_auto_approval_reverted"
+  | "kyc_inconsistent_state_detected"
+  | "kyc_reset"
+  | "deposit_blocked_kyc_required"
+  | "withdrawal_blocked_kyc_required"
+  | "payment_blocked_kyc_required"
+  | "gate2_details_created"
+  | "gate2_details_updated"
+  | "gate2_payment_blocked_missing_details"
+  | "payment_gate_limits_updated"
+  | "payment_blocked_by_gate_limit"
+  | "user_gate_access_granted"
+  | "user_gate_access_revoked"
+  | "cleffo_payment_created"
+  | "cleffo_payment_status_updated"
+  | "cleffo_payment_failed"
+  | "wert_session_created"
+  | "wert_widget_options_generated"
+  | "wert_signature_error"
+  | "wert_webhook_received"
+  | "wert_status_updated"
+  | "wert_payment_succeeded"
+  | "wert_payment_failed"
+  | "wert_credit_applied"
+  | "wert_unknown_status"
+  | "document_acceptance_completed";
 
 type SecurityAuditEventInput = {
   eventType: SecurityAuditEventType;
@@ -297,6 +422,21 @@ function toJson(value: unknown) {
   return JSON.stringify(value);
 }
 
+function parseJsonRecord(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function escapeTelegramHtml(value: string | null | undefined) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -308,7 +448,7 @@ function escapeTelegramHtml(value: string | null | undefined) {
 
 function truncateForTelegram(value: string | null | undefined, limit = 220) {
   const next = String(value ?? "");
-  return next.length > limit ? `${next.slice(0, limit - 1)}…` : next;
+  return next.length > limit ? `${next.slice(0, limit - 1)}вЂ¦` : next;
 }
 
 function getSecurityFieldValue(value: string | null | undefined) {
@@ -360,6 +500,16 @@ function normalizeMaintenanceModeConfig(
 }
 
 function normalizeProduct(row: DbRow): ProductRecord {
+  let randomizedOutcomes: unknown = [];
+
+  if (typeof row.randomized_outcomes_json === "string") {
+    try {
+      randomizedOutcomes = JSON.parse(row.randomized_outcomes_json);
+    } catch {
+      randomizedOutcomes = [];
+    }
+  }
+
   return {
     id: String(row.id),
     title: String(row.title),
@@ -384,6 +534,8 @@ function normalizeProduct(row: DbRow): ProductRecord {
     featured: asBoolean(row.featured ?? 0),
     homepageFeatured: asBoolean(row.homepage_featured ?? 0),
     featuredStartedAt: row.featured_started_at ? String(row.featured_started_at) : null,
+    isRandomized: asBoolean(row.is_randomized ?? 0),
+    randomizedOutcomes: normalizeRandomizedProductOutcomes(randomizedOutcomes),
     status: row.status ? (String(row.status) as ProductRecord["status"]) : "active",
     archived: asBoolean(row.archived ?? 0),
     palette: {
@@ -401,6 +553,9 @@ function normalizeUser(row: DbRow): UserRecord {
   const integrityStatus = String(
     row.vault_integrity_status ?? "Unstable",
   ) as UserRecord["vaultIntegrityStatus"];
+  const kycStatus = String(row.kyc_status ?? "not_started") as KycStatus;
+  const kycVerified = asBoolean(row.kyc_verified ?? 0);
+
   return {
     id: String(row.id),
     username: String(row.username),
@@ -414,6 +569,13 @@ function normalizeUser(row: DbRow): UserRecord {
     telegramVerified: asBoolean(row.telegram_verified ?? row.verified ?? 0),
     telegramVerifiedAt: row.telegram_verified_at ? String(row.telegram_verified_at) : null,
     withdrawalWallet: row.withdrawal_wallet ? String(row.withdrawal_wallet) : null,
+    paymentPhone: row.payment_phone ? String(row.payment_phone) : null,
+    gate2FirstName: row.gate2_first_name ? String(row.gate2_first_name) : null,
+    gate2LastName: row.gate2_last_name ? String(row.gate2_last_name) : null,
+    gate2Phone: row.gate2_phone ? String(row.gate2_phone) : null,
+    gate2DetailsUpdatedAt: row.gate2_details_updated_at
+      ? String(row.gate2_details_updated_at)
+      : null,
     verified: asBoolean(row.verified ?? 0),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -437,7 +599,93 @@ function normalizeUser(row: DbRow): UserRecord {
     latestTermsAcceptedAt: row.latest_terms_accepted_at
       ? String(row.latest_terms_accepted_at)
       : null,
+    kycStatus,
+    kycVerified,
+    kycProvider: row.kyc_provider ? String(row.kyc_provider) : null,
+    veriffSessionId: row.veriff_session_id ? String(row.veriff_session_id) : null,
+    veriffVerificationId: row.veriff_verification_id
+      ? String(row.veriff_verification_id)
+      : null,
+    veriffStatus: row.veriff_status ? String(row.veriff_status) : null,
+    veriffDecision: row.veriff_decision ? String(row.veriff_decision) : null,
+    veriffReason: row.veriff_reason ? String(row.veriff_reason) : null,
+    kycStartedAt: row.kyc_started_at ? String(row.kyc_started_at) : null,
+    kycSubmittedAt: row.kyc_submitted_at ? String(row.kyc_submitted_at) : null,
+    kycVerifiedAt: row.kyc_verified_at ? String(row.kyc_verified_at) : null,
+    kycDeclinedAt: row.kyc_declined_at ? String(row.kyc_declined_at) : null,
+    kycLastWebhookAt: row.kyc_last_webhook_at
+      ? String(row.kyc_last_webhook_at)
+      : null,
+    kycManualOverride: asBoolean(row.kyc_manual_override ?? 0),
+    kycManualOverrideBy: row.kyc_manual_override_by
+      ? String(row.kyc_manual_override_by)
+      : null,
+    kycManualOverrideAt: row.kyc_manual_override_at
+      ? String(row.kyc_manual_override_at)
+      : null,
+    kycManualOverrideReason: row.kyc_manual_override_reason
+      ? String(row.kyc_manual_override_reason)
+      : null,
+    withdrawAccessEnabled: asBoolean(row.withdraw_access_enabled ?? 1),
+    withdrawAccessDisabledAt: row.withdraw_access_disabled_at
+      ? String(row.withdraw_access_disabled_at)
+      : null,
+    withdrawAccessDisabledBy: row.withdraw_access_disabled_by
+      ? String(row.withdraw_access_disabled_by)
+      : null,
+    withdrawAccessDisabledReason: row.withdraw_access_disabled_reason
+      ? String(row.withdraw_access_disabled_reason)
+      : null,
+    withdrawAccessRestoredAt: row.withdraw_access_restored_at
+      ? String(row.withdraw_access_restored_at)
+      : null,
+    withdrawAccessRestoredBy: row.withdraw_access_restored_by
+      ? String(row.withdraw_access_restored_by)
+      : null,
   };
+}
+
+function normalizeUserKycProfile(row: DbRow): UserKycProfileRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    firstName: String(row.first_name),
+    lastName: String(row.last_name),
+    dateOfBirth: String(row.date_of_birth),
+    countryOfResidence: String(row.country_of_residence),
+    documentCountry: String(row.document_country),
+    email: String(row.email),
+    phone: row.phone ? String(row.phone) : null,
+    addressLine1: row.address_line1 ? String(row.address_line1) : null,
+    addressLine2: row.address_line2 ? String(row.address_line2) : null,
+    city: row.city ? String(row.city) : null,
+    postalCode: row.postal_code ? String(row.postal_code) : null,
+    state: row.state ? String(row.state) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+export class KycVerificationRequiredError extends Error {
+  requiresVerification = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "KycVerificationRequiredError";
+  }
+}
+
+export class Gate2DetailsRequiredError extends Error {
+  requiresGate2Details = true;
+
+  constructor(message = "Gate #2 requires your first name, last name, and phone number before payment.") {
+    super(message);
+    this.name = "Gate2DetailsRequiredError";
+  }
+}
+
+export function userHasKycAccess(user: UserRecord | null | undefined) {
+  return Boolean(user && isKycVerified(user));
 }
 
 function normalizeUserNotification(row: DbRow): UserNotificationRecord {
@@ -539,6 +787,11 @@ function normalizeBalance(row: DbRow): BalanceRecord {
     totalDeposited: Number(row.total_deposited),
     totalSpent: Number(row.total_spent),
     totalWithdrawn: Number(row.total_withdrawn),
+    payoutBonusOverrideEnabled: asBoolean(row.payout_bonus_override_enabled ?? 0),
+    payoutBonusPercent:
+      row.payout_bonus_percent === null || row.payout_bonus_percent === undefined
+        ? null
+        : Number(row.payout_bonus_percent),
     updatedAt: String(row.updated_at),
   };
 }
@@ -1125,6 +1378,106 @@ async function ensureArchiveTrustTables() {
   );
 }
 
+async function migrateLegacyRandomizedProducts() {
+  const migrationKey = "randomized_products_v1_migrated";
+  const existing = await queryOne(
+    "select key from system_settings where key = ? limit 1",
+    [migrationKey],
+  );
+
+  if (existing) {
+    return;
+  }
+
+  const timestamp = nowIso();
+  await execute(
+    "update products set is_randomized = 1 where lower(category) in ('gacha pack', 'randomized pack', 'mystery pack')",
+  );
+  await execute(
+    `insert into system_settings (key, value, updated_by, updated_at)
+     values (?, ?, ?, ?)`,
+    [migrationKey, "completed", "system", timestamp],
+  );
+}
+
+async function ensureAdminUserManagementTables() {
+  await ensureColumn("transactions", "direction text");
+  await ensureColumn("transactions", "balance_before integer");
+  await ensureColumn("transactions", "balance_after integer");
+  await ensureColumn("transactions", "source text not null default 'system'");
+  await ensureColumn("transactions", "admin_note text");
+  await ensureColumn("transactions", "support_note text");
+  await ensureColumn("transactions", "visible_description text");
+  await ensureColumn("transactions", "related_product_id text");
+  await ensureColumn("transactions", "related_order_id text");
+  await ensureColumn("transactions", "edited_by_admin_id text");
+  await ensureColumn("transactions", "edited_at text");
+  await ensureColumn("owned_cards", "status text not null default 'active'");
+  await ensureColumn("owned_cards", "acquisition_source text not null default 'purchase'");
+  await ensureColumn("owned_cards", "removed_at text");
+  await ensureColumn("owned_cards", "delivery_mode text not null default 'digital'");
+  await ensureColumn("owned_cards", "admin_note text");
+  await ensureColumn("owned_cards", "visible_user_note text");
+  await ensureColumn("owned_cards", "related_transaction_id text");
+  await ensureColumn("owned_cards", "related_order_id text");
+  await ensureColumn("owned_cards", "updated_at text");
+  await execute(
+    `create table if not exists user_inventory_ledger (
+      id text primary key,
+      user_id text not null,
+      product_id text not null,
+      user_inventory_id text,
+      action_type text not null,
+      quantity_delta integer not null,
+      quantity_before integer not null,
+      quantity_after integer not null,
+      stock_before integer,
+      stock_after integer,
+      reason text not null,
+      admin_note text,
+      visible_user_note text,
+      source text not null,
+      created_by_admin_id text,
+      created_at text not null,
+      related_transaction_id text,
+      related_order_id text
+    )`,
+  );
+  await execute(
+    `create table if not exists product_inventory_movements (
+      id text primary key,
+      product_id text not null,
+      movement_type text not null,
+      quantity_delta integer not null,
+      stock_before integer not null,
+      stock_after integer not null,
+      reason text not null,
+      source text not null,
+      admin_id text,
+      user_id text,
+      related_user_inventory_id text,
+      related_transaction_id text,
+      created_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists admin_audit_logs (
+      id text primary key,
+      admin_id text not null,
+      target_user_id text,
+      action text not null,
+      entity_type text not null,
+      entity_id text not null,
+      before_json text,
+      after_json text,
+      reason text not null,
+      ip_address text,
+      user_agent text,
+      created_at text not null
+    )`,
+  );
+}
+
 async function getSystemSettingValue(key: string) {
   await ensureSystemSettingsTable();
   const row = await queryOne(
@@ -1171,8 +1524,159 @@ export async function resetTransVoucherReconciliationBaseline(input?: {
   return baselineAt;
 }
 
+let documentAcceptanceTablesReady = false;
+
+async function ensureDocumentAcceptanceTables() {
+  if (documentAcceptanceTablesReady) {
+    return;
+  }
+
+  await execute(
+    `create table if not exists user_document_acceptances (
+      id text primary key,
+      user_id text not null,
+      terms_version text not null,
+      privacy_version text not null,
+      refund_version text not null,
+      aml_version text not null,
+      legal_confirmation_version text not null default '2026-06',
+      terms_accepted_at text not null,
+      privacy_accepted_at text not null,
+      refund_accepted_at text not null,
+      aml_accepted_at text not null,
+      legal_confirmation_accepted_at text,
+      accepted_all_at text not null,
+      ip_address text,
+      user_agent text,
+      created_at text not null,
+      updated_at text not null
+    )`,
+  );
+  await execute(
+    "create index if not exists idx_user_document_acceptances_user_created on user_document_acceptances(user_id, created_at)",
+  );
+  await ensureColumn(
+    "user_document_acceptances",
+    "legal_confirmation_version text not null default '2026-06'",
+  );
+  await ensureColumn("user_document_acceptances", "legal_confirmation_accepted_at text");
+  documentAcceptanceTablesReady = true;
+}
+
 async function ensureApplicationColumns() {
+  await execute(
+    `create table if not exists user_kyc_profiles (
+      id text primary key,
+      user_id text not null unique,
+      first_name text not null,
+      last_name text not null,
+      date_of_birth text not null,
+      country_of_residence text not null,
+      document_country text not null,
+      email text not null,
+      phone text,
+      address_line1 text,
+      address_line2 text,
+      city text,
+      postal_code text,
+      state text,
+      created_at text not null,
+      updated_at text not null
+    )`,
+  );
+  await ensureDocumentAcceptanceTables();
+  await execute(
+    `create table if not exists payment_providers (
+      provider_key text primary key,
+      gate_number integer not null unique,
+      provider_name text not null,
+      public_name text not null,
+      admin_name text not null,
+      enabled integer not null default 1,
+      default_user_visible integer not null default 0,
+      supports_usd integer not null default 1,
+      supports_eur integer not null default 1,
+      min_amount integer not null default 1,
+      max_amount integer,
+      min_deposit_amount real not null default 10,
+      max_deposit_amount real,
+      default_deposit_amount real,
+      currency text not null default 'USD',
+      priority integer not null default 100,
+      created_at text not null,
+      updated_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists user_payment_gate_access (
+      id text primary key,
+      user_id text not null,
+      provider_key text not null,
+      enabled integer not null default 0,
+      reason text,
+      updated_by text,
+      created_at text not null,
+      updated_at text not null,
+      unique(user_id, provider_key)
+    )`,
+  );
+  await execute(
+    `create table if not exists wert_payment_sessions (
+      id text primary key,
+      user_id text not null,
+      provider_key text not null default 'wert',
+      gate_number integer not null default 3,
+      type text not null default 'balance_topup',
+      local_transaction_id text not null unique,
+      deposit_id text,
+      click_id text not null unique,
+      wert_order_id text,
+      wert_status text,
+      amount_fiat real not null,
+      fiat_currency text not null default 'USD',
+      commodity text not null,
+      commodity_amount real not null,
+      network text not null,
+      user_wallet_address text,
+      sc_address text not null,
+      sc_input_data text not null,
+      signature_hash text,
+      token_id integer,
+      token_quantity integer,
+      contract_order_id text,
+      recipient_wallet text,
+      nft_delivery_mode text,
+      chain_tx_hash text,
+      status text not null default 'created',
+      balance_credited_at text,
+      nft_delivered_at text,
+      provider_payload_safe text,
+      last_status_check_at text,
+      last_webhook_at text,
+      created_at text not null,
+      updated_at text not null
+    )`,
+  );
+  await execute(
+    `create table if not exists user_collectibles (
+      id text primary key,
+      user_id text not null,
+      token_id integer not null,
+      quantity integer not null default 1,
+      source_payment_session_id text,
+      provider_key text not null default 'wert',
+      chain_tx_hash text,
+      delivered_at text not null,
+      created_at text not null
+    )`,
+  );
   await ensureColumn("users", "require_password_reset integer not null default 0");
+  await ensureColumn("users", "withdraw_access_enabled integer not null default 1");
+  await ensureColumn("users", "withdraw_access_disabled_at text");
+  await ensureColumn("users", "withdraw_access_disabled_by text");
+  await ensureColumn("users", "withdraw_access_disabled_reason text");
+  await ensureColumn("users", "withdraw_access_restored_at text");
+  await ensureColumn("users", "withdraw_access_restored_by text");
   await ensureColumn("users", "is_deleted integer not null default 0");
   await ensureColumn("users", "deleted_at text");
   await ensureColumn("users", "deleted_by text");
@@ -1181,6 +1685,55 @@ async function ensureApplicationColumns() {
   await ensureColumn("users", "vault_integrity_updated_at text");
   await ensureColumn("users", "archive_rules_accepted_at text");
   await ensureColumn("users", "latest_terms_accepted_at text");
+  await ensureColumn("users", "kyc_status text not null default 'not_started'");
+  await ensureColumn("users", "kyc_verified integer not null default 0");
+  await ensureColumn("users", "kyc_provider text");
+  await ensureColumn("users", "veriff_session_id text");
+  await ensureColumn("users", "veriff_verification_id text");
+  await ensureColumn("users", "veriff_status text");
+  await ensureColumn("users", "veriff_decision text");
+  await ensureColumn("users", "veriff_reason text");
+  await ensureColumn("users", "kyc_started_at text");
+  await ensureColumn("users", "kyc_submitted_at text");
+  await ensureColumn("users", "kyc_verified_at text");
+  await ensureColumn("users", "kyc_declined_at text");
+  await ensureColumn("users", "kyc_last_webhook_at text");
+  await ensureColumn("users", "kyc_manual_override integer not null default 0");
+  await ensureColumn("users", "kyc_manual_override_by text");
+  await ensureColumn("users", "kyc_manual_override_at text");
+  await ensureColumn("users", "kyc_manual_override_reason text");
+  await ensureColumn("profiles", "payment_phone text");
+  await ensureColumn("profiles", "gate2_first_name text");
+  await ensureColumn("profiles", "gate2_last_name text");
+  await ensureColumn("profiles", "gate2_phone text");
+  await ensureColumn("profiles", "gate2_details_updated_at text");
+  await ensureColumn("payment_providers", "min_deposit_amount real not null default 10");
+  await ensureColumn("payment_providers", "max_deposit_amount real");
+  await ensureColumn("payment_providers", "default_deposit_amount real");
+  await ensureColumn("payment_providers", "currency text not null default 'USD'");
+  await ensureColumn("payment_sessions", "token_id integer");
+  await ensureColumn("payment_sessions", "token_quantity integer");
+  await ensureColumn("payment_sessions", "contract_address text");
+  await ensureColumn("payment_sessions", "contract_order_id text");
+  await ensureColumn("payment_sessions", "sc_input_data text");
+  await ensureColumn("payment_sessions", "chain_network text");
+  await ensureColumn("payment_sessions", "recipient_wallet text");
+  await ensureColumn("payment_sessions", "nft_delivery_mode text");
+  await ensureColumn("payment_sessions", "chain_tx_hash text");
+  await ensureColumn("payment_sessions", "nft_delivered_at text");
+  await ensureColumn("deposit_payment_sessions", "token_id integer");
+  await ensureColumn("deposit_payment_sessions", "token_quantity integer");
+  await ensureColumn("deposit_payment_sessions", "contract_address text");
+  await ensureColumn("deposit_payment_sessions", "contract_order_id text");
+  await ensureColumn("deposit_payment_sessions", "sc_input_data text");
+  await ensureColumn("deposit_payment_sessions", "chain_network text");
+  await ensureColumn("deposit_payment_sessions", "recipient_wallet text");
+  await ensureColumn("deposit_payment_sessions", "nft_delivery_mode text");
+  await ensureColumn("deposit_payment_sessions", "chain_tx_hash text");
+  await ensureColumn("deposit_payment_sessions", "nft_delivered_at text");
+  await ensurePaymentProviderRegistry();
+  await ensureColumn("balances", "payout_bonus_override_enabled integer not null default 0");
+  await ensureColumn("balances", "payout_bonus_percent integer");
   await ensureColumn("transactions", "provider_checked_at text");
   await ensureColumn("transactions", "processed_at text");
   await ensureColumn("transactions", "credited_at text");
@@ -1188,6 +1741,26 @@ async function ensureApplicationColumns() {
   await ensureColumn("transactions", "last_error text");
   await ensureColumn("transactions", "reconciliation_attempts integer not null default 0");
   await ensureColumn("transactions", "environment text not null default 'production'");
+  await ensureColumn("transactions", "direction text");
+  await ensureColumn("transactions", "balance_before integer");
+  await ensureColumn("transactions", "balance_after integer");
+  await ensureColumn("transactions", "source text not null default 'system'");
+  await ensureColumn("transactions", "admin_note text");
+  await ensureColumn("transactions", "support_note text");
+  await ensureColumn("transactions", "visible_description text");
+  await ensureColumn("transactions", "related_product_id text");
+  await ensureColumn("transactions", "related_order_id text");
+  await ensureColumn("transactions", "edited_by_admin_id text");
+  await ensureColumn("transactions", "edited_at text");
+  await ensureColumn("owned_cards", "status text not null default 'active'");
+  await ensureColumn("owned_cards", "acquisition_source text not null default 'purchase'");
+  await ensureColumn("owned_cards", "removed_at text");
+  await ensureColumn("owned_cards", "delivery_mode text not null default 'digital'");
+  await ensureColumn("owned_cards", "admin_note text");
+  await ensureColumn("owned_cards", "visible_user_note text");
+  await ensureColumn("owned_cards", "related_transaction_id text");
+  await ensureColumn("owned_cards", "related_order_id text");
+  await ensureColumn("owned_cards", "updated_at text");
   await ensureColumn("withdrawal_requests", "requested_amount integer");
   await ensureColumn("withdrawal_requests", "base_payout_percent integer not null default 60");
   await ensureColumn("withdrawal_requests", "bonus_payout_percent integer not null default 0");
@@ -1225,6 +1798,600 @@ async function ensureApplicationColumns() {
   await ensureColumn("notifications", "dismissed_at text");
   await ensurePaymentReconciliationRunsTable();
   await ensureArchiveTrustTables();
+  await ensureAdminUserManagementTables();
+  await ensurePerformanceIndexes();
+}
+
+async function ensureCoinflowDepositPaymentSessionColumns() {
+  await ensureColumn("deposit_payment_sessions", "provider_environment text");
+  await ensureColumn("deposit_payment_sessions", "provider_checkout_env text");
+  await ensureColumn("deposit_payment_sessions", "amount_cents integer");
+  await ensureColumn("deposit_payment_sessions", "provider_session_key text");
+  await ensureColumn("deposit_payment_sessions", "provider_checkout_jwt text");
+  await ensureColumn("deposit_payment_sessions", "provider_payment_id text");
+  await ensureColumn("deposit_payment_sessions", "provider_event_id text");
+  await ensureColumn("deposit_payment_sessions", "provider_raw_status text");
+  await ensureColumn("deposit_payment_sessions", "provider_raw_payload text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_customer_id text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_payment_id text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_webhook_info text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_settlement_type text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_last4 text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_bin text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_card_token text");
+  await ensureColumn("deposit_payment_sessions", "idempotency_key text");
+  await ensureColumn("deposit_payment_sessions", "completed_at text");
+  await ensureColumn("deposit_payment_sessions", "failed_at text");
+}
+
+async function ensurePerformanceIndexes() {
+  await Promise.all([
+    execute("create index if not exists idx_users_username on users(username)"),
+    execute("create index if not exists idx_users_email on users(email)"),
+    execute("create index if not exists idx_transactions_user_created on transactions(user_id, created_at)"),
+    execute("create index if not exists idx_transactions_status_provider_created on transactions(status, payment_provider, created_at)"),
+    execute("create index if not exists idx_transactions_provider_env_created on transactions(payment_provider, environment, created_at)"),
+    execute("create index if not exists idx_payment_sessions_user_status_created on payment_sessions(user_id, status, created_at)"),
+    execute("create index if not exists idx_deposit_payment_sessions_user_status_created on deposit_payment_sessions(user_id, status, created_at)"),
+    execute("create index if not exists idx_withdrawals_user_created on withdrawal_requests(user_id, created_at)"),
+    execute("create index if not exists idx_withdrawal_history_withdrawal_created on withdrawal_status_history(withdrawal_id, created_at)"),
+    execute("create index if not exists idx_orders_user_created on orders(user_id, created_at)"),
+    execute("create index if not exists idx_orders_user_payment_state on orders(user_id, payment_state)"),
+    execute("create index if not exists idx_owned_cards_user_acquired on owned_cards(user_id, acquired_at)"),
+    execute("create index if not exists idx_user_kyc_profiles_user on user_kyc_profiles(user_id)"),
+    execute("create index if not exists idx_broadcast_deliveries_user_status on broadcast_deliveries(user_id, status)"),
+    execute("create index if not exists idx_user_notifications_user_popup_created on user_notifications(user_id, show_as_popup, created_at)"),
+    execute("create index if not exists idx_user_payment_gate_access_user_provider on user_payment_gate_access(user_id, provider_key)"),
+    execute("create index if not exists idx_archive_ledger_user_created on archive_ledger(user_id, created_at)"),
+    execute("create index if not exists idx_webhook_events_provider_received on webhook_events(provider, received_at)"),
+    execute("create index if not exists idx_admin_audit_logs_target_created on admin_audit_logs(target_user_id, created_at)"),
+    execute("create index if not exists idx_user_inventory_ledger_user_created on user_inventory_ledger(user_id, created_at)"),
+    execute("create index if not exists idx_product_inventory_movements_product_created on product_inventory_movements(product_id, created_at)"),
+  ]);
+}
+
+async function ensurePaymentProviderRegistry() {
+  const timestamp = nowIso();
+  const providers: Array<{
+    key: PaymentProviderKey;
+    gateNumber: number;
+    providerName: Exclude<PaymentProviderName, "Internal Wallet">;
+    publicName: string;
+    adminName: string;
+    defaultUserVisible: boolean;
+    supportsUsd: boolean;
+    supportsEur: boolean;
+    minAmount: number;
+    maxAmount: number | null;
+    minDepositAmount: number;
+    maxDepositAmount: number | null;
+    defaultDepositAmount: number | null;
+    currency: SupportedCurrency;
+    priority: number;
+  }> = [
+    {
+      key: "transvoucher",
+      gateNumber: 1,
+      providerName: "TransVoucher",
+      publicName: "Gate #1",
+      adminName: "Gate #1 - TransVoucher",
+      defaultUserVisible: true,
+      supportsUsd: true,
+      supportsEur: true,
+      minAmount: 10,
+      maxAmount: 20000,
+      minDepositAmount: 10,
+      maxDepositAmount: 20000,
+      defaultDepositAmount: 250,
+      currency: "USD",
+      priority: 10,
+    },
+    {
+      key: "cleffo",
+      gateNumber: 2,
+      providerName: "Cleffo",
+      publicName: "Gate #2",
+      adminName: "Gate #2 - Cleffo",
+      defaultUserVisible: false,
+      supportsUsd: true,
+      supportsEur: false,
+      minAmount: 10,
+      maxAmount: 500,
+      minDepositAmount: 10,
+      maxDepositAmount: 500,
+      defaultDepositAmount: 250,
+      currency: "USD",
+      priority: 20,
+    },
+    {
+      key: "wert",
+      gateNumber: 3,
+      providerName: "Wert.io",
+      publicName: "Gate #3",
+      adminName: "Gate #3 - Wert.io",
+      defaultUserVisible: false,
+      supportsUsd: true,
+      supportsEur: false,
+      minAmount: 10,
+      maxAmount: 500,
+      minDepositAmount: 10,
+      maxDepositAmount: 500,
+      defaultDepositAmount: 250,
+      currency: "USD",
+      priority: 30,
+    },
+    {
+      key: "coinflow",
+      gateNumber: 4,
+      providerName: "Coinflow",
+      publicName: "Gate #4",
+      adminName: "Gate #4 - Coinflow",
+      defaultUserVisible: false,
+      supportsUsd: true,
+      supportsEur: false,
+      minAmount: 10,
+      maxAmount: 500,
+      minDepositAmount: 10,
+      maxDepositAmount: 500,
+      defaultDepositAmount: 250,
+      currency: "USD",
+      priority: 40,
+    },
+  ];
+
+  for (const provider of providers) {
+    await execute(
+      `insert into payment_providers (
+        provider_key, gate_number, provider_name, public_name, admin_name,
+        enabled, default_user_visible, supports_usd, supports_eur,
+        min_amount, max_amount, min_deposit_amount, max_deposit_amount,
+        default_deposit_amount, currency, priority, created_at, updated_at
+      ) values (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(provider_key) do update set
+        gate_number = excluded.gate_number,
+        provider_name = excluded.provider_name,
+        public_name = excluded.public_name,
+        admin_name = excluded.admin_name,
+        default_user_visible = excluded.default_user_visible,
+        supports_usd = excluded.supports_usd,
+        supports_eur = excluded.supports_eur,
+        min_amount = case when payment_providers.min_amount <= 1 then excluded.min_amount else payment_providers.min_amount end,
+        max_amount = coalesce(payment_providers.max_amount, excluded.max_amount),
+        min_deposit_amount = case when payment_providers.min_deposit_amount <= 1 then excluded.min_deposit_amount else payment_providers.min_deposit_amount end,
+        max_deposit_amount = coalesce(payment_providers.max_deposit_amount, excluded.max_deposit_amount),
+        default_deposit_amount = coalesce(payment_providers.default_deposit_amount, excluded.default_deposit_amount),
+        currency = coalesce(payment_providers.currency, excluded.currency),
+        priority = excluded.priority,
+        updated_at = excluded.updated_at`,
+      [
+        provider.key,
+        provider.gateNumber,
+        provider.providerName,
+        provider.publicName,
+        provider.adminName,
+        provider.defaultUserVisible ? 1 : 0,
+        provider.supportsUsd ? 1 : 0,
+        provider.supportsEur ? 1 : 0,
+        provider.minAmount,
+        provider.maxAmount,
+        provider.minDepositAmount,
+        provider.maxDepositAmount,
+        provider.defaultDepositAmount,
+        provider.currency,
+        provider.priority,
+        timestamp,
+        timestamp,
+      ],
+    );
+  }
+}
+
+function normalizePaymentGateAccess(row: DbRow): PaymentGateAccessRecord {
+  const supportsCurrencies: SupportedCurrency[] = [];
+  if (Number(row.supports_usd ?? 0) === 1) {
+    supportsCurrencies.push("USD");
+  }
+  if (
+    !["cleffo", "wert", "coinflow"].includes(String(row.provider_key)) &&
+    Number(row.supports_eur ?? 0) === 1
+  ) {
+    supportsCurrencies.push("EUR");
+  }
+
+  const defaultUserVisible = Number(row.default_user_visible ?? 0) === 1;
+  const explicitAccess = row.user_access_enabled;
+  const accessEnabled =
+    explicitAccess === null || explicitAccess === undefined
+      ? defaultUserVisible
+      : Number(explicitAccess) === 1;
+
+  const providerKey = String(row.provider_key) as PaymentProviderKey;
+  const fallbackMax = providerKey === "transvoucher" ? 20000 : 500;
+  const maxDepositValue =
+    row.max_deposit_amount ?? row.max_amount ?? fallbackMax;
+
+  return {
+    providerKey,
+    gateNumber: Number(row.gate_number),
+    providerName: String(row.provider_name) as Exclude<
+      PaymentProviderName,
+      "Internal Wallet"
+    >,
+    publicName: String(row.public_name),
+    adminName: String(row.admin_name),
+    enabled: Number(row.enabled ?? 0) === 1,
+    accessEnabled,
+    defaultUserVisible,
+    supportsCurrencies,
+    minAmount: Number(row.min_deposit_amount ?? row.min_amount ?? 10),
+    maxAmount:
+      maxDepositValue === null ||
+      maxDepositValue === undefined
+        ? null
+        : Number(maxDepositValue),
+    defaultAmount:
+      row.default_deposit_amount === null || row.default_deposit_amount === undefined
+        ? null
+        : Number(row.default_deposit_amount),
+    limitCurrency: String(row.currency ?? "USD") as SupportedCurrency,
+    reason: row.reason ? String(row.reason) : null,
+    updatedAt: row.access_updated_at ? String(row.access_updated_at) : null,
+  };
+}
+
+export async function getUserPaymentGateAccess(
+  userId: string,
+): Promise<PaymentGateAccessRecord[]> {
+  await ensureDatabase();
+  await ensurePaymentProviderRegistry();
+  const rows = await queryMany(
+    `select
+      payment_providers.*,
+      user_payment_gate_access.enabled as user_access_enabled,
+      user_payment_gate_access.reason,
+      user_payment_gate_access.updated_at as access_updated_at
+     from payment_providers
+     left join user_payment_gate_access
+       on user_payment_gate_access.provider_key = payment_providers.provider_key
+      and user_payment_gate_access.user_id = ?
+     order by payment_providers.priority asc, payment_providers.gate_number asc`,
+    [userId],
+  );
+
+  return rows.map((row) => normalizePaymentGateAccess(row));
+}
+
+export async function getAvailablePaymentGatesForUser(
+  userId: string,
+): Promise<PaymentGateAccessRecord[]> {
+  const gates = await getUserPaymentGateAccess(userId);
+  return gates.filter((gate) => gate.enabled && gate.accessEnabled);
+}
+
+function formatCompactAmount(value: number) {
+  return Number(value).toLocaleString("en-US", {
+    minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+async function resolveDepositGateForUser(input: {
+  userId: string;
+  provider?: Exclude<PaymentProviderName, "Internal Wallet"> | null;
+  gateNumber?: number | null;
+  amount: number;
+  currency: SupportedCurrency;
+}) {
+  const row =
+    input.gateNumber || input.provider
+      ? await queryOne(
+          `select
+            payment_providers.*,
+            user_payment_gate_access.enabled as user_access_enabled,
+            user_payment_gate_access.reason,
+            user_payment_gate_access.updated_at as access_updated_at
+           from payment_providers
+           left join user_payment_gate_access
+             on user_payment_gate_access.provider_key = payment_providers.provider_key
+            and user_payment_gate_access.user_id = ?
+           where ${
+             input.gateNumber
+               ? "payment_providers.gate_number = ?"
+               : "payment_providers.provider_name = ?"
+           }
+           limit 1`,
+          [input.userId, input.gateNumber ? input.gateNumber : input.provider ?? ""],
+        )
+      : null;
+
+  const gate = row
+    ? normalizePaymentGateAccess(row)
+    : (await getUserPaymentGateAccess(input.userId)).find((item) => {
+        if (input.gateNumber) {
+          return item.gateNumber === input.gateNumber;
+        }
+
+        return item.providerName === input.provider;
+      });
+
+  if (!gate || !gate.enabled || !gate.accessEnabled) {
+    throw new Error("This payment gate is not available for your account.");
+  }
+
+  if (["cleffo", "wert", "coinflow"].includes(gate.providerKey) && input.currency !== "USD") {
+    throw new Error(`${gate.publicName} supports USD payments only.`);
+  }
+
+  if (!gate.supportsCurrencies.includes(input.currency)) {
+    throw new Error(`${gate.publicName} does not support ${input.currency}.`);
+  }
+
+  if (input.amount < gate.minAmount) {
+    throw new Error(`Minimum deposit for ${gate.publicName} is $${formatCompactAmount(gate.minAmount)}.`);
+  }
+
+  if (gate.maxAmount !== null && input.amount > gate.maxAmount) {
+    throw new Error(`Maximum deposit for ${gate.publicName} is $${formatCompactAmount(gate.maxAmount)}.`);
+  }
+
+  return gate;
+}
+
+function getRequestedDepositProviderName(input: {
+  provider?: Exclude<PaymentProviderName, "Internal Wallet"> | null;
+  gateNumber?: number | null;
+}) {
+  if (input.provider) {
+    return input.provider;
+  }
+
+  if (input.gateNumber === 1) {
+    return "TransVoucher";
+  }
+  if (input.gateNumber === 2) {
+    return "Cleffo";
+  }
+  if (input.gateNumber === 3) {
+    return "Wert.io";
+  }
+  if (input.gateNumber === 4) {
+    return "Coinflow";
+  }
+
+  return null;
+}
+
+function getRequestedDepositProviderKey(input: {
+  provider?: Exclude<PaymentProviderName, "Internal Wallet"> | null;
+  gateNumber?: number | null;
+}): PaymentProviderKey | null {
+  if (input.provider === "TransVoucher" || input.gateNumber === 1) {
+    return "transvoucher";
+  }
+  if (input.provider === "Cleffo" || input.gateNumber === 2) {
+    return "cleffo";
+  }
+  if (input.provider === "Wert.io" || input.gateNumber === 3) {
+    return "wert";
+  }
+  if (input.provider === "Coinflow" || input.gateNumber === 4) {
+    return "coinflow";
+  }
+
+  return null;
+}
+
+export async function updateUserPaymentGateAccess(input: {
+  adminUserId: string;
+  targetUserId: string;
+  providerKey: PaymentProviderKey;
+  enabled: boolean;
+  reason: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+
+  if (!input.reason.trim()) {
+    throw new Error("Reason is required for payment gate access changes.");
+  }
+
+  const provider = await queryOne(
+    "select * from payment_providers where provider_key = ? limit 1",
+    [input.providerKey],
+  );
+  if (!provider) {
+    throw new Error("Payment gate not found.");
+  }
+
+  const target = await getUserById(input.targetUserId);
+  if (!target) {
+    throw new Error("Target user not found.");
+  }
+
+  const timestamp = nowIso();
+  await execute(
+    `insert into user_payment_gate_access (
+      id, user_id, provider_key, enabled, reason, updated_by, created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?)
+    on conflict(user_id, provider_key) do update set
+      enabled = excluded.enabled,
+      reason = excluded.reason,
+      updated_by = excluded.updated_by,
+      updated_at = excluded.updated_at`,
+    [
+      randomUUID(),
+      input.targetUserId,
+      input.providerKey,
+      input.enabled ? 1 : 0,
+      input.reason.trim(),
+      input.adminUserId,
+      timestamp,
+      timestamp,
+    ],
+  );
+
+  await insertSecurityAuditEvent({
+    eventType: input.enabled
+      ? "user_gate_access_granted"
+      : "user_gate_access_revoked",
+    userId: target.id,
+    username: target.username,
+    telegramUsername: target.telegramUsername,
+    role: target.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp: input.timestamp,
+  });
+
+  revalidateAdmin();
+  revalidatePrivate(input.targetUserId);
+  return getAdminUserEntryById(input.targetUserId);
+}
+
+export async function getAdminPaymentProviders() {
+  await ensureDatabase();
+  await ensurePaymentProviderRegistry();
+  const rows = await queryMany(
+    `select payment_providers.*
+     from payment_providers
+     order by priority asc, gate_number asc`,
+  );
+
+  return rows.map((row) =>
+    normalizePaymentGateAccess({
+      ...row,
+      user_access_enabled: null,
+      reason: null,
+      access_updated_at: row.updated_at,
+    }),
+  );
+}
+
+export async function updateAdminPaymentProviderLimits(input: {
+  adminUserId: string;
+  providerKey: PaymentProviderKey;
+  minDepositAmount: unknown;
+  maxDepositAmount: unknown;
+  defaultDepositAmount: unknown;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+  await ensurePaymentProviderRegistry();
+
+  const admin = await getAdminIdentity(input.adminUserId);
+  const current = await queryOne(
+    "select * from payment_providers where provider_key = ? limit 1",
+    [input.providerKey],
+  );
+
+  if (!current) {
+    throw new Error("Payment gate not found.");
+  }
+
+  const minDepositAmount = normalizeEditableDepositLimit(
+    input.minDepositAmount,
+    "Minimum deposit amount",
+  );
+  const maxDepositAmount = normalizeEditableOptionalDepositLimit(
+    input.maxDepositAmount,
+    "Maximum deposit amount",
+  );
+  const defaultDepositAmount = normalizeEditableOptionalDepositLimit(
+    input.defaultDepositAmount,
+    "Default deposit amount",
+  );
+
+  if (maxDepositAmount !== null && maxDepositAmount <= minDepositAmount) {
+    throw new Error("Maximum amount must be greater than minimum amount.");
+  }
+
+  if (
+    defaultDepositAmount !== null &&
+    (defaultDepositAmount < minDepositAmount ||
+      (maxDepositAmount !== null && defaultDepositAmount > maxDepositAmount))
+  ) {
+    throw new Error("Default amount must be within the configured deposit limits.");
+  }
+
+  const timestamp = input.timestamp || nowIso();
+  await execute(
+    `update payment_providers set
+      min_deposit_amount = ?,
+      max_deposit_amount = ?,
+      default_deposit_amount = ?,
+      min_amount = ?,
+      max_amount = ?,
+      supports_eur = case when provider_key in ('cleffo', 'wert', 'coinflow') then 0 else supports_eur end,
+      currency = 'USD',
+      updated_at = ?
+     where provider_key = ?`,
+    [
+      minDepositAmount,
+      maxDepositAmount,
+      defaultDepositAmount,
+      minDepositAmount,
+      maxDepositAmount,
+      timestamp,
+      input.providerKey,
+    ],
+  );
+
+  await insertSecurityAuditEvent({
+    eventType: "payment_gate_limits_updated",
+    userId: admin.id,
+    username: admin.username,
+    telegramUsername: admin.telegramUsername,
+    role: admin.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp,
+  });
+
+  await logAdminAction(
+    admin.id,
+    "payment_gate_limits_updated",
+    "payment_provider",
+    input.providerKey,
+    `Updated limits for ${String(current.admin_name ?? input.providerKey)}`,
+    {
+      metadata: {
+        providerKey: input.providerKey,
+        gateNumber: Number(current.gate_number),
+        oldMin: Number(current.min_deposit_amount ?? current.min_amount ?? 10),
+        newMin: minDepositAmount,
+        oldMax:
+          current.max_deposit_amount === null ||
+          current.max_deposit_amount === undefined
+            ? null
+            : Number(current.max_deposit_amount),
+        newMax: maxDepositAmount,
+        oldDefault:
+          current.default_deposit_amount === null ||
+          current.default_deposit_amount === undefined
+            ? null
+            : Number(current.default_deposit_amount),
+        newDefault: defaultDepositAmount,
+      },
+    },
+  );
+
+  revalidateAdmin();
 }
 
 async function insertSecurityAuditEvent(input: SecurityAuditEventInput) {
@@ -1295,10 +2462,11 @@ export async function appendArchiveLedgerEntry(input: {
   title: string;
   description: string;
   metadata?: Record<string, unknown> | null;
+  createdAt?: string | null;
 }) {
   await ensureDatabase();
   await ensureArchiveTrustTables();
-  const createdAt = nowIso();
+  const createdAt = input.createdAt ?? nowIso();
   const previousRow = await queryOne(
     "select event_hash from archive_ledger order by created_at desc, id desc limit 1",
   );
@@ -1412,11 +2580,11 @@ export async function calculateVaultIntegrityReport(
     factors.push("Collection activity exists");
   }
 
-  if (user.archiveRulesAcceptedAt) {
+  if (user.latestTermsAcceptedAt) {
     score += 10;
-    factors.push("Archive Economy Rules accepted");
+    factors.push("Required documents accepted");
   } else {
-    issues.push("Review and accept Archive Economy Rules");
+    issues.push("Review and accept Required Documents");
   }
 
   if (user.latestTermsAcceptedAt) {
@@ -1496,6 +2664,196 @@ export async function acceptArchiveRules(userId: string) {
   await recalculateVaultIntegrity(userId);
   revalidatePrivate(userId);
   return timestamp;
+}
+
+function buildDocumentAcceptanceStatus(row: DbRow | null): DocumentAcceptanceStatusRecord {
+  const required = {
+    terms: {
+      version: REQUIRED_DOCUMENT_VERSIONS.terms,
+      accepted:
+        Boolean(row?.terms_accepted_at) &&
+        String(row?.terms_version ?? "") === REQUIRED_DOCUMENT_VERSIONS.terms,
+      url: "/terms",
+      acceptedAt: row?.terms_accepted_at ? String(row.terms_accepted_at) : null,
+    },
+    privacy: {
+      version: REQUIRED_DOCUMENT_VERSIONS.privacy,
+      accepted:
+        Boolean(row?.privacy_accepted_at) &&
+        String(row?.privacy_version ?? "") === REQUIRED_DOCUMENT_VERSIONS.privacy,
+      url: "/privacy-policy",
+      acceptedAt: row?.privacy_accepted_at ? String(row.privacy_accepted_at) : null,
+    },
+    refund: {
+      version: REQUIRED_DOCUMENT_VERSIONS.refund,
+      accepted:
+        Boolean(row?.refund_accepted_at) &&
+        String(row?.refund_version ?? "") === REQUIRED_DOCUMENT_VERSIONS.refund,
+      url: "/refund-policy",
+      acceptedAt: row?.refund_accepted_at ? String(row.refund_accepted_at) : null,
+    },
+    aml: {
+      version: REQUIRED_DOCUMENT_VERSIONS.aml,
+      accepted:
+        Boolean(row?.aml_accepted_at) &&
+        String(row?.aml_version ?? "") === REQUIRED_DOCUMENT_VERSIONS.aml,
+      url: "/aml-policy",
+      acceptedAt: row?.aml_accepted_at ? String(row.aml_accepted_at) : null,
+    },
+    legalConfirmation: {
+      version: REQUIRED_DOCUMENT_VERSIONS.legalConfirmation,
+      accepted:
+        Boolean(row?.legal_confirmation_accepted_at) &&
+        String(row?.legal_confirmation_version ?? "") ===
+          REQUIRED_DOCUMENT_VERSIONS.legalConfirmation,
+      url: "/terms",
+      acceptedAt: row?.legal_confirmation_accepted_at
+        ? String(row.legal_confirmation_accepted_at)
+        : null,
+    },
+  };
+  const accepted =
+    required.terms.accepted &&
+    required.privacy.accepted &&
+    required.refund.accepted &&
+    required.aml.accepted &&
+    required.legalConfirmation.accepted;
+
+  return {
+    accepted,
+    acceptedAllAt: accepted && row?.accepted_all_at ? String(row.accepted_all_at) : null,
+    ipAddress: row?.ip_address ? String(row.ip_address) : null,
+    userAgent: row?.user_agent ? String(row.user_agent) : null,
+    currentVersion: REQUIRED_DOCUMENT_VERSIONS.terms,
+    required,
+  };
+}
+
+export async function getUserDocumentAcceptanceStatus(
+  userId: string,
+): Promise<DocumentAcceptanceStatusRecord> {
+  await ensureDatabase();
+  await ensureDocumentAcceptanceTables();
+  const row = await queryOne(
+    `select * from user_document_acceptances
+     where user_id = ?
+     order by accepted_all_at desc, created_at desc
+     limit 1`,
+    [userId],
+  );
+
+  return buildDocumentAcceptanceStatus(row ?? null);
+}
+
+export async function userHasAcceptedRequiredDocuments(userId: string) {
+  const status = await getUserDocumentAcceptanceStatus(userId);
+  return status.accepted;
+}
+
+export async function requireDocumentAcceptanceForUser(userId: string) {
+  if (!(await userHasAcceptedRequiredDocuments(userId))) {
+    throw new DocumentAcceptanceRequiredError();
+  }
+}
+
+export async function acceptRequiredDocuments(input: {
+  userId: string;
+  termsAccepted: unknown;
+  privacyAccepted: unknown;
+  refundAccepted: unknown;
+  amlAccepted: unknown;
+  legalConfirmationAccepted: unknown;
+  ipAddress?: string;
+  userAgent?: string;
+}) {
+  await ensureDatabase();
+  await ensureDocumentAcceptanceTables();
+  const allAccepted =
+    input.termsAccepted === true &&
+    input.privacyAccepted === true &&
+    input.refundAccepted === true &&
+    input.amlAccepted === true &&
+    input.legalConfirmationAccepted === true;
+
+  if (!allAccepted) {
+    if (input.legalConfirmationAccepted !== true) {
+      throw new Error("LEGAL_CONFIRMATION_REQUIRED");
+    }
+    throw new Error("All required documents must be accepted.");
+  }
+
+  const timestamp = nowIso();
+  const id = randomUUID();
+  await execute(
+    `insert into user_document_acceptances (
+      id, user_id, terms_version, privacy_version, refund_version, aml_version,
+      legal_confirmation_version, terms_accepted_at, privacy_accepted_at,
+      refund_accepted_at, aml_accepted_at, legal_confirmation_accepted_at,
+      accepted_all_at, ip_address, user_agent, created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      input.userId,
+      REQUIRED_DOCUMENT_VERSIONS.terms,
+      REQUIRED_DOCUMENT_VERSIONS.privacy,
+      REQUIRED_DOCUMENT_VERSIONS.refund,
+      REQUIRED_DOCUMENT_VERSIONS.aml,
+      REQUIRED_DOCUMENT_VERSIONS.legalConfirmation,
+      timestamp,
+      timestamp,
+      timestamp,
+      timestamp,
+      timestamp,
+      timestamp,
+      input.ipAddress ?? null,
+      input.userAgent ?? null,
+      timestamp,
+      timestamp,
+    ],
+  );
+  await execute(
+    "update users set latest_terms_accepted_at = ?, updated_at = ? where id = ?",
+    [timestamp, timestamp, input.userId],
+  );
+
+  const user = await getUserById(input.userId);
+  await insertSecurityAuditEvent({
+    eventType: "document_acceptance_completed",
+    userId: input.userId,
+    username: user?.username ?? null,
+    telegramUsername: user?.telegramUsername ?? null,
+    role: user?.role ?? null,
+    ipAddress: input.ipAddress ?? "unknown",
+    country: "Unknown",
+    userAgent: input.userAgent ?? "Unknown",
+    language: "Unknown",
+    route: "/api/account/document-acceptance",
+    timestamp,
+  });
+  await appendArchiveLedgerEntry({
+    eventType: "document_acceptance_completed",
+    userId: input.userId,
+    entityType: "user_document_acceptances",
+    entityId: id,
+    title: "Required documents accepted",
+    description: "User accepted current ReboHrome required documents.",
+    metadata: {
+      termsVersion: REQUIRED_DOCUMENT_VERSIONS.terms,
+      privacyVersion: REQUIRED_DOCUMENT_VERSIONS.privacy,
+      refundVersion: REQUIRED_DOCUMENT_VERSIONS.refund,
+      amlVersion: REQUIRED_DOCUMENT_VERSIONS.aml,
+      legalConfirmationVersion: REQUIRED_DOCUMENT_VERSIONS.legalConfirmation,
+      acceptedAllAt: timestamp,
+      ipAddress: input.ipAddress ?? null,
+      userAgent: input.userAgent ?? null,
+    },
+  });
+
+  await recalculateVaultIntegrity(input.userId);
+  revalidatePrivate(input.userId);
+  revalidatePath("/dashboard/settings");
+
+  return getUserDocumentAcceptanceStatus(input.userId);
 }
 
 function normalizeBroadcastChannels(channels: string[]) {
@@ -1581,7 +2939,7 @@ async function resolveBroadcastTargetUsers(input: {
   const rows = await queryMany(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
      inner join balances on balances.user_id = users.id
@@ -1609,7 +2967,7 @@ function buildBroadcastTelegramMessage(input: {
 }
 
 function hasCyrillic(value: string) {
-  return /[А-Яа-яЁё]/.test(value);
+  return /[\u0400-\u04ff]/.test(value);
 }
 
 function looksEnglish(value: string) {
@@ -1627,29 +2985,29 @@ function normalizeTranslationKey(value: string) {
 function createRussianFallbackTitle(title: string) {
   const normalized = normalizeTranslationKey(title);
   if (normalized.includes("transvoucher")) {
-    return "Исправление TransVoucher";
+    return "РСЃРїСЂР°РІР»РµРЅРёРµ TransVoucher";
   }
   if (normalized.includes("payment")) {
-    return "Обновление платежей";
+    return "РћР±РЅРѕРІР»РµРЅРёРµ РїР»Р°С‚РµР¶РµР№";
   }
   if (normalized.includes("withdrawal")) {
-    return "Обновление выводов";
+    return "РћР±РЅРѕРІР»РµРЅРёРµ РІС‹РІРѕРґРѕРІ";
   }
   if (normalized.includes("maintenance")) {
-    return "Техническое обслуживание";
+    return "РўРµС…РЅРёС‡РµСЃРєРѕРµ РѕР±СЃР»СѓР¶РёРІР°РЅРёРµ";
   }
-  return "Уведомление ReboHrome";
+  return "РЈРІРµРґРѕРјР»РµРЅРёРµ ReboHrome";
 }
 
 function createRussianFallbackBody(body: string) {
   const normalized = normalizeTranslationKey(body);
   if (normalized === "we fix" || normalized.includes("fix")) {
-    return "Мы уже работаем над обновлением. Пожалуйста, следите за статусом в ReboHrome.";
+    return "РњС‹ СѓР¶Рµ СЂР°Р±РѕС‚Р°РµРј РЅР°Рґ РѕР±РЅРѕРІР»РµРЅРёРµРј. РџРѕР¶Р°Р»СѓР№СЃС‚Р°, СЃР»РµРґРёС‚Рµ Р·Р° СЃС‚Р°С‚СѓСЃРѕРј РІ ReboHrome.";
   }
   if (normalized.includes("payment")) {
-    return "Мы обновляем платежный маршрут и синхронизацию с провайдером. Пожалуйста, следите за статусом в ReboHrome.";
+    return "РњС‹ РѕР±РЅРѕРІР»СЏРµРј РїР»Р°С‚РµР¶РЅС‹Р№ РјР°СЂС€СЂСѓС‚ Рё СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЋ СЃ РїСЂРѕРІР°Р№РґРµСЂРѕРј. РџРѕР¶Р°Р»СѓР№СЃС‚Р°, СЃР»РµРґРёС‚Рµ Р·Р° СЃС‚Р°С‚СѓСЃРѕРј РІ ReboHrome.";
   }
-  return "Новое архивное уведомление доступно в ReboHrome. Пожалуйста, ознакомьтесь с обновлением на платформе.";
+  return "РќРѕРІРѕРµ Р°СЂС…РёРІРЅРѕРµ СѓРІРµРґРѕРјР»РµРЅРёРµ РґРѕСЃС‚СѓРїРЅРѕ РІ ReboHrome. РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РѕР·РЅР°РєРѕРјСЊС‚РµСЃСЊ СЃ РѕР±РЅРѕРІР»РµРЅРёРµРј РЅР° РїР»Р°С‚С„РѕСЂРјРµ.";
 }
 
 function translateBroadcastToRussian(input: { title: string; body: string }) {
@@ -1667,31 +3025,31 @@ function translateBroadcastToRussian(input: { title: string; body: string }) {
   const normalizedTitle = normalizeTranslationKey(title);
   const normalizedBody = normalizeTranslationKey(body);
   const titleTranslations: Record<string, string> = {
-    "transvoucher stop": "TransVoucher временно остановлен",
-    "transvoucher fix": "Исправление TransVoucher",
-    "new archive drop is live": "Новый архивный дроп уже доступен",
-    "scheduled maintenance": "Плановое техническое обслуживание",
-    "payment verification update": "Обновление проверки платежей",
-    "withdrawal review update": "Обновление проверки выводов",
-    "archive rules updated": "Правила архива обновлены",
-    "security notice": "Уведомление безопасности",
+    "transvoucher stop": "TransVoucher РІСЂРµРјРµРЅРЅРѕ РѕСЃС‚Р°РЅРѕРІР»РµРЅ",
+    "transvoucher fix": "РСЃРїСЂР°РІР»РµРЅРёРµ TransVoucher",
+    "new archive drop is live": "РќРѕРІС‹Р№ Р°СЂС…РёРІРЅС‹Р№ РґСЂРѕРї СѓР¶Рµ РґРѕСЃС‚СѓРїРµРЅ",
+    "scheduled maintenance": "РџР»Р°РЅРѕРІРѕРµ С‚РµС…РЅРёС‡РµСЃРєРѕРµ РѕР±СЃР»СѓР¶РёРІР°РЅРёРµ",
+    "payment verification update": "РћР±РЅРѕРІР»РµРЅРёРµ РїСЂРѕРІРµСЂРєРё РїР»Р°С‚РµР¶РµР№",
+    "withdrawal review update": "РћР±РЅРѕРІР»РµРЅРёРµ РїСЂРѕРІРµСЂРєРё РІС‹РІРѕРґРѕРІ",
+    "archive rules updated": "РџСЂР°РІРёР»Р° Р°СЂС…РёРІР° РѕР±РЅРѕРІР»РµРЅС‹",
+    "security notice": "РЈРІРµРґРѕРјР»РµРЅРёРµ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё",
   };
   const bodyTranslations: Record<string, string> = {
-    "we fix": "Мы уже работаем над обновлением. Пожалуйста, следите за статусом в ReboHrome.",
+    "we fix": "РњС‹ СѓР¶Рµ СЂР°Р±РѕС‚Р°РµРј РЅР°Рґ РѕР±РЅРѕРІР»РµРЅРёРµРј. РџРѕР¶Р°Р»СѓР№СЃС‚Р°, СЃР»РµРґРёС‚Рµ Р·Р° СЃС‚Р°С‚СѓСЃРѕРј РІ ReboHrome.",
     "we are temporarily updating payment routing. please do not create duplicate payments while provider sync is active.":
-      "Мы временно обновляем платежную маршрутизацию. Пожалуйста, не создавайте повторные платежи, пока синхронизация провайдера активна.",
+      "РњС‹ РІСЂРµРјРµРЅРЅРѕ РѕР±РЅРѕРІР»СЏРµРј РїР»Р°С‚РµР¶РЅСѓСЋ РјР°СЂС€СЂСѓС‚РёР·Р°С†РёСЋ. РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РЅРµ СЃРѕР·РґР°РІР°Р№С‚Рµ РїРѕРІС‚РѕСЂРЅС‹Рµ РїР»Р°С‚РµР¶Рё, РїРѕРєР° СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ РїСЂРѕРІР°Р№РґРµСЂР° Р°РєС‚РёРІРЅР°.",
     "a new set of digital collectibles is now available in the marketplace.":
-      "Новый набор цифровых коллекционных карт уже доступен в маркетплейсе.",
+      "РќРѕРІС‹Р№ РЅР°Р±РѕСЂ С†РёС„СЂРѕРІС‹С… РєРѕР»Р»РµРєС†РёРѕРЅРЅС‹С… РєР°СЂС‚ СѓР¶Рµ РґРѕСЃС‚СѓРїРµРЅ РІ РјР°СЂРєРµС‚РїР»РµР№СЃРµ.",
     "rebohrome will be under maintenance while we update archive systems.":
-      "ReboHrome будет временно недоступен, пока мы обновляем архивные системы.",
+      "ReboHrome Р±СѓРґРµС‚ РІСЂРµРјРµРЅРЅРѕ РЅРµРґРѕСЃС‚СѓРїРµРЅ, РїРѕРєР° РјС‹ РѕР±РЅРѕРІР»СЏРµРј Р°СЂС…РёРІРЅС‹Рµ СЃРёСЃС‚РµРјС‹.",
     "we are improving payment verification and provider synchronization.":
-      "Мы улучшаем проверку платежей и синхронизацию с платежным провайдером.",
+      "РњС‹ СѓР»СѓС‡С€Р°РµРј РїСЂРѕРІРµСЂРєСѓ РїР»Р°С‚РµР¶РµР№ Рё СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЋ СЃ РїР»Р°С‚РµР¶РЅС‹Рј РїСЂРѕРІР°Р№РґРµСЂРѕРј.",
     "withdrawal requests are reviewed manually and processed according to archive rules.":
-      "Заявки на вывод проверяются вручную и обрабатываются согласно правилам архива.",
+      "Р—Р°СЏРІРєРё РЅР° РІС‹РІРѕРґ РїСЂРѕРІРµСЂСЏСЋС‚СЃСЏ РІСЂСѓС‡РЅСѓСЋ Рё РѕР±СЂР°Р±Р°С‚С‹РІР°СЋС‚СЃСЏ СЃРѕРіР»Р°СЃРЅРѕ РїСЂР°РІРёР»Р°Рј Р°СЂС…РёРІР°.",
     "please review the latest archive economy rules before continuing withdrawal activity.":
-      "Пожалуйста, ознакомьтесь с актуальными правилами архива перед продолжением операций вывода.",
+      "РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РѕР·РЅР°РєРѕРјСЊС‚РµСЃСЊ СЃ Р°РєС‚СѓР°Р»СЊРЅС‹РјРё РїСЂР°РІРёР»Р°РјРё Р°СЂС…РёРІР° РїРµСЂРµРґ РїСЂРѕРґРѕР»Р¶РµРЅРёРµРј РѕРїРµСЂР°С†РёР№ РІС‹РІРѕРґР°.",
     "please verify your telegram account and review your account security settings.":
-      "Пожалуйста, подтвердите Telegram аккаунт и проверьте настройки безопасности профиля.",
+      "РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РїРѕРґС‚РІРµСЂРґРёС‚Рµ Telegram Р°РєРєР°СѓРЅС‚ Рё РїСЂРѕРІРµСЂСЊС‚Рµ РЅР°СЃС‚СЂРѕР№РєРё Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё РїСЂРѕС„РёР»СЏ.",
   };
 
   return {
@@ -1732,30 +3090,30 @@ function translateBroadcastToEnglish(input: { title: string; body: string }) {
   const normalizedTitle = title.toLowerCase();
   const normalizedBody = body.toLowerCase();
   const titleTranslations: Record<string, string> = {
-    "transvoucher временно остановлен": "TransVoucher maintenance",
-    "новый архивный дроп уже доступен": "New archive drop is live",
-    "плановое техническое обслуживание": "Scheduled maintenance",
-    "обновление проверки платежей": "Payment verification update",
-    "обновление проверки выводов": "Withdrawal review update",
-    "правила архива обновлены": "Archive rules updated",
-    "уведомление безопасности": "Security notice",
+    "transvoucher РІСЂРµРјРµРЅРЅРѕ РѕСЃС‚Р°РЅРѕРІР»РµРЅ": "TransVoucher maintenance",
+    "РЅРѕРІС‹Р№ Р°СЂС…РёРІРЅС‹Р№ РґСЂРѕРї СѓР¶Рµ РґРѕСЃС‚СѓРїРµРЅ": "New archive drop is live",
+    "РїР»Р°РЅРѕРІРѕРµ С‚РµС…РЅРёС‡РµСЃРєРѕРµ РѕР±СЃР»СѓР¶РёРІР°РЅРёРµ": "Scheduled maintenance",
+    "РѕР±РЅРѕРІР»РµРЅРёРµ РїСЂРѕРІРµСЂРєРё РїР»Р°С‚РµР¶РµР№": "Payment verification update",
+    "РѕР±РЅРѕРІР»РµРЅРёРµ РїСЂРѕРІРµСЂРєРё РІС‹РІРѕРґРѕРІ": "Withdrawal review update",
+    "РїСЂР°РІРёР»Р° Р°СЂС…РёРІР° РѕР±РЅРѕРІР»РµРЅС‹": "Archive rules updated",
+    "СѓРІРµРґРѕРјР»РµРЅРёРµ Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё": "Security notice",
   };
   const bodyTranslations: Record<string, string> = {
-    "мы уже работаем над обновлением. пожалуйста, следите за статусом в rebohrome.":
+    "РјС‹ СѓР¶Рµ СЂР°Р±РѕС‚Р°РµРј РЅР°Рґ РѕР±РЅРѕРІР»РµРЅРёРµРј. РїРѕР¶Р°Р»СѓР№СЃС‚Р°, СЃР»РµРґРёС‚Рµ Р·Р° СЃС‚Р°С‚СѓСЃРѕРј РІ rebohrome.":
       "We are already working on the update. Please follow the status in ReboHrome.",
-    "мы временно обновляем платежную маршрутизацию. пожалуйста, не создавайте повторные платежи, пока синхронизация провайдера активна.":
+    "РјС‹ РІСЂРµРјРµРЅРЅРѕ РѕР±РЅРѕРІР»СЏРµРј РїР»Р°С‚РµР¶РЅСѓСЋ РјР°СЂС€СЂСѓС‚РёР·Р°С†РёСЋ. РїРѕР¶Р°Р»СѓР№СЃС‚Р°, РЅРµ СЃРѕР·РґР°РІР°Р№С‚Рµ РїРѕРІС‚РѕСЂРЅС‹Рµ РїР»Р°С‚РµР¶Рё, РїРѕРєР° СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ РїСЂРѕРІР°Р№РґРµСЂР° Р°РєС‚РёРІРЅР°.":
       "We are temporarily updating payment routing. Please do not create duplicate payments while provider sync is active.",
-    "новый набор цифровых коллекционных карт уже доступен в маркетплейсе.":
+    "РЅРѕРІС‹Р№ РЅР°Р±РѕСЂ С†РёС„СЂРѕРІС‹С… РєРѕР»Р»РµРєС†РёРѕРЅРЅС‹С… РєР°СЂС‚ СѓР¶Рµ РґРѕСЃС‚СѓРїРµРЅ РІ РјР°СЂРєРµС‚РїР»РµР№СЃРµ.":
       "A new set of digital collectibles is now available in the marketplace.",
-    "rebohrome будет временно недоступен, пока мы обновляем архивные системы.":
+    "rebohrome Р±СѓРґРµС‚ РІСЂРµРјРµРЅРЅРѕ РЅРµРґРѕСЃС‚СѓРїРµРЅ, РїРѕРєР° РјС‹ РѕР±РЅРѕРІР»СЏРµРј Р°СЂС…РёРІРЅС‹Рµ СЃРёСЃС‚РµРјС‹.":
       "ReboHrome will be under maintenance while we update archive systems.",
-    "мы улучшаем проверку платежей и синхронизацию с платежным провайдером.":
+    "РјС‹ СѓР»СѓС‡С€Р°РµРј РїСЂРѕРІРµСЂРєСѓ РїР»Р°С‚РµР¶РµР№ Рё СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЋ СЃ РїР»Р°С‚РµР¶РЅС‹Рј РїСЂРѕРІР°Р№РґРµСЂРѕРј.":
       "We are improving payment verification and provider synchronization.",
-    "заявки на вывод проверяются вручную и обрабатываются согласно правилам архива.":
+    "Р·Р°СЏРІРєРё РЅР° РІС‹РІРѕРґ РїСЂРѕРІРµСЂСЏСЋС‚СЃСЏ РІСЂСѓС‡РЅСѓСЋ Рё РѕР±СЂР°Р±Р°С‚С‹РІР°СЋС‚СЃСЏ СЃРѕРіР»Р°СЃРЅРѕ РїСЂР°РІРёР»Р°Рј Р°СЂС…РёРІР°.":
       "Withdrawal requests are reviewed manually and processed according to archive rules.",
-    "пожалуйста, ознакомьтесь с актуальными правилами архива перед продолжением операций вывода.":
+    "РїРѕР¶Р°Р»СѓР№СЃС‚Р°, РѕР·РЅР°РєРѕРјСЊС‚РµСЃСЊ СЃ Р°РєС‚СѓР°Р»СЊРЅС‹РјРё РїСЂР°РІРёР»Р°РјРё Р°СЂС…РёРІР° РїРµСЂРµРґ РїСЂРѕРґРѕР»Р¶РµРЅРёРµРј РѕРїРµСЂР°С†РёР№ РІС‹РІРѕРґР°.":
       "Please review the latest Archive Economy Rules before continuing withdrawal activity.",
-    "пожалуйста, подтвердите telegram аккаунт и проверьте настройки безопасности профиля.":
+    "РїРѕР¶Р°Р»СѓР№СЃС‚Р°, РїРѕРґС‚РІРµСЂРґРёС‚Рµ telegram Р°РєРєР°СѓРЅС‚ Рё РїСЂРѕРІРµСЂСЊС‚Рµ РЅР°СЃС‚СЂРѕР№РєРё Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё РїСЂРѕС„РёР»СЏ.":
       "Please verify your Telegram account and review your account security settings.",
   };
 
@@ -1787,15 +3145,15 @@ function buildTelegramBilingualCaption(input: {
   const bodyRu = originalHasCyrillic ? originalBody : russian.body;
 
   return [
-    "<b>🔔 ReboHrome Notification</b>",
+    "<b>рџ”” ReboHrome Notification</b>",
     "",
-    `<b>EN 🇺🇸 — ${escapeTelegramHtml(titleEn).slice(0, 120)}</b>`,
+    `<b>EN рџ‡єрџ‡ё вЂ” ${escapeTelegramHtml(titleEn).slice(0, 120)}</b>`,
     `<blockquote>${escapeTelegramHtml(bodyEn).slice(0, 450)}</blockquote>`,
     "",
-    `<b>RU 🇷🇺 — ${escapeTelegramHtml(titleRu || originalTitle).slice(0, 120)}</b>`,
+    `<b>RU рџ‡·рџ‡є вЂ” ${escapeTelegramHtml(titleRu || originalTitle).slice(0, 120)}</b>`,
     `<blockquote>${escapeTelegramHtml(bodyRu || originalBody).slice(0, 450)}</blockquote>`,
     "",
-    "━━━━━━━━━━━━━━",
+    "в”Ѓв”Ѓв”Ѓв”Ѓв”Ѓв”Ѓв”Ѓв”Ѓв”Ѓв”Ѓв”Ѓв”Ѓв”Ѓв”Ѓ",
     "",
     "<i>ReboHrome Archive</i>",
   ].join("\n");
@@ -2125,6 +3483,7 @@ export async function getProviderIntelligence(input?: {
   range?: ProviderIntelligenceRange;
   environment?: "production" | "test" | "development" | "all";
 }) {
+  return withPerf("query=getProviderIntelligence", async () => {
   await ensureDatabase();
   await ensurePaymentReconciliationRunsTable();
   await ensureArchiveTrustTables();
@@ -2328,6 +3687,7 @@ export async function getProviderIntelligence(input?: {
       count: Number(row.count ?? 0),
     })),
   };
+  });
 }
 
 export async function sendBroadcastNow(input: {
@@ -2789,71 +4149,91 @@ export async function markNotificationRead(input: {
 }
 
 export async function getActiveUserPopups(userId: string) {
-  await ensureDatabase();
-  const user = await getUserById(userId);
+  return withPerf("query=getActiveUserPopups", async () => {
+    await ensureDatabase();
+    const user = await queryOne(
+      `select users.status, users.is_deleted, users.kyc_verified, users.kyc_status,
+              profiles.telegram_verified
+       from users
+       left join profiles on profiles.user_id = users.id
+       where users.id = ?
+       limit 1`,
+      [userId],
+    );
 
-  if (!user || !user.telegramVerified || user.isDeleted || user.status === "blocked") {
-    return [];
-  }
+    const userCanSeeVerifiedPopups =
+      Number(user?.telegram_verified ?? 0) === 1 ||
+      (Number(user?.kyc_verified ?? 0) === 1 &&
+        ["approved", "manual_approved"].includes(String(user?.kyc_status ?? "")));
 
-  const timestamp = nowIso();
-  const notificationRows = await queryMany(
-    `select user_notifications.*
-     from user_notifications
-     inner join broadcasts on broadcasts.id = user_notifications.broadcast_id
-     where user_notifications.user_id = ?
-       and broadcasts.is_active = 1
-       and broadcasts.deleted_at is null
-       and broadcasts.show_as_popup = 1
-       and broadcasts.status in ('sent', 'sending')
-       and user_notifications.show_as_popup = 1
-       and (broadcasts.expires_at is null or broadcasts.expires_at > ?)
-       and (
-         broadcasts.allow_user_dismiss = 0
-         or user_notifications.dismissed_at is null
-     )
-     order by user_notifications.created_at desc
-     limit 1`,
-    [userId, timestamp],
-  );
-  if (notificationRows.length > 0) {
-    return notificationRows.map((row) => normalizeUserNotification(row));
-  }
+    if (
+      !user ||
+      !userCanSeeVerifiedPopups ||
+      Number(user.is_deleted ?? 0) === 1 ||
+      user.status === "blocked"
+    ) {
+      return [];
+    }
 
-  const broadcastRows = await queryMany(
-    `select broadcasts.*
-     from broadcasts
-     where broadcasts.is_active = 1
-       and broadcasts.deleted_at is null
-       and broadcasts.show_as_popup = 1
-       and broadcasts.status in ('sent', 'sending')
-       and (broadcasts.expires_at is null or broadcasts.expires_at > ?)
-       and (
-         broadcasts.target_type not in ('telegram_verified_users', 'verified_users')
-         or ? = 1
+    const timestamp = nowIso();
+    const notificationRows = await queryMany(
+      `select user_notifications.*
+       from user_notifications
+       inner join broadcasts on broadcasts.id = user_notifications.broadcast_id
+       where user_notifications.user_id = ?
+         and broadcasts.is_active = 1
+         and broadcasts.deleted_at is null
+         and broadcasts.show_as_popup = 1
+         and broadcasts.status in ('sent', 'sending')
+         and user_notifications.show_as_popup = 1
+         and (broadcasts.expires_at is null or broadcasts.expires_at > ?)
+         and (
+           broadcasts.allow_user_dismiss = 0
+           or user_notifications.dismissed_at is null
        )
-     order by broadcasts.created_at desc
-     limit 1`,
-    [timestamp, user.telegramVerified ? 1 : 0],
-  );
+       order by user_notifications.created_at desc
+       limit 1`,
+      [userId, timestamp],
+    );
+    if (notificationRows.length > 0) {
+      return notificationRows.map((row) => normalizeUserNotification(row));
+    }
 
-  return broadcastRows.map((row) => {
-    const broadcast = normalizeBroadcast(row);
-    return {
-      id: broadcast.id,
-      userId,
-      broadcastId: broadcast.id,
-      type: broadcast.type,
-      title: broadcast.title,
-      body: broadcast.body,
-      ctaLabel: broadcast.ctaLabel,
-      ctaUrl: broadcast.ctaUrl,
-      showAsPopup: true,
-      dismissedAt: null,
-      readAt: null,
-      expiresAt: broadcast.expiresAt,
-      createdAt: broadcast.createdAt,
-    };
+    const broadcastRows = await queryMany(
+      `select broadcasts.*
+       from broadcasts
+       where broadcasts.is_active = 1
+         and broadcasts.deleted_at is null
+         and broadcasts.show_as_popup = 1
+         and broadcasts.status in ('sent', 'sending')
+         and (broadcasts.expires_at is null or broadcasts.expires_at > ?)
+         and (
+           broadcasts.target_type not in ('telegram_verified_users', 'verified_users')
+           or ? = 1
+         )
+       order by broadcasts.created_at desc
+       limit 1`,
+      [timestamp, userCanSeeVerifiedPopups ? 1 : 0],
+    );
+
+    return broadcastRows.map((row) => {
+      const broadcast = normalizeBroadcast(row);
+      return {
+        id: broadcast.id,
+        userId,
+        broadcastId: broadcast.id,
+        type: broadcast.type,
+        title: broadcast.title,
+        body: broadcast.body,
+        ctaLabel: broadcast.ctaLabel,
+        ctaUrl: broadcast.ctaUrl,
+        showAsPopup: true,
+        dismissedAt: null,
+        readAt: null,
+        expiresAt: broadcast.expiresAt,
+        createdAt: broadcast.createdAt,
+      };
+    });
   });
 }
 
@@ -2899,7 +4279,7 @@ async function assertDatabaseReady() {
   );
 
   if (missingTables.length === 0) {
-    await ensureApplicationColumns();
+    await ensurePaymentSessionLookupIndexes();
     return;
   }
 
@@ -2926,10 +4306,11 @@ async function seedProductsIfEmpty() {
       `insert into products (
         id, title, rarity, price, currency, stock, collection, category, description, tagline,
         default_delivery_type, delivery_digital, delivery_physical, edition, shape,
-        image_url, featured, homepage_featured, featured_started_at, showcase_float,
-        showcase_rotation_seconds, status, archived, palette_glow, palette_glow_soft,
-        palette_core, palette_ring, created_at, updated_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        image_url, featured, homepage_featured, featured_started_at, is_randomized,
+        randomized_outcomes_json, showcase_float, showcase_rotation_seconds, status,
+        archived, palette_glow, palette_glow_soft, palette_core, palette_ring, created_at,
+        updated_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         product.id,
         product.title,
@@ -2950,6 +4331,8 @@ async function seedProductsIfEmpty() {
         product.featured ? 1 : 0,
         product.homepageFeatured ? 1 : 0,
         product.homepageFeatured ? timestamp : null,
+        product.isRandomized ? 1 : 0,
+        toJson(product.randomizedOutcomes ?? []),
         1,
         12,
         product.status,
@@ -2970,7 +4353,7 @@ async function seedAdminAccount() {
   const existing = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
      where users.username = ?
@@ -3104,7 +4487,7 @@ async function getUserRowById(userId: string) {
   return queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
      where users.id = ?
@@ -3118,7 +4501,7 @@ async function getUserRowByTelegramHandle(telegramUsername: string) {
   return queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
      where profiles.telegram_username = ? or profiles.telegram_id = ?
@@ -3131,7 +4514,7 @@ async function getUserRowByTelegramId(telegramId: string | number) {
   return queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
      where profiles.telegram_id = ?
@@ -3144,7 +4527,7 @@ async function getUserRowByUsername(username: string) {
   return queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
      where users.username = ?
@@ -3180,16 +4563,19 @@ async function getTelegramVerificationCodeRowById(verificationId: string) {
 async function assertRegistrationAvailability(input: {
   username: string;
   email: string;
-  telegramUsername: string;
+  telegramUsername?: string | null;
   telegramId?: string | null;
   ignoreVerificationId?: string | null;
 }) {
+  const telegramUsername = input.telegramUsername?.trim() ?? "";
   const [existingUser, existingEmail, existingTelegram] = await Promise.all([
     queryOne("select id from users where username = ? limit 1", [input.username]),
     queryOne("select id from users where email = ? limit 1", [input.email]),
-    queryOne("select user_id from profiles where telegram_username = ? limit 1", [
-      input.telegramUsername,
-    ]),
+    telegramUsername
+      ? queryOne("select user_id from profiles where telegram_username = ? limit 1", [
+          telegramUsername,
+        ])
+      : Promise.resolve(null),
   ]);
 
   if (existingUser) {
@@ -3200,7 +4586,7 @@ async function assertRegistrationAvailability(input: {
     throw new Error("This email is already connected to another account.");
   }
 
-  if (existingTelegram) {
+  if (telegramUsername && existingTelegram) {
     throw new Error("This Telegram username is already connected to another account.");
   }
 
@@ -3228,7 +4614,7 @@ async function assertRegistrationAvailability(input: {
      limit 1`,
     [
       TELEGRAM_VERIFICATION_PURPOSE_REGISTRATION,
-      input.telegramUsername,
+      telegramUsername || null,
       nowIso(),
       input.ignoreVerificationId ?? null,
       input.ignoreVerificationId ?? null,
@@ -3258,15 +4644,6 @@ function assertPasswordStrength(password: string) {
 
 async function getBalanceRowByUserId(userId: string) {
   return queryOne("select * from balances where user_id = ? limit 1", [userId]);
-}
-
-async function getLatestCompletedDeposit(userId: string) {
-  const row = await queryOne(
-    "select * from deposits where user_id = ? and status = 'completed' order by created_at desc limit 1",
-    [userId],
-  );
-
-  return row ? normalizeDeposit(row) : null;
 }
 
 async function getUserAndBalance(userId: string) {
@@ -3437,6 +4814,13 @@ async function resolveCheckoutProducts(
     if (product.stock < quantity) {
       throw new Error(`${product.title} no longer has enough stock.`);
     }
+
+    const randomization = await resolveRandomizedProductDisclosure(product);
+    if (!randomization.isReady) {
+      throw new Error(
+        `${product.title} is temporarily unavailable while its draw probabilities are being updated.`,
+      );
+    }
   }
 
   return { productMap, productIds };
@@ -3468,7 +4852,49 @@ function parseCheckoutSessionItems(itemsJson: string) {
 }
 
 function normalizeProviderStatus(value: string | null | undefined) {
-  return String(value ?? "").trim().toLowerCase();
+  const raw = String(value ?? "").trim().toLowerCase();
+  const normalized = normalizeTransVoucherStatus(raw);
+
+  if (normalized === "succeeded") {
+    return "succeeded";
+  }
+
+  if (normalized === "declined") {
+    return "declined";
+  }
+
+  if (normalized === "failed") {
+    return "failed";
+  }
+
+  if (normalized === "expired") {
+    return "expired";
+  }
+
+  if (normalized === "processing") {
+    return "processing";
+  }
+
+  if (normalized === "pending") {
+    return "pending";
+  }
+
+  return raw || "unknown";
+}
+
+async function ensurePaymentSessionLookupIndexes() {
+  if (!paymentLookupIndexesPromise) {
+    paymentLookupIndexesPromise = Promise.all([
+      execute(
+        "create index if not exists idx_payment_sessions_active_lookup on payment_sessions(user_id, status, expires_at, created_at)",
+      ),
+      execute(
+        "create index if not exists idx_deposit_payment_sessions_active_lookup on deposit_payment_sessions(user_id, status, expires_at, created_at)",
+      ),
+    ]).then(() => undefined);
+  }
+
+  return paymentLookupIndexesPromise;
 }
 
 function mapProviderStatusToTransactionStatus(
@@ -3487,18 +4913,25 @@ function mapProviderStatusToTransactionStatus(
   if (
     normalized === "succeeded" ||
     normalized === "completed" ||
+    normalized === "complete" ||
     normalized === "paid" ||
-    normalized === "success"
+    normalized === "success" ||
+    normalized === "approved" ||
+    normalized === "captured" ||
+    normalized === "confirmed"
   ) {
     return "completed";
   }
 
   if (
     normalized === "failed" ||
+    normalized === "fail" ||
     normalized === "declined" ||
+    normalized === "decline" ||
     normalized === "cancelled" ||
     normalized === "canceled" ||
-    normalized === "rejected"
+    normalized === "rejected" ||
+    normalized === "error"
   ) {
     return "failed";
   }
@@ -3526,17 +4959,25 @@ function mapProviderStatusToCheckoutSessionStatus(
   if (
     normalized === "succeeded" ||
     normalized === "completed" ||
+    normalized === "complete" ||
     normalized === "paid" ||
-    normalized === "success"
+    normalized === "success" ||
+    normalized === "approved" ||
+    normalized === "captured" ||
+    normalized === "confirmed"
   ) {
     return "completed";
   }
 
   if (
     normalized === "failed" ||
+    normalized === "fail" ||
     normalized === "declined" ||
+    normalized === "decline" ||
     normalized === "cancelled" ||
-    normalized === "canceled"
+    normalized === "canceled" ||
+    normalized === "rejected" ||
+    normalized === "error"
   ) {
     return "failed";
   }
@@ -3564,17 +5005,25 @@ function mapProviderStatusToDepositSessionStatus(
   if (
     normalized === "succeeded" ||
     normalized === "completed" ||
+    normalized === "complete" ||
     normalized === "paid" ||
-    normalized === "success"
+    normalized === "success" ||
+    normalized === "approved" ||
+    normalized === "captured" ||
+    normalized === "confirmed"
   ) {
     return "completed";
   }
 
   if (
     normalized === "failed" ||
+    normalized === "fail" ||
     normalized === "declined" ||
+    normalized === "decline" ||
     normalized === "cancelled" ||
-    normalized === "canceled"
+    normalized === "canceled" ||
+    normalized === "rejected" ||
+    normalized === "error"
   ) {
     return "failed";
   }
@@ -3669,15 +5118,15 @@ function formatTelegramTimestamp(value: string) {
 function formatCleanOperationalWithdrawalStatus(status: WithdrawalStatus) {
   switch (status) {
     case "pending":
-      return "🟡 PENDING";
+      return "рџџЎ PENDING";
     case "approved":
-      return "🟣 APPROVED";
+      return "рџџЈ APPROVED";
     case "processing":
-      return "🔵 PROCESSING";
+      return "рџ”µ PROCESSING";
     case "completed":
-      return "🟢 COMPLETED";
+      return "рџџў COMPLETED";
     case "declined":
-      return "🔴 DECLINED";
+      return "рџ”ґ DECLINED";
     default:
       return String(status).toUpperCase();
   }
@@ -3686,15 +5135,15 @@ function formatCleanOperationalWithdrawalStatus(status: WithdrawalStatus) {
 function getWithdrawalStatusIndicator(status: WithdrawalStatus) {
   switch (status) {
     case "pending":
-      return "🟡 PENDING";
+      return "рџџЎ PENDING";
     case "approved":
-      return "🟣 APPROVED";
+      return "рџџЈ APPROVED";
     case "processing":
-      return "🔵 PROCESSING";
+      return "рџ”µ PROCESSING";
     case "completed":
-      return "🟢 COMPLETED";
+      return "рџџў COMPLETED";
     case "declined":
-      return "🔴 DECLINED";
+      return "рџ”ґ DECLINED";
     default:
       return String(status).toUpperCase();
   }
@@ -3703,15 +5152,15 @@ function getWithdrawalStatusIndicator(status: WithdrawalStatus) {
 function formatOperationalWithdrawalStatus(status: WithdrawalStatus) {
   switch (status) {
     case "pending":
-      return "🟡 PENDING";
+      return "рџџЎ PENDING";
     case "approved":
-      return "🟣 APPROVED";
+      return "рџџЈ APPROVED";
     case "processing":
-      return "🔵 PROCESSING";
+      return "рџ”µ PROCESSING";
     case "completed":
-      return "🟢 COMPLETED";
+      return "рџџў COMPLETED";
     case "declined":
-      return "🔴 DECLINED";
+      return "рџ”ґ DECLINED";
     default:
       return String(status).toUpperCase();
   }
@@ -3934,7 +5383,7 @@ async function sendDepositFailureNotification(params: {
       amount: params.amount,
       currency: params.currency,
       paymentMethod: params.provider
-        ? `${params.paymentMethod} · ${params.provider}`
+        ? `${params.paymentMethod} В· ${params.provider}`
         : params.paymentMethod,
       reason: params.reason,
       referenceId: params.depositId,
@@ -3966,7 +5415,7 @@ async function sendPurchaseFailureNotification(params: {
       amount: params.amount,
       currency: params.currency,
       paymentMethod: params.provider
-        ? `${params.paymentMethod} · ${params.provider}`
+        ? `${params.paymentMethod} В· ${params.provider}`
         : params.paymentMethod,
       reason: params.reason,
       referenceId: params.orderId,
@@ -4428,34 +5877,6 @@ async function answerTelegramCallbackSafely(input: {
   }
 }
 
-function getWithdrawalTargetStatus(actionType: string): WithdrawalStatus {
-  switch (actionType) {
-    case "approve":
-      return "approved";
-    case "processing":
-      return "processing";
-    case "decline":
-    case "reject":
-      return "declined";
-    case "complete":
-    case "paid":
-      return "completed";
-    default:
-      throw new Error("Unsupported withdrawal action.");
-  }
-}
-
-function normalizeTelegramWithdrawalAction(actionType: string) {
-  const normalized = actionType.trim().toLowerCase();
-  if (normalized === "reject") {
-    return "decline";
-  }
-  if (normalized === "paid") {
-    return "complete";
-  }
-  return normalized;
-}
-
 function createTelegramActionTokenId() {
   return randomBytes(9).toString("hex");
 }
@@ -4562,6 +5983,7 @@ function getAllowedTelegramWithdrawalActions(status: WithdrawalStatus) {
       ] as const;
     case "approved":
       return [
+        { id: "xrocket", label: "Send xRocket" },
         { id: "processing", label: "Processing" },
         { id: "complete", label: "Mark Paid" },
         { id: "decline", label: "Reject" },
@@ -5053,93 +6475,6 @@ async function getAdminByTelegramCallbackSender(callback: NonNullable<TelegramUp
     label: callbackUsername ?? callback.from.first_name ?? telegramId,
     authorized: false,
   };
-}
-
-async function processWithdrawalDirectCallback(callback: NonNullable<TelegramUpdate["callback_query"]>) {
-  const parts = String(callback.data ?? "").split(":");
-  const [, rawAction, withdrawalId] = parts;
-  const actionType = normalizeTelegramWithdrawalAction(rawAction ?? "");
-
-  if (parts.length !== 3 || !actionType || !withdrawalId) {
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "Malformed withdrawal action.",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Malformed withdrawal callback data." };
-  }
-
-  let targetStatus: WithdrawalStatus;
-  try {
-    targetStatus = getWithdrawalTargetStatus(actionType);
-  } catch {
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "Unsupported withdrawal action.",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Unsupported withdrawal action." };
-  }
-
-  const context = await getWithdrawalNotificationContext(withdrawalId);
-
-  if (!context) {
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "Withdrawal request not found.",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Withdrawal request not found." };
-  }
-
-  const sender = await getAdminByTelegramCallbackSender(callback);
-  const chatId = String(callback.message?.chat.id ?? "");
-  const chatAllowed =
-    !ADMIN_TELEGRAM_CHAT_ID || !chatId || chatId === String(ADMIN_TELEGRAM_CHAT_ID);
-
-  if (!sender.authorized || !sender.admin || !chatAllowed) {
-    await insertWithdrawalHistory({
-      withdrawalId,
-      actionType: `unauthorized-${actionType}`,
-      previousStatus: context.request.status,
-      nextStatus: context.request.status,
-      source: "telegram-unauthorized",
-      adminUsername: sender.label,
-      note: `Unauthorized Telegram callback attempt from ${sender.label}.`,
-    });
-    revalidateAdmin();
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "Not authorized",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Unauthorized callback sender." };
-  }
-
-  if (!canTransitionWithdrawalStatus(context.request.status, targetStatus)) {
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: `Cannot change ${context.request.status} to ${targetStatus}.`,
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Invalid withdrawal transition." };
-  }
-
-  await updateWithdrawalStatus({
-    withdrawalId,
-    status: targetStatus,
-    adminUserId: sender.admin.id,
-    adminNote: `Telegram action by ${sender.label}: ${rawAction}`,
-    source: "telegram",
-  });
-
-  await answerTelegramCallbackSafely({
-    callbackQueryId: callback.id,
-    text: `${formatCleanOperationalWithdrawalStatus(targetStatus)} applied`,
-    showAlert: false,
-  });
-
-  return { ok: true as const, withdrawalId, status: targetStatus };
 }
 
 function parseTelegramSendsCommand(text: string) {
@@ -5806,157 +7141,20 @@ export async function processTelegramUpdate(update: TelegramUpdate) {
     return processBroadcastTelegramCallback(callback);
   }
 
-  if (callback?.data?.startsWith("withdrawal:")) {
-    return processWithdrawalDirectCallback(callback);
-  }
-
-  if (!callback?.data || !callback.data.startsWith("wd:")) {
-    return { ok: true as const, skipped: true as const };
-  }
-
-  const [prefix, tokenId, signature] = callback.data.split(":");
-
-  if (prefix !== "wd" || !tokenId || !signature) {
+  if (callback?.data?.startsWith("withdrawal:") || callback?.data?.startsWith("wd:")) {
     await answerTelegramCallbackSafely({
       callbackQueryId: callback.id,
-      text: "Malformed action payload.",
-      showAlert: true,
+      text: "Withdrawals are disabled.",
     });
-    return { ok: false as const, error: "Malformed callback data." };
+    return { ok: false as const, error: "Withdrawals are currently disabled." };
   }
 
-  const tokenRow = await queryOne(
-    "select * from telegram_action_tokens where id = ? limit 1",
-    [tokenId],
-  );
-
-  if (!tokenRow) {
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "This action token is no longer valid.",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Unknown callback token." };
-  }
-
-  const storedSignature = String(tokenRow.callback_signature);
-  const withdrawalId = String(tokenRow.withdrawal_id);
-  const actionType = String(tokenRow.action_type);
-  const expectedSignature = createTelegramCallbackSignature({
-    tokenId,
-    actionType,
-    withdrawalId,
-  });
-
-  if (signature !== storedSignature || signature !== expectedSignature) {
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "Signature validation failed.",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Invalid callback signature." };
-  }
-
-  if (tokenRow.consumed_at || new Date(String(tokenRow.expires_at)).getTime() < Date.now()) {
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "This action is no longer active.",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Expired or consumed callback token." };
-  }
-
-  const context = await getWithdrawalNotificationContext(withdrawalId);
-
-  if (!context) {
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "Withdrawal request not found.",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Withdrawal request not found." };
-  }
-
-  const callbackUsername = callback.from.username
-    ? normalizeTelegramUsername(callback.from.username)
-    : null;
-
-  const admin =
-    callbackUsername ? await getAdminByTelegramUsername(callbackUsername) : null;
-  const chatId = String(callback.message?.chat.id ?? "");
-
-  if (!admin || (ADMIN_TELEGRAM_CHAT_ID && chatId !== String(ADMIN_TELEGRAM_CHAT_ID))) {
-    await insertWithdrawalHistory({
-      withdrawalId,
-      actionType: `unauthorized-${actionType}`,
-      previousStatus: context.request.status,
-      nextStatus: context.request.status,
-      source: "telegram-unauthorized",
-      adminUsername: callbackUsername ?? callback.from.first_name ?? "unknown",
-      note: "Unauthorized Telegram callback attempt.",
-    });
-    revalidateAdmin();
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "Unauthorized action.",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Unauthorized callback sender." };
-  }
-
-  if (context.request.status !== String(tokenRow.allowed_from_status)) {
-    await execute(
-      "update telegram_action_tokens set consumed_at = ? where id = ? and consumed_at is null",
-      [nowIso(), tokenId],
-    );
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: `Request is already ${context.request.status}.`,
-      showAlert: false,
-    });
-    return { ok: false as const, error: "Callback token is stale." };
-  }
-
-  const targetStatus = getWithdrawalTargetStatus(actionType);
-
-  if (!canTransitionWithdrawalStatus(context.request.status, targetStatus)) {
-    await execute(
-      "update telegram_action_tokens set consumed_at = ? where id = ? and consumed_at is null",
-      [nowIso(), tokenId],
-    );
-    await answerTelegramCallbackSafely({
-      callbackQueryId: callback.id,
-      text: "This transition is not allowed.",
-      showAlert: true,
-    });
-    return { ok: false as const, error: "Invalid withdrawal transition." };
-  }
-
-  await execute(
-    "update telegram_action_tokens set consumed_at = ? where id = ? and consumed_at is null",
-    [nowIso(), tokenId],
-  );
-
-  await updateWithdrawalStatus({
-    withdrawalId,
-    status: targetStatus,
-    adminUserId: admin.id,
-    adminNote: `Telegram action: ${actionType}`,
-    source: "telegram",
-  });
-
-  await answerTelegramCallbackSafely({
-    callbackQueryId: callback.id,
-    text: `${formatCleanOperationalWithdrawalStatus(targetStatus)} applied`,
-    showAlert: false,
-  });
-
-  return { ok: true as const, withdrawalId, status: targetStatus };
+  return { ok: true as const, skipped: true as const };
 }
 
 function revalidateStorefront() {
   revalidatePath("/");
-  revalidatePath("/marketplace");
+  revalidatePath("/dashboard/marketplace");
   revalidatePath("/product/[id]", "page");
   revalidatePath("/cart");
   revalidatePath("/checkout");
@@ -5970,7 +7168,7 @@ function revalidatePrivate(userId?: string) {
   revalidatePath("/dashboard/deposit");
   revalidatePath("/dashboard/withdraw");
   revalidatePath("/dashboard/transactions");
-  revalidatePath("/withdraw");
+  revalidatePath("/dashboard/withdraw");
   if (userId) {
     revalidatePath(`/success?user=${userId}`);
   }
@@ -6008,6 +7206,12 @@ export async function ensureDatabase() {
           password_hash text not null,
           status text not null,
           require_password_reset integer not null default 0,
+          withdraw_access_enabled integer not null default 1,
+          withdraw_access_disabled_at text,
+          withdraw_access_disabled_by text,
+          withdraw_access_disabled_reason text,
+          withdraw_access_restored_at text,
+          withdraw_access_restored_by text,
           is_deleted integer not null default 0,
           deleted_at text,
           deleted_by text,
@@ -6028,7 +7232,33 @@ export async function ensureDatabase() {
           telegram_verified_at text,
           telegram_linked_at text,
           withdrawal_wallet text,
+          payment_phone text,
+          gate2_first_name text,
+          gate2_last_name text,
+          gate2_phone text,
+          gate2_details_updated_at text,
           verified integer not null default 1,
+          created_at text not null,
+          updated_at text not null
+        )`,
+      );
+
+      await execute(
+        `create table if not exists user_kyc_profiles (
+          id text primary key,
+          user_id text not null unique,
+          first_name text not null,
+          last_name text not null,
+          date_of_birth text not null,
+          country_of_residence text not null,
+          document_country text not null,
+          email text not null,
+          phone text,
+          address_line1 text,
+          address_line2 text,
+          city text,
+          postal_code text,
+          state text,
           created_at text not null,
           updated_at text not null
         )`,
@@ -6119,6 +7349,8 @@ export async function ensureDatabase() {
           total_deposited integer not null default 0,
           total_spent integer not null default 0,
           total_withdrawn integer not null default 0,
+          payout_bonus_override_enabled integer not null default 0,
+          payout_bonus_percent integer,
           updated_at text not null
         )`,
       );
@@ -6158,6 +7390,8 @@ export async function ensureDatabase() {
           featured integer not null default 0,
           homepage_featured integer not null default 0,
           featured_started_at text,
+          is_randomized integer not null default 0,
+          randomized_outcomes_json text not null default '[]',
           showcase_float real not null default 1,
           showcase_rotation_seconds integer not null default 12,
           status text not null default 'active',
@@ -6503,9 +7737,32 @@ export async function ensureDatabase() {
       await ensureColumn("payment_sessions", "raw_provider_response text");
       await ensureColumn("deposit_payment_sessions", "transvoucher_transaction_id text");
       await ensureColumn("deposit_payment_sessions", "transvoucher_reference_id text");
-      await ensureColumn("deposit_payment_sessions", "payment_url text");
-      await ensureColumn("deposit_payment_sessions", "provider_status text");
-      await ensureColumn("deposit_payment_sessions", "raw_provider_response text");
+  await ensureColumn("deposit_payment_sessions", "payment_url text");
+  await ensureColumn("deposit_payment_sessions", "provider_status text");
+  await ensureColumn("deposit_payment_sessions", "raw_provider_response text");
+  await ensureColumn("deposit_payment_sessions", "provider_key text");
+  await ensureColumn("deposit_payment_sessions", "provider_click_id text");
+  await ensureColumn("deposit_payment_sessions", "provider_order_id text");
+  await ensureColumn("deposit_payment_sessions", "provider_environment text");
+  await ensureColumn("deposit_payment_sessions", "provider_checkout_env text");
+  await ensureColumn("deposit_payment_sessions", "balance_credited_at text");
+  await ensureColumn("deposit_payment_sessions", "amount_cents integer");
+  await ensureColumn("deposit_payment_sessions", "provider_session_key text");
+  await ensureColumn("deposit_payment_sessions", "provider_checkout_jwt text");
+  await ensureColumn("deposit_payment_sessions", "provider_payment_id text");
+  await ensureColumn("deposit_payment_sessions", "provider_event_id text");
+  await ensureColumn("deposit_payment_sessions", "provider_raw_status text");
+  await ensureColumn("deposit_payment_sessions", "provider_raw_payload text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_customer_id text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_payment_id text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_webhook_info text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_settlement_type text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_last4 text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_bin text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_card_token text");
+  await ensureColumn("deposit_payment_sessions", "idempotency_key text");
+  await ensureColumn("deposit_payment_sessions", "completed_at text");
+  await ensureColumn("deposit_payment_sessions", "failed_at text");
       await ensureColumn("transactions", "original_amount integer");
       await ensureColumn("transactions", "original_currency text");
       await ensureColumn("transactions", "display_currency text");
@@ -6536,6 +7793,11 @@ export async function ensureDatabase() {
       await ensureColumn("products", "featured integer not null default 0");
       await ensureColumn("products", "homepage_featured integer not null default 0");
       await ensureColumn("products", "featured_started_at text");
+      await ensureColumn("products", "is_randomized integer not null default 0");
+      await ensureColumn(
+        "products",
+        "randomized_outcomes_json text not null default '[]'",
+      );
       await ensureColumn("products", "image_path text");
       await ensureColumn("products", "image_updated_at text");
       await ensureColumn("products", "showcase_float real not null default 1");
@@ -6588,6 +7850,10 @@ export async function ensureDatabase() {
         "update products set homepage_featured = 0 where homepage_featured is null",
       );
       await execute(
+        "update products set randomized_outcomes_json = '[]' where randomized_outcomes_json is null or trim(randomized_outcomes_json) = ''",
+      );
+      await migrateLegacyRandomizedProducts();
+      await execute(
         "update products set showcase_float = 1 where showcase_float is null or showcase_float <= 0",
       );
       await execute(
@@ -6618,6 +7884,7 @@ export async function ensureDatabase() {
 function buildMarketplaceQuery(filters: MarketplaceFilters) {
   const where: string[] = ["archived = 0", "status = 'active'"];
   const args: SqlValue[] = [];
+  const limit = filters.limit && filters.limit > 0 ? Math.min(filters.limit, 48) : null;
 
   if (filters.search) {
     where.push("(title like ? or collection like ? or category like ?)");
@@ -6657,16 +7924,18 @@ function buildMarketplaceQuery(filters: MarketplaceFilters) {
   return {
     sql: `select * from products ${
       where.length ? `where ${where.join(" and ")}` : ""
-    } order by ${orderBy}`,
-    args,
+    } order by ${orderBy}${limit ? " limit ?" : ""}`,
+    args: limit ? [...args, limit] : args,
   };
 }
 
 export async function getMarketplaceProducts(filters: MarketplaceFilters = {}) {
+  return withPerf("query=getMarketplaceProducts", async () => {
   await ensureDatabase();
   const query = buildMarketplaceQuery(filters);
   const rows = await queryMany(query.sql, query.args);
   return rows.map((row) => normalizeProduct(row));
+  });
 }
 
 export async function getProductById(id: string) {
@@ -6676,6 +7945,77 @@ export async function getProductById(id: string) {
     [id],
   );
   return row ? normalizeProduct(row) : null;
+}
+
+async function resolveRandomizedProductDisclosure(
+  product: ProductRecord,
+): Promise<RandomizedProductDisclosure> {
+  if (!product.isRandomized) {
+    return {
+      isRandomized: false,
+      isReady: true,
+      totalProbabilityBps: 0,
+      outcomes: [],
+    };
+  }
+
+  const totalProbabilityBps = product.randomizedOutcomes.reduce(
+    (total, outcome) => total + outcome.probabilityBps,
+    0,
+  );
+
+  if (!hasValidRandomizedProductOdds(product)) {
+    return {
+      isRandomized: true,
+      isReady: false,
+      totalProbabilityBps,
+      outcomes: [],
+    };
+  }
+
+  const outcomeIds = product.randomizedOutcomes.map((outcome) => outcome.productId);
+  const placeholders = outcomeIds.map(() => "?").join(", ");
+  const rows = await queryMany(
+    `select * from products
+     where id in (${placeholders})
+       and archived = 0
+       and status = 'active'
+       and stock > 0`,
+    outcomeIds,
+  );
+  const productsById = new Map(
+    rows.map((row) => {
+      const outcomeProduct = normalizeProduct(row);
+      return [outcomeProduct.id, outcomeProduct];
+    }),
+  );
+  const outcomes = product.randomizedOutcomes.flatMap((outcome) => {
+    const outcomeProduct = productsById.get(outcome.productId);
+    return outcomeProduct
+      ? [{ product: outcomeProduct, probabilityBps: outcome.probabilityBps }]
+      : [];
+  });
+
+  return {
+    isRandomized: true,
+    isReady: outcomes.length === product.randomizedOutcomes.length,
+    totalProbabilityBps,
+    outcomes,
+  };
+}
+
+export async function getRandomizedProductDisclosure(productId: string) {
+  await ensureDatabase();
+  const row = await queryOne(
+    "select * from products where id = ? and archived = 0 and status = 'active' limit 1",
+    [productId],
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  return resolveRandomizedProductDisclosure(normalizeProduct(row));
 }
 
 export async function getRelatedProducts(id: string, limit = 4) {
@@ -6797,7 +8137,7 @@ export async function createTelegramVerificationChallenge(input: {
     throw new Error("Enter a valid email address.");
   }
 
-  if (!isValidTelegramUsername(telegramUsername)) {
+  if (input.telegramUsername?.trim() && !isValidTelegramUsername(telegramUsername)) {
     throw new Error("Telegram username must start with @ and use 5-32 valid characters.");
   }
 
@@ -7104,7 +8444,7 @@ export async function completeTelegramRegistrationVerification(input: {
 export async function registerUser(input: {
   username: string;
   email: string;
-  telegramUsername: string;
+  telegramUsername?: string | null;
   password?: string;
   passwordHash?: string;
   telegramId?: string | null;
@@ -7116,7 +8456,9 @@ export async function registerUser(input: {
 
   const username = normalizeUsername(input.username);
   const email = normalizeEmail(input.email);
-  const telegramUsername = normalizeTelegramUsername(input.telegramUsername);
+  const telegramUsername = input.telegramUsername?.trim()
+    ? normalizeTelegramUsername(input.telegramUsername)
+    : normalizeTelegramUsername(`@${username}`);
   const telegramId = normalizeTelegramNumericId(input.telegramId);
 
   if (username.length < 3) {
@@ -7177,9 +8519,9 @@ export async function registerUser(input: {
       telegramUsername,
       telegramId || null,
       input.telegramChatId ?? null,
-      1,
-      input.telegramVerifiedAt ?? timestamp,
-      input.telegramLinkedAt ?? input.telegramVerifiedAt ?? timestamp,
+      input.telegramVerifiedAt ? 1 : 0,
+      input.telegramVerifiedAt ?? null,
+      input.telegramLinkedAt ?? input.telegramVerifiedAt ?? null,
       null,
       1,
       timestamp,
@@ -7206,7 +8548,7 @@ export async function authenticateUser(input: {
   const row = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
      where users.username = ?
@@ -7276,7 +8618,7 @@ export async function getUserBySessionToken(token: string) {
   const row = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified, sessions.expires_at
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified, sessions.expires_at
      from sessions
      inner join users on users.id = sessions.user_id
      inner join profiles on profiles.user_id = users.id
@@ -7310,6 +8652,747 @@ export async function getUserById(id: string) {
   await ensureDatabase();
   const row = await getUserRowById(id);
   return row ? normalizeUser(row) : null;
+}
+
+export async function requireKycVerified(userId: string, message: string) {
+  await ensureDatabase();
+  const user = await getUserById(userId);
+
+  if (!user) {
+    throw new Error("User not found.");
+  }
+
+  if (!userHasKycAccess(user)) {
+    throw new KycVerificationRequiredError(message);
+  }
+
+  return user;
+}
+
+function normalizeKycName(value: unknown, label: string) {
+  const next = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+  const normalized = next.toLowerCase();
+  const blockedPlaceholders = new Set(["admin", "test", "username", "user", "rebohrome"]);
+  if (!next) {
+    throw new Error(
+      label === "First name"
+        ? "Please enter your legal first name."
+        : "Please enter your legal last name.",
+    );
+  }
+  if (next.length < 2 || next.length > 80) {
+    throw new Error(`${label} must be 2-80 characters.`);
+  }
+  if (!/^[\p{L}\s'-]+$/u.test(next)) {
+    throw new Error(`${label} can contain only letters, spaces, hyphen, and apostrophe.`);
+  }
+  if (blockedPlaceholders.has(normalized)) {
+    throw new Error(`${label} must be your real legal name, not a placeholder.`);
+  }
+  return next;
+}
+
+function normalizeIsoCountry(value: unknown, label: string) {
+  const next = typeof value === "string" ? value.trim().toUpperCase() : "";
+  if (!/^[A-Z]{2}$/.test(next)) {
+    throw new Error(`${label} must be a valid ISO country code.`);
+  }
+  return next;
+}
+
+function normalizeKycDateOfBirth(value: unknown) {
+  const next = typeof value === "string" ? value.trim() : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(next)) {
+    throw new Error("Date of birth must be a valid date.");
+  }
+  const date = new Date(`${next}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== next) {
+    throw new Error("Date of birth must be a valid date.");
+  }
+  const now = new Date();
+  let age = now.getUTCFullYear() - date.getUTCFullYear();
+  const monthDelta = now.getUTCMonth() - date.getUTCMonth();
+  if (monthDelta < 0 || (monthDelta === 0 && now.getUTCDate() < date.getUTCDate())) {
+    age -= 1;
+  }
+  if (age < 18) {
+    throw new Error("You must be at least 18 years old to complete verification.");
+  }
+  return next;
+}
+
+function normalizeKycEmail(value: unknown) {
+  const email = normalizeEmail(typeof value === "string" ? value : "");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error("Enter a valid email address.");
+  }
+  return email;
+}
+
+function normalizeKycOptionalText(value: unknown, maxLength = 160) {
+  const next = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+  if (!next) {
+    return null;
+  }
+  if (next.length > maxLength) {
+    throw new Error("KYC profile field is too long.");
+  }
+  return next;
+}
+
+function normalizeKycPhone(value: unknown) {
+  const next = normalizeKycOptionalText(value, 32);
+  if (!next) {
+    return null;
+  }
+  if (!/^\+?[0-9\s().-]{7,32}$/.test(next)) {
+    throw new Error("Enter a valid phone number.");
+  }
+  return next;
+}
+
+function normalizeGate2Phone(value: unknown) {
+  const raw = typeof value === "string" ? value : "";
+  const digits = raw.replace(/\D/g, "");
+  if (!/^\d{8,15}$/.test(digits)) {
+    throw new Error("Gate #2 phone must contain 8-15 digits.");
+  }
+  return digits;
+}
+
+function normalizeGate2Name(value: unknown, label: string, username?: string | null) {
+  const next = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+  const lower = next.toLowerCase();
+  const normalizedUsername = (username ?? "").trim().toLowerCase();
+
+  if (next.length < 2 || next.length > 80) {
+    throw new Error(`${label} must be 2-80 characters.`);
+  }
+
+  if (!/^[\p{L}\s'-]+$/u.test(next)) {
+    throw new Error(`${label} may contain letters, spaces, hyphens, and apostrophes only.`);
+  }
+
+  if (["admin", "test", "rebohrome"].includes(lower)) {
+    throw new Error(`${label} must be your real legal name.`);
+  }
+
+  if (normalizedUsername && lower === normalizedUsername && !/^[\p{L}]+(?:[\s'-][\p{L}]+)+$/u.test(next)) {
+    throw new Error(`${label} must not be your account username.`);
+  }
+
+  return next;
+}
+
+function normalizeOptionalGate2Details(input: {
+  firstName: unknown;
+  lastName: unknown;
+  phone: unknown;
+  username?: string | null;
+}) {
+  const rawFirstName = normalizeEditableOptionalString(input.firstName);
+  const rawLastName = normalizeEditableOptionalString(input.lastName);
+  const rawPhone = normalizeEditableOptionalString(input.phone);
+
+  if (!rawFirstName && !rawLastName && !rawPhone) {
+    return {
+      firstName: null,
+      lastName: null,
+      phone: null,
+    };
+  }
+
+  return {
+    firstName: normalizeGate2Name(rawFirstName, "Gate #2 first name", input.username),
+    lastName: normalizeGate2Name(rawLastName, "Gate #2 last name", input.username),
+    phone: normalizeGate2Phone(rawPhone),
+  };
+}
+
+function buildKycFullAddress(profile: UserKycProfileRecord) {
+  const parts = [
+    profile.addressLine1,
+    profile.addressLine2,
+    profile.city,
+    profile.state,
+    profile.postalCode,
+    profile.countryOfResidence,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
+export async function getUserKycProfile(userId: string) {
+  await ensureDatabase();
+  const row = await queryOne(
+    "select * from user_kyc_profiles where user_id = ? limit 1",
+    [userId],
+  );
+  return row ? normalizeUserKycProfile(row) : null;
+}
+
+export async function upsertUserKycProfile(input: {
+  userId: string;
+  firstName: unknown;
+  lastName: unknown;
+  dateOfBirth: unknown;
+  countryOfResidence: unknown;
+  documentCountry: unknown;
+  email: unknown;
+  phone?: unknown;
+  addressLine1?: unknown;
+  addressLine2?: unknown;
+  city?: unknown;
+  postalCode?: unknown;
+  state?: unknown;
+  auditMeta?: {
+    ipAddress: string;
+    country: string;
+    userAgent: string;
+    language: string;
+    route: string;
+    timestamp: string;
+  };
+}) {
+  await ensureDatabase();
+  await requireDocumentAcceptanceForUser(input.userId);
+  const user = await getUserById(input.userId);
+  if (!user) {
+    throw new Error("User not found.");
+  }
+  if (userHasKycAccess(user)) {
+    throw new Error("KYC details cannot be edited after verification.");
+  }
+  if (["submitted", "review"].includes(user.kycStatus)) {
+    throw new Error("KYC details cannot be edited while verification is in review.");
+  }
+
+  const timestamp = nowIso();
+  const existing = await getUserKycProfile(input.userId);
+  const profileId = existing?.id ?? randomUUID();
+  const values = {
+    firstName: normalizeKycName(input.firstName, "First name"),
+    lastName: normalizeKycName(input.lastName, "Last name"),
+    dateOfBirth: normalizeKycDateOfBirth(input.dateOfBirth),
+    countryOfResidence: normalizeIsoCountry(input.countryOfResidence, "Country of residence"),
+    documentCountry: normalizeIsoCountry(input.documentCountry, "Document country"),
+    email: normalizeKycEmail(input.email),
+    phone: normalizeKycPhone(input.phone),
+    addressLine1: normalizeKycOptionalText(input.addressLine1),
+    addressLine2: normalizeKycOptionalText(input.addressLine2),
+    city: normalizeKycOptionalText(input.city, 80),
+    postalCode: normalizeKycOptionalText(input.postalCode, 32),
+    state: normalizeKycOptionalText(input.state, 80),
+  };
+
+  await execute(
+    `insert into user_kyc_profiles (
+      id, user_id, first_name, last_name, date_of_birth, country_of_residence,
+      document_country, email, phone, address_line1, address_line2, city,
+      postal_code, state, created_at, updated_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    on conflict(user_id) do update set
+      first_name = excluded.first_name,
+      last_name = excluded.last_name,
+      date_of_birth = excluded.date_of_birth,
+      country_of_residence = excluded.country_of_residence,
+      document_country = excluded.document_country,
+      email = excluded.email,
+      phone = excluded.phone,
+      address_line1 = excluded.address_line1,
+      address_line2 = excluded.address_line2,
+      city = excluded.city,
+      postal_code = excluded.postal_code,
+      state = excluded.state,
+      updated_at = excluded.updated_at`,
+    [
+      profileId,
+      input.userId,
+      values.firstName,
+      values.lastName,
+      values.dateOfBirth,
+      values.countryOfResidence,
+      values.documentCountry,
+      values.email,
+      values.phone,
+      values.addressLine1,
+      values.addressLine2,
+      values.city,
+      values.postalCode,
+      values.state,
+      existing?.createdAt ?? timestamp,
+      timestamp,
+    ],
+  );
+
+  if (input.auditMeta) {
+    await insertSecurityAuditEvent({
+      eventType: existing ? "kyc_profile_updated" : "kyc_profile_created",
+      userId: user.id,
+      username: user.username,
+      telegramUsername: user.telegramUsername,
+      role: user.role,
+      ...input.auditMeta,
+    });
+  }
+
+  return getUserKycProfile(input.userId);
+}
+
+export async function createVeriffKycSessionForUser(input: {
+  userId: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+  await requireDocumentAcceptanceForUser(input.userId);
+  const user = await getUserById(input.userId);
+
+  if (!user) {
+    throw new Error("User not found.");
+  }
+
+  if (userHasKycAccess(user)) {
+    return {
+      alreadyVerified: true as const,
+      verificationUrl: null,
+      sessionId: user.veriffSessionId,
+      status: user.kycStatus,
+    };
+  }
+
+  const kycProfile = await getUserKycProfile(user.id);
+  if (!kycProfile) {
+    throw new Error("Please enter your verification details before starting KYC.");
+  }
+
+  const session = await createVeriffSession({
+    userId: user.id,
+    firstName: kycProfile.firstName,
+    lastName: kycProfile.lastName,
+    dateOfBirth: kycProfile.dateOfBirth,
+    documentCountry: kycProfile.documentCountry,
+    email: kycProfile.email,
+    phone: kycProfile.phone,
+    address: {
+      fullAddress: buildKycFullAddress(kycProfile),
+      city: kycProfile.city,
+      postcode: kycProfile.postalCode,
+      state: kycProfile.state,
+    },
+  });
+  const timestamp = input.timestamp || nowIso();
+
+  await execute(
+    `update users set
+      kyc_status = 'session_created',
+      kyc_verified = 0,
+      kyc_provider = 'veriff',
+      veriff_session_id = ?,
+      veriff_verification_id = ?,
+      veriff_status = ?,
+      kyc_started_at = coalesce(kyc_started_at, ?),
+      updated_at = ?
+     where id = ?`,
+    [
+      session.sessionId,
+      session.verificationId,
+      session.status,
+      timestamp,
+      timestamp,
+      user.id,
+    ],
+  );
+
+  await insertSecurityAuditEvent({
+    eventType: "kyc_session_created",
+    userId: user.id,
+    username: user.username,
+    telegramUsername: user.telegramUsername,
+    role: user.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp: input.timestamp,
+  });
+  await insertSecurityAuditEvent({
+    eventType: "verification_started",
+    userId: user.id,
+    username: user.username,
+    telegramUsername: user.telegramUsername,
+    role: user.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp: input.timestamp,
+  });
+
+  revalidatePrivate(user.id);
+
+  return {
+    alreadyVerified: false as const,
+    verificationUrl: session.verificationUrl,
+    sessionId: session.sessionId,
+    status: "session_created" as const,
+  };
+}
+
+async function getUserRowByVeriffIdentifiers(input: {
+  userId?: string | null;
+  sessionId?: string | null;
+  verificationId?: string | null;
+}) {
+  if (input.userId) {
+    const row = await getUserRowById(input.userId);
+    if (row) {
+      return row;
+    }
+  }
+
+  if (!input.sessionId && !input.verificationId) {
+    return null;
+  }
+
+  const sessionId = input.sessionId ?? null;
+  const verificationId = input.verificationId ?? null;
+
+  return queryOne(
+    `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
+      profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified
+     from users
+     inner join profiles on profiles.user_id = users.id
+     where (? is not null and users.veriff_session_id = ?)
+        or (? is not null and users.veriff_verification_id = ?)
+     limit 1`,
+    [
+      sessionId,
+      sessionId,
+      verificationId,
+      verificationId,
+    ],
+  );
+}
+
+async function applyVeriffDecisionToUser(input: {
+  userId?: string | null;
+  sessionId?: string | null;
+  verificationId?: string | null;
+  payload: unknown;
+  source: "webhook" | "manual_sync" | "user_sync";
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  const row = await getUserRowByVeriffIdentifiers({
+    userId: input.userId,
+    sessionId: input.sessionId,
+    verificationId: input.verificationId,
+  });
+
+  if (!row) {
+    throw new Error("Veriff user was not found.");
+  }
+
+  const user = normalizeUser(row);
+  const normalized = normalizeVeriffStatus(input.payload);
+  const timestamp = input.timestamp || nowIso();
+  const sessionId = input.sessionId ?? null;
+  const verificationId = input.verificationId ?? null;
+  const knownIdentifiers = new Set(
+    [
+      user.veriffSessionId,
+      user.veriffVerificationId,
+    ].filter(Boolean),
+  );
+
+  if (input.userId && input.userId !== user.id) {
+    throw new Error("Veriff webhook user mismatch.");
+  }
+
+  if (sessionId && knownIdentifiers.size > 0 && !knownIdentifiers.has(sessionId)) {
+    throw new Error("Veriff webhook session mismatch.");
+  }
+
+  if (verificationId && knownIdentifiers.size > 0 && !knownIdentifiers.has(verificationId)) {
+    throw new Error("Veriff webhook verification mismatch.");
+  }
+
+  const currentTerminalStatus = [
+    "approved",
+    "manual_approved",
+    "declined",
+    "manual_declined",
+    "manual_rejected",
+    "expired",
+    "abandoned",
+  ].includes(user.kycStatus);
+  const nextStatus =
+    normalized.decision || !currentTerminalStatus
+      ? normalized.internalStatus
+      : user.kycStatus;
+  const nextVerified =
+    normalized.decision || !currentTerminalStatus
+      ? normalized.verified
+      : isKycVerified(user);
+
+  console.info("[KYC_VERIFF] decision_normalized", {
+    userId: user.id,
+    source: input.source,
+    sessionId,
+    verificationId,
+    providerStatus: normalized.status,
+    decision: normalized.decision,
+    nextStatus,
+    verified: nextVerified,
+  });
+
+  await execute(
+    `update users set
+      kyc_status = ?,
+      kyc_verified = ?,
+      kyc_provider = 'veriff',
+      veriff_session_id = coalesce(?, veriff_session_id),
+      veriff_verification_id = coalesce(?, veriff_verification_id),
+      veriff_status = ?,
+      veriff_decision = ?,
+      veriff_reason = ?,
+      kyc_submitted_at = case when ? in ('submitted', 'review') then coalesce(kyc_submitted_at, ?) else kyc_submitted_at end,
+      kyc_verified_at = case when ? = 1 then ? else kyc_verified_at end,
+      kyc_declined_at = case when ? in ('declined', 'expired', 'abandoned') then ? else kyc_declined_at end,
+      kyc_last_webhook_at = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      nextStatus,
+      nextVerified ? 1 : 0,
+      sessionId,
+      verificationId,
+      normalized.status,
+      normalized.decision,
+      normalized.reason,
+      nextStatus,
+      timestamp,
+      nextVerified ? 1 : 0,
+      timestamp,
+      nextStatus,
+      timestamp,
+      timestamp,
+      timestamp,
+      user.id,
+    ],
+  );
+
+  await insertSecurityAuditEvent({
+    eventType:
+      input.source === "webhook"
+        ? "kyc_webhook_received"
+        : input.source === "manual_sync"
+          ? "kyc_manual_veriff_sync"
+          : "kyc_user_veriff_sync",
+    userId: user.id,
+    username: user.username,
+    telegramUsername: user.telegramUsername,
+    role: user.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp,
+  });
+
+  const statusEvent =
+    nextVerified
+      ? "kyc_approved"
+      : nextStatus === "declined" || nextStatus === "manual_rejected"
+        ? "kyc_declined"
+        : nextStatus === "expired"
+          ? "kyc_expired"
+          : nextStatus === "abandoned"
+            ? "verification_abandoned"
+            : nextStatus === "review" || nextStatus === "submitted"
+              ? "kyc_review"
+              : null;
+
+  if (nextVerified && normalized.decision === "approved" && input.source === "webhook") {
+    await insertSecurityAuditEvent({
+      eventType: "veriff_webhook_approved",
+      userId: user.id,
+      username: user.username,
+      telegramUsername: user.telegramUsername,
+      role: user.role,
+      ipAddress: input.ipAddress,
+      country: input.country,
+      userAgent: input.userAgent,
+      language: input.language,
+      route: input.route,
+      timestamp,
+    });
+  }
+
+  if (statusEvent) {
+    await insertSecurityAuditEvent({
+      eventType: statusEvent,
+      userId: user.id,
+      username: user.username,
+      telegramUsername: user.telegramUsername,
+      role: user.role,
+      ipAddress: input.ipAddress,
+      country: input.country,
+      userAgent: input.userAgent,
+      language: input.language,
+      route: input.route,
+      timestamp,
+    });
+  }
+
+  revalidatePrivate(user.id);
+  revalidateAdmin();
+
+  return {
+    ok: true,
+    userId: user.id,
+    status: nextStatus,
+    verified: nextVerified,
+    decision: normalized.decision,
+  };
+}
+
+export async function processVeriffWebhook(input: {
+  rawBody: string;
+  signature: string | null;
+  authClient: string | null;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+
+  if (!getVeriffWebhookAuthClientIsValid(input.authClient)) {
+    console.warn("[VERIFF_WEBHOOK] invalid auth client");
+    throw new Error("Invalid Veriff auth client.");
+  }
+
+  if (!verifyVeriffWebhookSignature(input.rawBody, input.signature)) {
+    console.warn("[VERIFF_WEBHOOK] invalid signature");
+    throw new Error("Invalid Veriff webhook signature.");
+  }
+
+  const payload = JSON.parse(input.rawBody) as Record<string, unknown>;
+  const fields = extractVeriffWebhookFields(payload);
+  const userId = extractVeriffUserId(fields.vendorData);
+
+  console.info("[VERIFF_WEBHOOK] received", {
+    eventType: fields.eventType,
+    hasVendorData: Boolean(fields.vendorData),
+    hasSessionId: Boolean(fields.sessionId),
+    userId,
+  });
+
+  return applyVeriffDecisionToUser({
+    userId,
+    sessionId: fields.sessionId,
+    verificationId: fields.verificationId,
+    payload,
+    source: "webhook",
+    ...input,
+  });
+}
+
+export async function syncCurrentUserVeriffStatus(input: {
+  userId: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+  const user = await getUserById(input.userId);
+
+  if (!user) {
+    throw new Error("User not found.");
+  }
+
+  if (!user.veriffSessionId) {
+    throw new Error("No Veriff session is linked to this account.");
+  }
+
+  const payload = await fetchVeriffSessionStatus(user.veriffSessionId);
+  const fields = extractVeriffWebhookFields(payload);
+
+  return applyVeriffDecisionToUser({
+    userId: user.id,
+    sessionId: fields.sessionId ?? user.veriffSessionId,
+    verificationId: fields.verificationId ?? user.veriffVerificationId,
+    payload,
+    source: "user_sync",
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp: input.timestamp,
+  });
+}
+
+export async function logKycVerificationResultViewed(input: {
+  userId: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+  const user = await getUserById(input.userId);
+
+  if (!user) {
+    return;
+  }
+
+  await insertSecurityAuditEvent({
+    eventType: "callback_viewed",
+    userId: user.id,
+    username: user.username,
+    telegramUsername: user.telegramUsername,
+    role: user.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp: input.timestamp,
+  });
+  await insertSecurityAuditEvent({
+    eventType: "verification_result_viewed",
+    userId: user.id,
+    username: user.username,
+    telegramUsername: user.telegramUsername,
+    role: user.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp: input.timestamp,
+  });
 }
 
 export async function getBalanceByUserId(userId: string) {
@@ -7456,6 +9539,71 @@ export async function updateUserProfile(
   revalidatePrivate(userId);
 }
 
+export async function updateUserGate2PaymentDetails(input: {
+  userId: string;
+  firstName: unknown;
+  lastName: unknown;
+  phone: unknown;
+  ipAddress?: string;
+  country?: string;
+  userAgent?: string;
+  language?: string;
+  route?: string;
+  timestamp?: string;
+}) {
+  await ensureDatabase();
+  const user = await getUserById(input.userId);
+
+  if (!user) {
+    throw new Error("User not found.");
+  }
+
+  const firstName = normalizeGate2Name(input.firstName, "First name", user.username);
+  const lastName = normalizeGate2Name(input.lastName, "Last name", user.username);
+  const phone = normalizeGate2Phone(input.phone);
+  const timestamp = input.timestamp || nowIso();
+  const eventType = user.gate2DetailsUpdatedAt ? "gate2_details_updated" : "gate2_details_created";
+
+  await execute(
+    `update profiles set
+      gate2_first_name = ?,
+      gate2_last_name = ?,
+      gate2_phone = ?,
+      payment_phone = ?,
+      gate2_details_updated_at = ?,
+      updated_at = ?
+     where user_id = ?`,
+    [firstName, lastName, phone, phone, timestamp, timestamp, input.userId],
+  );
+
+  await insertSecurityAuditEvent({
+    eventType,
+    userId: user.id,
+    username: user.username,
+    telegramUsername: user.telegramUsername,
+    role: user.role,
+    ipAddress: input.ipAddress ?? "unknown",
+    country: input.country ?? "unknown",
+    userAgent: input.userAgent ?? "unknown",
+    language: input.language ?? "unknown",
+    route: input.route ?? "/dashboard/settings",
+    timestamp,
+  });
+
+  revalidatePrivate(input.userId);
+}
+
+export async function updateUserPaymentPhone(userId: string, paymentPhone: unknown) {
+  const user = await getUserById(userId);
+  const profile = user ? await getUserKycProfile(user.id) : null;
+  await updateUserGate2PaymentDetails({
+    userId,
+    firstName: user?.gate2FirstName ?? profile?.firstName ?? "",
+    lastName: user?.gate2LastName ?? profile?.lastName ?? "",
+    phone: paymentPhone,
+  });
+}
+
 export async function updateUserEmailAddress(input: {
   userId: string;
   currentPassword: string;
@@ -7472,7 +9620,7 @@ export async function updateUserEmailAddress(input: {
   const userRow = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified
      from users
      inner join profiles on profiles.user_id = users.id
      where users.id = ?
@@ -7563,6 +9711,7 @@ export async function updateUserEmailAddress(input: {
 }
 
 export async function getDashboardStats(userId: string): Promise<DashboardStat[]> {
+  return withPerf("query=getDashboardStats", async () => {
   await ensureDatabase();
   const [balanceRow, purchaseRow, cardsRow] = await Promise.all([
     getBalanceRowByUserId(userId),
@@ -7604,6 +9753,7 @@ export async function getDashboardStats(userId: string): Promise<DashboardStat[]
       accent: "amber",
     },
   ];
+  });
 }
 
 export async function getFinancialOverview(userId: string) {
@@ -7629,8 +9779,11 @@ export async function getFinancialOverview(userId: string) {
   };
 }
 
-export async function getUserOrders(userId: string) {
+export async function getUserOrders(userId: string, limit?: number) {
+  return withPerf("query=getUserOrders", async () => {
   await ensureDatabase();
+  const limitClause = limit ? " limit ?" : "";
+  const args: SqlValue[] = limit ? [userId, limit] : [userId];
   const rows = await queryMany(
     `select
       orders.*,
@@ -7639,15 +9792,19 @@ export async function getUserOrders(userId: string) {
      left join order_items on order_items.order_id = orders.id
      where orders.user_id = ?
      group by orders.id
-     order by orders.created_at desc`,
-    [userId],
+     order by orders.created_at desc${limitClause}`,
+    args,
   );
 
   return rows.map((row) => normalizeOrder(row));
+  });
 }
 
-export async function getUserInventory(userId: string) {
+export async function getUserInventory(userId: string, limit?: number) {
+  return withPerf("query=getUserInventory", async () => {
   await ensureDatabase();
+  const limitClause = limit ? " limit ?" : "";
+  const args: SqlValue[] = limit ? [userId, limit] : [userId];
   const rows = await queryMany(
     `select
       owned_cards.id as inventory_id,
@@ -7658,8 +9815,8 @@ export async function getUserInventory(userId: string) {
      from owned_cards
      inner join products on products.id = owned_cards.product_id
      where owned_cards.user_id = ?
-     order by owned_cards.acquired_at desc`,
-    [userId],
+     order by owned_cards.acquired_at desc${limitClause}`,
+    args,
   );
 
   return rows.map((row) => ({
@@ -7669,15 +9826,18 @@ export async function getUserInventory(userId: string) {
     acquiredAt: String(row.acquired_at),
     product: normalizeProduct(row),
   }));
+  });
 }
 
 export async function getUserTransactions(userId: string, limit = 12) {
+  return withPerf("query=getUserTransactions", async () => {
   await ensureDatabase();
   const rows = await queryMany(
     "select * from transactions where user_id = ? order by created_at desc limit ?",
     [userId, limit],
   );
   return rows.map((row) => normalizeTransaction(row));
+  });
 }
 
 export async function getUserDeposits(userId: string, limit = 12) {
@@ -7729,12 +9889,14 @@ export async function getDepositOutcomeById(userId: string, depositId: string) {
 }
 
 export async function getUserWithdrawals(userId: string, limit = 12) {
+  return withPerf("query=getUserWithdrawals", async () => {
   await ensureDatabase();
   const rows = await queryMany(
     "select * from withdrawal_requests where user_id = ? order by created_at desc limit ?",
     [userId, limit],
   );
   return rows.map((row) => normalizeWithdrawal(row));
+  });
 }
 
 export async function createDeposit(input: {
@@ -7749,6 +9911,7 @@ export async function createDeposit(input: {
   cryptoNetwork?: CryptoNetwork | null;
 }) {
   await ensureDatabase();
+  await requireDocumentAcceptanceForUser(input.userId);
 
   if (input.amount <= 0) {
     throw new Error("Deposit amount must be greater than zero.");
@@ -7922,144 +10085,9 @@ export async function createWithdrawalRequest(input: {
   amount: number;
   walletAddress?: string;
 }) {
+  void input;
   await ensureDatabase();
-
-  if (input.amount <= 0) {
-    throw new Error("Withdrawal amount must be greater than zero.");
-  }
-
-  if (input.amount < 500) {
-    throw new Error("Minimum withdrawal amount is $500.");
-  }
-
-  const account = await getUserAndBalance(input.userId);
-
-  if (!account) {
-    throw new Error("Unable to load collector account.");
-  }
-
-  if (!account.user.telegramId) {
-    throw new Error("Add your Telegram ID in settings before requesting a withdrawal.");
-  }
-  const walletAddress = (input.walletAddress || account.user.withdrawalWallet || "").trim();
-  if (!walletAddress) {
-    throw new Error("Add your USDT BEP20 wallet address in settings before requesting a withdrawal.");
-  }
-
-  if (!isValidUsdtBep20Wallet(walletAddress)) {
-    throw new Error("Please enter a valid USDT BEP20 wallet address.");
-  }
-
-  if (account.balance.available < input.amount) {
-    await notifySafely(() =>
-      sendTelegramAdminMessage(
-        buildTelegramFailureMessage({
-          title: "Balance Validation Failed",
-          username: account.user.username,
-          telegramUsername: account.user.telegramUsername,
-          amount: input.amount,
-          currency: "USD",
-          paymentMethod: "Archive Balance",
-          reason: "Withdrawal blocked because available balance is below requested amount.",
-          referenceId: createReadableId("WDR"),
-          timestamp: nowIso(),
-        }),
-      ),
-    );
-    throw new Error("Insufficient balance for this withdrawal request.");
-  }
-
-  const withdrawalId = createReadableId("WDR");
-  const timestamp = nowIso();
-  const latestDeposit = await getLatestCompletedDeposit(input.userId);
-  const payout = calculateWithdrawalPayout({
-    requestedAmount: input.amount,
-    totalDepositedUsd: account.balance.totalDeposited,
-  });
-
-  await execute(
-    `insert into withdrawal_requests (
-      id, user_id, amount, requested_amount, base_payout_percent,
-      bonus_payout_percent, final_payout_percent, payout_amount, wallet_address,
-      wallet_usdt_bep20, telegram_id, status, source_deposit_id,
-      source_card_masked, source_cardholder_name, admin_note, telegram_chat_id,
-      telegram_message_id, telegram_sync_status, telegram_synced_at, telegram_last_error,
-      last_action_source, last_updated_by_admin_id, status_updated_by,
-      status_updated_at, created_at, updated_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      withdrawalId,
-      input.userId,
-      input.amount,
-      payout.requestedAmount,
-      payout.basePayoutPercent,
-      payout.bonusPayoutPercent,
-      payout.finalPayoutPercent,
-      payout.payoutAmount,
-      walletAddress,
-      walletAddress,
-      account.user.telegramId,
-      "pending",
-      latestDeposit?.id ?? null,
-      latestDeposit?.cardMasked ?? null,
-      latestDeposit?.cardholderName ?? null,
-      null,
-      null,
-      null,
-      "pending",
-      null,
-      null,
-      "system",
-      null,
-      "system",
-      timestamp,
-      timestamp,
-      timestamp,
-    ],
-  );
-
-  await execute(
-    `update balances set
-      available = available - ?,
-      pending_withdrawal = pending_withdrawal + ?,
-      updated_at = ?
-     where user_id = ?`,
-    [input.amount, input.amount, timestamp, input.userId],
-  );
-
-  await createTransactionRecord({
-    userId: input.userId,
-    kind: "withdrawal",
-    amount: -input.amount,
-    status: "pending",
-    referenceId: withdrawalId,
-    summary: "Withdrawal request submitted",
-    meta: {
-      walletAddress,
-      requestedAmount: payout.requestedAmount,
-      basePayoutPercent: payout.basePayoutPercent,
-      bonusPayoutPercent: payout.bonusPayoutPercent,
-      finalPayoutPercent: payout.finalPayoutPercent,
-      payoutAmount: payout.payoutAmount,
-      totalDepositedUsd: account.balance.totalDeposited,
-    },
-  });
-
-  await insertWithdrawalHistory({
-    withdrawalId,
-    actionType: "request-created",
-    previousStatus: null,
-    nextStatus: "pending",
-    source: "system",
-    note: "Withdrawal request submitted by collector.",
-  });
-
-  await notifySafely(() => syncWithdrawalTelegramMessage(withdrawalId));
-
-  revalidatePrivate(input.userId);
-  revalidateAdmin();
-
-  return withdrawalId;
+  throw new Error("Withdrawals are currently disabled.");
 }
 
 export async function createCheckoutPaymentSession(input: {
@@ -8079,11 +10107,25 @@ export async function createCheckoutPaymentSession(input: {
     throw new Error("Crypto checkout is not available in the TransVoucher flow.");
   }
 
+  const account = await getUserAndBalance(input.userId);
+
+  if (!account) {
+    throw new Error("Unable to load collector account.");
+  }
+
+  if (!userHasKycAccess(account.user)) {
+    throw new KycVerificationRequiredError(
+      "Please complete verification before making a card payment.",
+    );
+  }
+
   const existingSession = await getActivePaymentSession(input.userId, "purchase");
   if (existingSession) {
     return {
       sessionId: existingSession.id,
       paymentUrl: existingSession.paymentUrl,
+      embedUrl: null,
+      useEmbed: false,
       redirectPath:
         existingSession.provider === "TransVoucher"
           ? `/payment/transvoucher?session=${encodeURIComponent(existingSession.id)}`
@@ -8091,12 +10133,6 @@ export async function createCheckoutPaymentSession(input: {
       activeSession: existingSession,
       reusedExistingSession: true,
     };
-  }
-
-  const account = await getUserAndBalance(input.userId);
-
-  if (!account) {
-    throw new Error("Unable to load collector account.");
   }
 
   const { productMap } = await resolveCheckoutProducts(input.items);
@@ -8277,6 +10313,8 @@ export async function createCheckoutPaymentSession(input: {
   return {
     sessionId,
     paymentUrl: payment.paymentUrl,
+    embedUrl: payment.embedUrl,
+    useEmbed: payment.useEmbed && Boolean(payment.embedUrl),
     redirectPath: `/payment/transvoucher?session=${encodeURIComponent(sessionId)}`,
     activeSession: null,
     reusedExistingSession: false,
@@ -8287,6 +10325,7 @@ export async function getActivePaymentSession(
   userId: string,
   type?: "deposit" | "purchase",
 ): Promise<ActivePaymentSessionRecord | null> {
+  return withPerf("query=getActivePaymentSession", async () => {
   await ensureDatabase();
   const now = nowIso();
   const activeStatuses = ["created", "pending", "attempting", "processing"];
@@ -8326,6 +10365,41 @@ export async function getActivePaymentSession(
     (a, b) =>
       new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   )[0] ?? null;
+  });
+}
+
+async function getActiveDepositPaymentSessionForProvider(
+  userId: string,
+  providerKey: PaymentProviderKey,
+  providerName: Exclude<PaymentProviderName, "Internal Wallet">,
+): Promise<ActivePaymentSessionRecord | null> {
+  const cacheKey = `${userId}:${providerKey}`;
+  const cachedSession = activeDepositSessionCache.get(cacheKey);
+  if (cachedSession && cachedSession.cachedUntil > Date.now()) {
+    return cachedSession.session;
+  }
+
+  const activeStatuses = ["created", "pending", "attempting", "processing"];
+  const row = await queryOne(
+    `select * from deposit_payment_sessions
+     where user_id = ?
+       and (provider_key = ? or payment_provider = ?)
+       and status in (${activeStatuses.map(() => "?").join(", ")})
+       and expires_at > ?
+     limit 1`,
+    [userId, providerKey, providerName, ...activeStatuses, nowIso()],
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  const session = normalizeActiveDepositSession(row);
+  activeDepositSessionCache.set(cacheKey, {
+    session,
+    cachedUntil: Date.now() + 60_000,
+  });
+  return session;
 }
 
 export async function getActivePaymentSessions(userId: string) {
@@ -8338,22 +10412,462 @@ export async function getActivePaymentSessions(userId: string) {
   );
 }
 
-export async function checkActivePaymentSessionStatus(input: {
+export async function getWertGateCheckoutSession(input: {
   userId: string;
+  sessionId: string;
+}) {
+  await ensureDatabase();
+
+  const row = await queryOne(
+    `select *
+     from deposit_payment_sessions
+     where id = ?
+       and user_id = ?
+       and provider_key = 'wert'
+     limit 1`,
+    [input.sessionId, input.userId],
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  let widgetOptions: WertWidgetOptions | null = null;
+  if (row.raw_provider_response) {
+    try {
+      const parsed = JSON.parse(String(row.raw_provider_response)) as {
+        widgetOptions?: WertWidgetOptions;
+      };
+      widgetOptions = parsed.widgetOptions ?? null;
+    } catch {
+      widgetOptions = null;
+    }
+  }
+
+  return {
+    session: normalizeActiveDepositSession(row),
+    widgetOptions,
+    contractAddress: row.contract_address ? String(row.contract_address) : null,
+    contractOrderId: row.contract_order_id ? String(row.contract_order_id) : null,
+    recipientWallet: row.recipient_wallet ? String(row.recipient_wallet) : null,
+    nftDeliveryMode: row.nft_delivery_mode ? String(row.nft_delivery_mode) : null,
+  };
+}
+
+export async function getCoinflowGateCheckoutSession(input: {
+  userId: string;
+  sessionId: string;
+}) {
+  await ensureDatabase();
+  await ensureCoinflowDepositPaymentSessionColumns();
+  const row = await queryOne(
+    `select *
+     from deposit_payment_sessions
+     where id = ?
+       and user_id = ?
+       and provider_key = 'coinflow'
+     limit 1`,
+    [input.sessionId, input.userId],
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    session: normalizeActiveDepositSession(row),
+    amountCents: Number(row.amount_cents ?? Math.round(Number(row.original_amount) * 100)),
+    environment: row.provider_environment ? String(row.provider_environment) : "sandbox",
+    checkoutEnv: row.provider_checkout_env ? String(row.provider_checkout_env) : "sandbox",
+    credited: Boolean(row.balance_credited_at),
+    providerPaymentId: row.provider_payment_id ? String(row.provider_payment_id) : null,
+    webhookInfo: row.coinflow_webhook_info ? String(row.coinflow_webhook_info) : null,
+  };
+}
+
+export async function createCoinflowCheckoutTokenForSession(input: {
+  userId: string;
+  sessionId: string;
+}) {
+  await ensureDatabase();
+  await ensureCoinflowDepositPaymentSessionColumns();
+  const row = await queryOne(
+    `select deposit_payment_sessions.*, users.email as user_email, users.kyc_status as user_kyc_status
+     from deposit_payment_sessions
+     join users on users.id = deposit_payment_sessions.user_id
+     where deposit_payment_sessions.id = ?
+       and deposit_payment_sessions.user_id = ?
+       and deposit_payment_sessions.provider_key = 'coinflow'
+     limit 1`,
+    [input.sessionId, input.userId],
+  );
+
+  if (!row) {
+    throw new Error("Gate #4 session not found.");
+  }
+
+  const status = String(row.status);
+  if (!["created", "pending", "attempting", "processing"].includes(status)) {
+    throw new Error("Gate #4 session is no longer active.");
+  }
+
+  const sessionId = String(row.id);
+  const userId = String(row.user_id);
+  const localTransactionId = String(row.transaction_id ?? row.transvoucher_reference_id ?? row.id);
+  const amount = Number(row.original_amount);
+  const amountCents = Number(row.amount_cents ?? Math.round(amount * 100));
+  const email = String(row.user_email ?? "");
+  const idempotencyKey = String(row.idempotency_key ?? `coinflow_credit:${sessionId}`);
+
+  if (!email) {
+    throw new Error("Gate #4 requires an email address before payment.");
+  }
+
+  const token = await createCoinflowCheckoutToken({
+    sessionId,
+    userId,
+    localTransactionId,
+    idempotencyKey,
+    amount,
+    amountCents,
+    currency: "USD",
+    email,
+    kycStatus: row.user_kyc_status ? String(row.user_kyc_status) : null,
+  });
+  const timestamp = nowIso();
+
+  await execute(
+    `update deposit_payment_sessions set
+      provider_session_key = ?,
+      provider_checkout_jwt = ?,
+      provider_status = 'pending',
+      raw_provider_response = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      token.sessionKey,
+      token.checkoutJwtToken,
+      toJson(token.raw),
+      timestamp,
+      sessionId,
+    ],
+  );
+
+  const publicConfig = getCoinflowPublicConfig();
+  const sessionEnvironment = String(row.provider_environment ?? publicConfig.serverEnv ?? "sandbox");
+
+  if (sessionEnvironment !== publicConfig.serverEnv || publicConfig.env !== publicConfig.serverEnv) {
+    console.error(`[COINFLOW_GATE4][${publicConfig.serverEnv}][card] config_environment_mismatch`, {
+      sessionId,
+      sessionEnvironment,
+      frontendEnvironment: publicConfig.env,
+    });
+    throw new Error("Gate #4 checkout is not configured correctly.");
+  }
+
+  const webhookInfo = buildCoinflowWebhookInfo({
+    sessionId,
+    userId,
+    localTransactionId,
+    idempotencyKey,
+    amount,
+    amountCents,
+    currency: "USD",
+    email,
+    kycStatus: row.user_kyc_status ? String(row.user_kyc_status) : null,
+  });
+  const chargebackProtectionData = buildCoinflowChargebackProtectionData({
+    sessionId,
+    userId,
+    localTransactionId,
+    idempotencyKey,
+    amount,
+    amountCents,
+    currency: "USD",
+    email,
+    kycStatus: row.user_kyc_status ? String(row.user_kyc_status) : null,
+  });
+
+  return {
+    session: {
+      id: sessionId,
+      amount,
+      amountCents,
+      currency: "USD" as const,
+      status: "pending",
+    },
+    coinflow: {
+      merchantId: publicConfig.merchantId,
+      env: publicConfig.env,
+      sessionKey: token.sessionKey,
+      checkoutJwtToken: token.checkoutJwtToken,
+      subtotal: {
+        cents: amountCents,
+        currency: "USD" as const,
+      },
+      email,
+      settlementType: publicConfig.settlementType,
+      webhookInfo,
+      chargebackProtectionData,
+      enableApplePay: publicConfig.enableApplePay,
+      enableGooglePay: publicConfig.enableGooglePay,
+      enableCard: publicConfig.enableCard,
+      enableAch: publicConfig.enableAch,
+      enableSepa: publicConfig.enableSepa,
+      enableUkFasterPayments: publicConfig.enableUkFasterPayments,
+      enablePix: publicConfig.enablePix,
+    },
+  };
+}
+
+export async function getCoinflowGateSessionStatus(input: {
+  userId: string;
+  sessionId: string;
+}) {
+  await ensureDatabase();
+  await ensureCoinflowDepositPaymentSessionColumns();
+  const row = await queryOne(
+    `select *
+     from deposit_payment_sessions
+     where id = ?
+       and user_id = ?
+       and provider_key = 'coinflow'
+     limit 1`,
+    [input.sessionId, input.userId],
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  const providerStatus = String(row.provider_status ?? row.status ?? "pending");
+  const normalized = normalizeCoinflowStatus(providerStatus);
+  return {
+    status: normalized,
+    amount: Number(row.original_amount),
+    currency: "USD" as const,
+    environment: row.provider_environment ? String(row.provider_environment) : "sandbox",
+    credited: Boolean(row.balance_credited_at),
+    message: coinflowStatusMessage(normalized),
+  };
+}
+
+function isTransVoucherFinalTransactionStatus(status: string | null | undefined) {
+  return ["completed", "failed", "expired"].includes(String(status ?? ""));
+}
+
+function getPaymentStatusMessage(transaction: TransactionRecord | null) {
+  if (!transaction) {
+    return "Checking payment provider...";
+  }
+
+  if (transaction.status === "completed") {
+    return transaction.kind === "deposit"
+      ? "Payment confirmed. Your balance has been updated."
+      : "Payment confirmed.";
+  }
+
+  if (transaction.status === "failed") {
+    return "Payment was not completed. No funds were credited.";
+  }
+
+  if (transaction.status === "expired") {
+    return "Payment session expired. No funds were credited.";
+  }
+
+  return "Checking payment provider...";
+}
+
+async function getPaymentSessionTransaction(input: {
+  userId: string;
+  sessionId?: string | null;
   type?: "deposit" | "purchase";
 }) {
+  await ensureDatabase();
+
+  if (input.sessionId) {
+    const depositRow =
+      !input.type || input.type === "deposit"
+        ? await queryOne(
+            "select * from deposit_payment_sessions where id = ? and user_id = ? limit 1",
+            [input.sessionId, input.userId],
+          )
+        : null;
+    if (depositRow) {
+      const session = normalizeActiveDepositSession(depositRow);
+      const transactionRow = session.transactionId
+        ? await queryOne("select * from transactions where id = ? and user_id = ? limit 1", [
+            session.transactionId,
+            input.userId,
+          ])
+        : null;
+      return {
+        session,
+        transaction: transactionRow ? normalizeTransaction(transactionRow) : null,
+      };
+    }
+
+    const checkoutRow =
+      !input.type || input.type === "purchase"
+        ? await queryOne(
+            "select * from payment_sessions where id = ? and user_id = ? limit 1",
+            [input.sessionId, input.userId],
+          )
+        : null;
+    if (checkoutRow) {
+      const session = normalizeActiveCheckoutSession(checkoutRow);
+      const transactionRow = session.transactionId
+        ? await queryOne("select * from transactions where id = ? and user_id = ? limit 1", [
+            session.transactionId,
+            input.userId,
+          ])
+        : null;
+      return {
+        session,
+        transaction: transactionRow ? normalizeTransaction(transactionRow) : null,
+      };
+    }
+
+    return { session: null, transaction: null };
+  }
+
   const session = await getActivePaymentSession(input.userId, input.type);
   if (!session?.transactionId) {
     return { session, transaction: null };
   }
-  const transaction = await refreshTransVoucherTransactionStatus(
-    session.transactionId,
-    input.userId,
+
+  const transactionRow = await queryOne(
+    "select * from transactions where id = ? and user_id = ? limit 1",
+    [session.transactionId, input.userId],
   );
+
   return {
-    session: await getActivePaymentSession(input.userId, session.type),
-    transaction,
+    session,
+    transaction: transactionRow ? normalizeTransaction(transactionRow) : null,
   };
+}
+
+async function maybeRefreshTransVoucherTransactionStatus(input: {
+  transaction: TransactionRecord | null;
+  userId: string;
+  minIntervalMs?: number;
+}) {
+  if (!input.transaction) {
+    return null;
+  }
+
+  if (
+    input.transaction.paymentProvider === "Wert.io" &&
+    !isTransVoucherFinalTransactionStatus(input.transaction.status)
+  ) {
+    const minIntervalMs = input.minIntervalMs ?? 5_000;
+    const lastCheckedMs = input.transaction.providerCheckedAt
+      ? new Date(input.transaction.providerCheckedAt).getTime()
+      : 0;
+
+    if (
+      Number.isFinite(lastCheckedMs) &&
+      lastCheckedMs > 0 &&
+      Date.now() - lastCheckedMs < minIntervalMs
+    ) {
+      return input.transaction;
+    }
+
+    try {
+      await syncWertOrderStatus({
+        clickId: input.transaction.transvoucherReferenceId ?? input.transaction.id,
+        wertOrderId: input.transaction.transvoucherTransactionId,
+        source: "status_poll",
+      });
+    } catch (error) {
+      console.warn("Wert status polling skipped.", {
+        transactionId: input.transaction.id,
+        error: error instanceof Error ? error.message : "Unknown Wert polling error.",
+      });
+      return input.transaction;
+    }
+    const updated = await getTransactionById(input.transaction.id, input.userId);
+    return updated ?? input.transaction;
+  }
+
+  if (
+    !["TransVoucher", "Cleffo"].includes(String(input.transaction.paymentProvider)) ||
+    !input.transaction.transvoucherTransactionId ||
+    isTransVoucherFinalTransactionStatus(input.transaction.status)
+  ) {
+    return input.transaction;
+  }
+
+  const minIntervalMs = input.minIntervalMs ?? 3_000;
+  const lastCheckedMs = input.transaction.providerCheckedAt
+    ? new Date(input.transaction.providerCheckedAt).getTime()
+    : 0;
+
+  if (
+    Number.isFinite(lastCheckedMs) &&
+    lastCheckedMs > 0 &&
+    Date.now() - lastCheckedMs < minIntervalMs
+  ) {
+    return input.transaction;
+  }
+
+  return input.transaction.paymentProvider === "Cleffo"
+    ? refreshCleffoTransactionStatus(input.transaction.id, input.userId)
+    : refreshTransVoucherTransactionStatus(input.transaction.id, input.userId);
+}
+
+async function buildPaymentSessionStatusResponse(input: {
+  userId: string;
+  session: ActivePaymentSessionRecord | null;
+  transaction: TransactionRecord | null;
+}) {
+  const balance = await getBalanceByUserId(input.userId);
+  const normalizedStatus = input.transaction
+    ? normalizeProviderStatus(input.transaction.providerStatus ?? input.transaction.status)
+    : input.session?.status ?? null;
+
+  return {
+    ok: true as const,
+    sessionId: input.session?.id ?? null,
+    status: normalizedStatus,
+    transactionStatus: input.transaction?.status ?? null,
+    depositStatus:
+      input.transaction?.kind === "deposit" ? input.transaction.status : null,
+    kind: input.transaction?.kind ?? input.session?.type ?? null,
+    amount: input.session?.amount ?? input.transaction?.amount ?? null,
+    currency: input.session?.currency ?? input.transaction?.displayCurrency ?? "USD",
+    provider: input.session?.provider ?? input.transaction?.paymentProvider ?? null,
+    lastCheckedAt: input.transaction?.providerCheckedAt ?? null,
+    balanceCredited: Boolean(input.transaction?.creditedAt),
+    availableBalance: balance?.available ?? null,
+    message: getPaymentStatusMessage(input.transaction),
+    final: input.transaction
+      ? isTransVoucherFinalTransactionStatus(input.transaction.status)
+      : false,
+  };
+}
+
+export async function checkActivePaymentSessionStatus(input: {
+  userId: string;
+  type?: "deposit" | "purchase";
+  sessionId?: string;
+}) {
+  const current = await getPaymentSessionTransaction(input);
+  const transaction = await maybeRefreshTransVoucherTransactionStatus({
+    transaction: current.transaction,
+    userId: input.userId,
+  });
+  const next = await getPaymentSessionTransaction({
+    userId: input.userId,
+    sessionId: current.session?.id ?? input.sessionId,
+    type: current.session?.type ?? input.type,
+  });
+
+  return buildPaymentSessionStatusResponse({
+    userId: input.userId,
+    session: next.session ?? current.session,
+    transaction: next.transaction ?? transaction,
+  });
 }
 
 export async function cancelActivePaymentSession(input: {
@@ -8398,32 +10912,57 @@ export async function createDepositPaymentSession(input: {
   userId: string;
   amount: number;
   paymentMethod: Exclude<PaymentMethodName, "Archive Balance">;
-  provider: Exclude<PaymentProviderName, "Internal Wallet">;
+  provider?: Exclude<PaymentProviderName, "Internal Wallet">;
+  gateNumber?: number;
   currency: SupportedCurrency;
 }) {
   await ensureDatabase();
+  await requireDocumentAcceptanceForUser(input.userId);
 
   if (input.amount <= 0) {
     throw new Error("Deposit amount must be greater than zero.");
   }
 
-  if (input.provider !== "TransVoucher") {
-    throw new Error("TransVoucher is the only active payment provider.");
-  }
-
   if (input.paymentMethod === "Crypto") {
-    throw new Error("Crypto deposits are not available in the TransVoucher flow.");
+    throw new Error("Crypto deposits are not available in hosted gate flows.");
   }
 
-  const existingSession = await getActivePaymentSession(input.userId, "deposit");
-  if (existingSession) {
+  const requestedProviderName = getRequestedDepositProviderName({
+    provider: input.provider ?? null,
+    gateNumber: input.gateNumber ?? null,
+  });
+  const requestedProviderKey = getRequestedDepositProviderKey({
+    provider: input.provider ?? null,
+    gateNumber: input.gateNumber ?? null,
+  });
+  const existingSession = requestedProviderKey
+    ? await getActiveDepositPaymentSessionForProvider(
+        input.userId,
+        requestedProviderKey,
+        requestedProviderName ?? input.provider ?? "TransVoucher",
+      )
+    : await getActivePaymentSession(input.userId, "deposit");
+
+  if (existingSession && requestedProviderName && existingSession.provider === requestedProviderName) {
     return {
       sessionId: existingSession.id,
-      paymentUrl: existingSession.paymentUrl,
+      paymentUrl:
+        existingSession.provider === "Wert.io"
+          ? `/checkout/gate-3/${encodeURIComponent(existingSession.id)}`
+          : existingSession.provider === "Coinflow"
+            ? `/checkout/gate-4/${encodeURIComponent(existingSession.id)}`
+          : existingSession.paymentUrl,
+      embedUrl: null,
+      useEmbed: false,
+      wertWidgetOptions: null,
       redirectPath:
         existingSession.provider === "TransVoucher"
           ? `/payment/deposit/transvoucher?session=${encodeURIComponent(existingSession.id)}`
-          : existingSession.paymentUrl,
+          : existingSession.provider === "Wert.io"
+            ? `/checkout/gate-3/${encodeURIComponent(existingSession.id)}`
+            : existingSession.provider === "Coinflow"
+              ? `/checkout/gate-4/${encodeURIComponent(existingSession.id)}`
+          : existingSession.paymentUrl ?? "/dashboard/deposit",
       activeSession: existingSession,
       reusedExistingSession: true,
     };
@@ -8435,6 +10974,20 @@ export async function createDepositPaymentSession(input: {
     throw new Error("Unable to load collector account.");
   }
 
+  if (!userHasKycAccess(account.user)) {
+    throw new KycVerificationRequiredError(
+      "Please complete verification before making a card payment.",
+    );
+  }
+
+  const gate = await resolveDepositGateForUser({
+    userId: input.userId,
+    provider: input.provider ?? null,
+    gateNumber: input.gateNumber ?? null,
+    amount: input.amount,
+    currency: input.currency,
+  });
+
   const conversion = await convertAmount(input.amount, input.currency, "USD");
   const sessionId = randomUUID();
   const depositId = createReadableId("DEP");
@@ -8443,6 +10996,572 @@ export async function createDepositPaymentSession(input: {
   const expiresAt = new Date(
     Date.now() + CHECKOUT_PAYMENT_SESSION_TTL_MINUTES * 60 * 1000,
   ).toISOString();
+
+  if (gate.providerName === "Coinflow") {
+    await ensureCoinflowDepositPaymentSessionColumns();
+    const coinflowConfig = getCoinflowPublicConfig();
+    console.info(`[COINFLOW_GATE4][${coinflowConfig.serverEnv}][card] session_create_requested`, {
+      userId: input.userId,
+      amount: input.amount,
+      currency: "USD",
+    });
+    if (!account.user.email) {
+      throw new Error("Gate #4 requires an email address before payment.");
+    }
+    if (!coinflowConfig.merchantId || !coinflowConfig.apiKeyConfigured) {
+      throw new Error(
+        "Gate #4 checkout could not be prepared. Please try another gate or contact support.",
+      );
+    }
+
+    const amountCents = Math.round(input.amount * 100);
+    const idempotencyKey = `coinflow_credit:${sessionId}`;
+    const webhookInfo = buildCoinflowWebhookInfo({
+      sessionId,
+      userId: input.userId,
+      localTransactionId: transactionId,
+      idempotencyKey,
+      amount: input.amount,
+      amountCents,
+      currency: "USD",
+      email: account.user.email,
+      kycStatus: account.user.kycStatus,
+    });
+    const chargebackProtectionData = buildCoinflowChargebackProtectionData({
+      sessionId,
+      userId: input.userId,
+      localTransactionId: transactionId,
+      idempotencyKey,
+      amount: input.amount,
+      amountCents,
+      currency: "USD",
+      email: account.user.email,
+      kycStatus: account.user.kycStatus,
+    });
+    const coinflowMetaJson = toJson({
+      internalDepositId: depositId,
+      internalTransactionId: transactionId,
+      gate: gate.publicName,
+      provider: "Coinflow",
+      webhookInfo,
+      chargebackProtectionData,
+      environment: coinflowConfig.serverEnv,
+      paymentMethod: "card",
+    });
+    const coinflowRawResponseJson = toJson({ webhookInfo, chargebackProtectionData });
+    const coinflowWebhookInfoJson = toJson(webhookInfo);
+
+    await execute(
+      `insert into deposit_payment_sessions (
+        id, user_id, payment_method, payment_provider, currency, original_amount,
+        credited_amount_usd, exchange_rate, status, meta_json, deposit_id, transaction_id,
+        transvoucher_transaction_id, transvoucher_reference_id, payment_url,
+        provider_status, raw_provider_response, provider_key, provider_click_id,
+        provider_order_id, provider_payment_id, provider_environment, provider_checkout_env,
+        amount_cents, coinflow_webhook_info,
+        coinflow_settlement_type, idempotency_key, created_at, updated_at, expires_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sessionId,
+        input.userId,
+        "card",
+        "Coinflow",
+        "USD",
+        input.amount,
+        conversion.convertedAmount,
+        conversion.exchangeRate,
+        "pending",
+        coinflowMetaJson,
+        depositId,
+        transactionId,
+        null,
+        transactionId,
+        `/checkout/gate-4/${encodeURIComponent(sessionId)}`,
+        "created",
+        coinflowRawResponseJson,
+        "coinflow",
+        transactionId,
+        null,
+        null,
+        coinflowConfig.serverEnv,
+        coinflowConfig.env,
+        amountCents,
+        coinflowWebhookInfoJson,
+        coinflowConfig.settlementType,
+        idempotencyKey,
+        timestamp,
+        timestamp,
+        expiresAt,
+      ],
+    );
+
+    console.info(`[COINFLOW_GATE4][${coinflowConfig.serverEnv}][card] session_created`, {
+      sessionId,
+      userId: input.userId,
+      amount: input.amount,
+      currency: "USD",
+    });
+
+    return {
+      sessionId,
+      paymentUrl: `/checkout/gate-4/${encodeURIComponent(sessionId)}`,
+      embedUrl: null,
+      useEmbed: false,
+      redirectPath: `/checkout/gate-4/${encodeURIComponent(sessionId)}`,
+      activeSession: null,
+      reusedExistingSession: false,
+    };
+  }
+
+  if (gate.providerName === "Wert.io") {
+    let widgetOptions: WertWidgetOptions;
+    const clickId = transactionId;
+
+    try {
+      widgetOptions = createWertSignedWidgetOptions({
+        clickId,
+        localTransactionId: transactionId,
+        depositId,
+        userId: input.userId,
+        fiatAmount: input.amount,
+        fiatCurrency: "USD",
+        recipientWallet: account.user.withdrawalWallet,
+      });
+    } catch (error) {
+      await insertSecurityAuditEvent({
+        eventType: "wert_signature_error",
+        userId: account.user.id,
+        username: account.user.username,
+        telegramUsername: account.user.telegramUsername,
+        role: account.user.role,
+        ipAddress: "system",
+        country: "unknown",
+        userAgent: "server",
+        language: "unknown",
+        route: "/api/deposit/session",
+        timestamp,
+      });
+      console.error("Wert signature generation failed.", error);
+      throw new Error(
+        "Gate #3 is temporarily unavailable. Please try another payment gate or contact support.",
+      );
+    }
+
+    await execute(
+      `insert into deposits (
+        id, user_id, amount, original_amount, original_currency, credited_amount_usd,
+        exchange_rate, payment_method, payment_provider, transvoucher_transaction_id,
+        transvoucher_reference_id, cardholder_name, card_masked, status, balance_before,
+        balance_after, created_at, updated_at, completed_at, paid_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        depositId,
+        input.userId,
+        conversion.convertedAmount,
+        input.amount,
+        "USD",
+        conversion.convertedAmount,
+        conversion.exchangeRate,
+        input.paymentMethod,
+        "Wert.io",
+        null,
+        clickId,
+        "Gate #3 smart contract checkout",
+        clickId,
+        "processing",
+        account.balance.available,
+        account.balance.available,
+        timestamp,
+        timestamp,
+        null,
+        null,
+      ],
+    );
+
+    await createTransactionRecord({
+      id: transactionId,
+      userId: input.userId,
+      kind: "deposit",
+      amount: conversion.convertedAmount,
+      originalAmount: input.amount,
+      originalCurrency: "USD",
+      displayCurrency: "USD",
+      creditedAmountUsd: conversion.convertedAmount,
+      exchangeRate: conversion.exchangeRate,
+      paymentMethod: input.paymentMethod,
+      paymentProvider: "Wert.io",
+      transvoucherTransactionId: null,
+      transvoucherReferenceId: clickId,
+      paymentUrl: widgetOptions.origin,
+      providerStatus: "created",
+      rawProviderResponse: toJson({ widgetOptions }),
+      status: "pending",
+      referenceId: depositId,
+      summary: "Awaiting Gate #3 deposit confirmation",
+      meta: {
+        gate: gate.publicName,
+        provider: "Wert.io",
+        clickId,
+        originalAmount: input.amount,
+        originalCurrency: "USD",
+        creditedAmountUsd: conversion.convertedAmount,
+        exchangeRate: conversion.exchangeRate,
+        paymentMethod: input.paymentMethod,
+        relatedOrderId: depositId,
+        wert: {
+          environment: widgetOptions.extra.environment,
+          commodity: widgetOptions.commodity,
+          commodityAmount: widgetOptions.commodity_amount,
+          network: widgetOptions.network,
+          scAddress: widgetOptions.sc_address,
+          scInputData: widgetOptions.sc_input_data,
+          contractOrderId: widgetOptions.extra.contract_order_id,
+          tokenId: widgetOptions.extra.token_id,
+          tokenQuantity: widgetOptions.extra.token_quantity,
+          nftDeliveryMode: widgetOptions.extra.nft_delivery_mode,
+        },
+      },
+    });
+
+    await execute(
+      `insert into deposit_payment_sessions (
+        id, user_id, payment_method, payment_provider, currency, original_amount,
+        credited_amount_usd, exchange_rate, status, meta_json, deposit_id, transaction_id,
+        transvoucher_transaction_id, transvoucher_reference_id, payment_url,
+        provider_status, raw_provider_response, provider_key, provider_click_id,
+        provider_order_id, balance_credited_at, token_id, token_quantity,
+        contract_address, contract_order_id, sc_input_data, chain_network,
+        recipient_wallet, nft_delivery_mode, chain_tx_hash, nft_delivered_at,
+        created_at, updated_at, expires_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sessionId,
+        input.userId,
+        input.paymentMethod,
+        "Wert.io",
+        "USD",
+        input.amount,
+        conversion.convertedAmount,
+        conversion.exchangeRate,
+        "pending",
+        toJson({
+          internalDepositId: depositId,
+          internalTransactionId: transactionId,
+          clickId,
+          gate: gate.publicName,
+          provider: "Wert.io",
+          wertEnvironment: widgetOptions.extra.environment,
+        }),
+        depositId,
+        transactionId,
+        null,
+        clickId,
+        widgetOptions.origin,
+        "created",
+        toJson({ widgetOptions }),
+        "wert",
+        clickId,
+        null,
+        null,
+        widgetOptions.extra.token_id,
+        widgetOptions.extra.token_quantity,
+        widgetOptions.sc_address,
+        widgetOptions.extra.contract_order_id,
+        widgetOptions.sc_input_data,
+        widgetOptions.network,
+        widgetOptions.address,
+        widgetOptions.extra.nft_delivery_mode,
+        null,
+        null,
+        timestamp,
+        timestamp,
+        expiresAt,
+      ],
+    );
+
+    await execute(
+      `insert into wert_payment_sessions (
+        id, user_id, provider_key, gate_number, type, local_transaction_id,
+        deposit_id, click_id, wert_order_id, wert_status, amount_fiat,
+        fiat_currency, commodity, commodity_amount, network, user_wallet_address,
+        sc_address, sc_input_data, signature_hash, token_id, token_quantity,
+        contract_order_id, recipient_wallet, nft_delivery_mode, chain_tx_hash,
+        status, balance_credited_at, nft_delivered_at, provider_payload_safe,
+        last_status_check_at, last_webhook_at, created_at, updated_at
+      ) values (?, ?, 'wert', 3, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(),
+        input.userId,
+        widgetOptions.extra.type,
+        transactionId,
+        depositId,
+        clickId,
+        null,
+        "created",
+        input.amount,
+        "USD",
+        widgetOptions.commodity,
+        widgetOptions.commodity_amount,
+        widgetOptions.network,
+        null,
+        widgetOptions.sc_address,
+        widgetOptions.sc_input_data,
+        hashWertSignature(widgetOptions.signature),
+        widgetOptions.extra.token_id,
+        widgetOptions.extra.token_quantity,
+        widgetOptions.extra.contract_order_id,
+        widgetOptions.address,
+        widgetOptions.extra.nft_delivery_mode,
+        null,
+        "created",
+        null,
+        null,
+        toJson({
+          widgetOptions: {
+            ...widgetOptions,
+            signature: "[redacted]",
+          },
+        }),
+        null,
+        null,
+        timestamp,
+        timestamp,
+      ],
+    );
+
+    await insertSecurityAuditEvent({
+      eventType: "wert_session_created",
+      userId: account.user.id,
+      username: account.user.username,
+      telegramUsername: account.user.telegramUsername,
+      role: account.user.role,
+      ipAddress: "system",
+      country: "unknown",
+      userAgent: "server",
+      language: "unknown",
+      route: "/api/deposit/session",
+      timestamp,
+    });
+
+    await insertSecurityAuditEvent({
+      eventType: "wert_widget_options_generated",
+      userId: account.user.id,
+      username: account.user.username,
+      telegramUsername: account.user.telegramUsername,
+      role: account.user.role,
+      ipAddress: "system",
+      country: "unknown",
+      userAgent: "server",
+      language: "unknown",
+      route: "/api/deposit/session",
+      timestamp,
+    });
+
+    return {
+      sessionId,
+      paymentUrl: `/checkout/gate-3/${encodeURIComponent(sessionId)}`,
+      embedUrl: null,
+      useEmbed: false,
+      wertWidgetOptions: null,
+      redirectPath: `/checkout/gate-3/${encodeURIComponent(sessionId)}`,
+      activeSession: null,
+      reusedExistingSession: false,
+    };
+  }
+
+  if (gate.providerName === "Cleffo") {
+    let firstName = "";
+    let lastName = "";
+    let phone = "";
+
+    try {
+      firstName = normalizeGate2Name(
+        account.user.gate2FirstName,
+        "First name",
+        account.user.username,
+      );
+      lastName = normalizeGate2Name(
+        account.user.gate2LastName,
+        "Last name",
+        account.user.username,
+      );
+      phone = normalizeGate2Phone(account.user.gate2Phone ?? account.user.paymentPhone);
+    } catch {
+      await insertSecurityAuditEvent({
+        eventType: "gate2_payment_blocked_missing_details",
+        userId: account.user.id,
+        username: account.user.username,
+        telegramUsername: account.user.telegramUsername,
+        role: account.user.role,
+        ipAddress: "unknown",
+        country: "unknown",
+        userAgent: "server",
+        language: "unknown",
+        route: "/api/deposit/session",
+        timestamp,
+      });
+      throw new Gate2DetailsRequiredError(
+        "Gate #2 requires your first name, last name, and phone number before payment.",
+      );
+    }
+
+    const redirectUrl = `${SITE_BASE_URL.replace(/\/+$/, "")}/dashboard/deposit`;
+    const payment = await createCleffoPaymentLink({
+      merchantOrderId: transactionId,
+      amount: input.amount,
+      currency: "USD",
+      customer: {
+        firstName,
+        lastName,
+        email: account.user.email,
+        phone,
+      },
+      redirectUrl,
+      metadata: {
+        type: "deposit",
+        user_id: account.user.id,
+        username: account.user.username,
+        internal_deposit_id: depositId,
+        internal_transaction_id: transactionId,
+      },
+    });
+    const providerStatus = normalizeProviderStatus(payment.status);
+    const mappedSessionStatus = mapProviderStatusToDepositSessionStatus(providerStatus);
+    const mappedTransactionStatus = mapProviderStatusToTransactionStatus(providerStatus);
+    const initialSessionStatus =
+      mappedSessionStatus === "completed" ? "processing" : mappedSessionStatus;
+    const initialTransactionStatus =
+      mappedTransactionStatus === "completed" ? "processing" : mappedTransactionStatus;
+    const paymentReference = buildTransVoucherPaymentReference({
+      referenceId: payment.referenceId,
+      transactionId: payment.transactionId,
+    });
+
+    await execute(
+      `insert into deposits (
+        id, user_id, amount, original_amount, original_currency, credited_amount_usd,
+        exchange_rate, payment_method, payment_provider, transvoucher_transaction_id,
+        transvoucher_reference_id, cardholder_name, card_masked, status, balance_before,
+        balance_after, created_at, updated_at, completed_at, paid_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        depositId,
+        input.userId,
+        conversion.convertedAmount,
+        input.amount,
+        input.currency,
+        conversion.convertedAmount,
+        conversion.exchangeRate,
+        input.paymentMethod,
+        "Cleffo",
+        payment.transactionId,
+        payment.referenceId,
+        "Gate #2 hosted payment",
+        paymentReference,
+        ["failed", "expired"].includes(initialTransactionStatus) ? "failed" : "processing",
+        account.balance.available,
+        account.balance.available,
+        timestamp,
+        timestamp,
+        null,
+        null,
+      ],
+    );
+
+    await createTransactionRecord({
+      id: transactionId,
+      userId: input.userId,
+      kind: "deposit",
+      amount: conversion.convertedAmount,
+      originalAmount: input.amount,
+      originalCurrency: input.currency,
+      displayCurrency: input.currency,
+      creditedAmountUsd: conversion.convertedAmount,
+      exchangeRate: conversion.exchangeRate,
+      paymentMethod: input.paymentMethod,
+      paymentProvider: "Cleffo",
+      transvoucherTransactionId: payment.transactionId,
+      transvoucherReferenceId: payment.referenceId,
+      paymentUrl: payment.paymentUrl,
+      providerStatus: providerStatus || null,
+      rawProviderResponse: toJson(payment.raw),
+      status: initialTransactionStatus,
+      referenceId: depositId,
+      summary: "Awaiting Gate #2 deposit confirmation",
+      meta: {
+        gate: gate.publicName,
+        provider: "Cleffo",
+        originalAmount: input.amount,
+        originalCurrency: input.currency,
+        creditedAmountUsd: conversion.convertedAmount,
+        exchangeRate: conversion.exchangeRate,
+        paymentMethod: input.paymentMethod,
+        paymentReference,
+        relatedOrderId: depositId,
+      },
+    });
+
+    await execute(
+      `insert into deposit_payment_sessions (
+        id, user_id, payment_method, payment_provider, currency, original_amount,
+        credited_amount_usd, exchange_rate, status, meta_json, deposit_id, transaction_id,
+        transvoucher_transaction_id, transvoucher_reference_id, payment_url,
+        provider_status, raw_provider_response, created_at, updated_at, expires_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sessionId,
+        input.userId,
+        input.paymentMethod,
+        "Cleffo",
+        input.currency,
+        input.amount,
+        conversion.convertedAmount,
+        conversion.exchangeRate,
+        initialSessionStatus,
+        toJson({
+          internalDepositId: depositId,
+          internalTransactionId: transactionId,
+          redirectUrl,
+          gate: gate.publicName,
+        }),
+        depositId,
+        transactionId,
+        payment.transactionId,
+        payment.referenceId,
+        payment.paymentUrl,
+        providerStatus || null,
+        toJson(payment.raw),
+        timestamp,
+        timestamp,
+        expiresAt,
+      ],
+    );
+
+    await insertSecurityAuditEvent({
+      eventType: "cleffo_payment_created",
+      userId: account.user.id,
+      username: account.user.username,
+      telegramUsername: account.user.telegramUsername,
+      role: account.user.role,
+      ipAddress: "system",
+      country: "unknown",
+      userAgent: "server",
+      language: "unknown",
+      route: "/api/deposit/session",
+      timestamp,
+    });
+
+    return {
+      sessionId,
+      paymentUrl: payment.paymentUrl,
+      embedUrl: null,
+      useEmbed: false,
+      redirectPath: payment.paymentUrl,
+      activeSession: null,
+      reusedExistingSession: false,
+    };
+  }
+
   const { successUrl, cancelUrl, redirectUrl } =
     buildTransVoucherReturnUrls(transactionId);
   const payment = await createTransVoucherPayment({
@@ -8583,6 +11702,8 @@ export async function createDepositPaymentSession(input: {
   return {
     sessionId,
     paymentUrl: payment.paymentUrl,
+    embedUrl: payment.embedUrl,
+    useEmbed: payment.useEmbed && Boolean(payment.embedUrl),
     redirectPath: `/payment/deposit/transvoucher?session=${encodeURIComponent(sessionId)}`,
     activeSession: null,
     reusedExistingSession: false,
@@ -8647,6 +11768,7 @@ export async function finalizeCheckoutPaymentSession(input: {
   cryptoNetwork?: CryptoNetwork | null;
 }) {
   await ensureDatabase();
+  await requireDocumentAcceptanceForUser(input.userId);
   const row = await queryOne(
     "select * from payment_sessions where id = ? and user_id = ? limit 1",
     [input.sessionId, input.userId],
@@ -8713,6 +11835,7 @@ export async function finalizeDepositPaymentSession(input: {
   cryptoNetwork?: CryptoNetwork | null;
 }) {
   await ensureDatabase();
+  await requireDocumentAcceptanceForUser(input.userId);
   const row = await queryOne(
     "select * from deposit_payment_sessions where id = ? and user_id = ? limit 1",
     [input.sessionId, input.userId],
@@ -9200,6 +12323,7 @@ async function reconcileTransVoucherDeposit(input: {
   transaction: TransactionRecord;
   deposit: DepositRecord;
   session: DepositPaymentSessionRecord | null;
+  providerName?: Exclude<PaymentProviderName, "Internal Wallet">;
   providerStatus: string;
   providerTransactionId: string | null;
   providerReferenceId: string | null;
@@ -9208,6 +12332,7 @@ async function reconcileTransVoucherDeposit(input: {
   rawProviderResponse: unknown;
 }) {
   const timestamp = nowIso();
+  const providerName = input.providerName ?? "TransVoucher";
   const rawProviderResponse = toJson(input.rawProviderResponse);
   const paymentReference = buildTransVoucherPaymentReference({
     referenceId: input.providerReferenceId,
@@ -9215,7 +12340,7 @@ async function reconcileTransVoucherDeposit(input: {
   });
   const mergedMeta = {
     ...getTransactionMeta(input.transaction),
-    provider: "TransVoucher",
+    provider: providerName,
     paymentReference,
     transvoucherTransactionId: input.providerTransactionId,
     transvoucherReferenceId: input.providerReferenceId,
@@ -9267,7 +12392,7 @@ async function reconcileTransVoucherDeposit(input: {
             input.deposit.creditedAmountUsd ?? input.deposit.amount,
           exchangeRate: input.deposit.exchangeRate ?? 1,
           paymentMethod: input.deposit.paymentMethod,
-          provider: "TransVoucher",
+          provider: providerName,
           transactionId: input.providerTransactionId,
           referenceId: input.providerReferenceId,
           timestamp: input.paidAt ?? timestamp,
@@ -9288,7 +12413,7 @@ async function reconcileTransVoucherDeposit(input: {
         updated_at = ?
        where id = ?`,
       [
-        "TransVoucher",
+        providerName,
         input.providerTransactionId,
         input.providerReferenceId,
         paymentReference,
@@ -9316,7 +12441,7 @@ async function reconcileTransVoucherDeposit(input: {
         updated_at = ?
        where id = ?`,
       [
-        "TransVoucher",
+        providerName,
         input.providerTransactionId,
         input.providerReferenceId,
         input.paymentUrl,
@@ -9340,6 +12465,7 @@ async function reconcileTransVoucherDeposit(input: {
           payment_url = ?,
           provider_status = ?,
           raw_provider_response = ?,
+          balance_credited_at = coalesce(balance_credited_at, ?),
           updated_at = ?
          where id = ?`,
         [
@@ -9349,6 +12475,7 @@ async function reconcileTransVoucherDeposit(input: {
           input.paymentUrl,
           input.providerStatus,
           rawProviderResponse,
+          timestamp,
           timestamp,
           input.session.id,
         ],
@@ -9363,7 +12490,7 @@ async function reconcileTransVoucherDeposit(input: {
   if (isProviderTerminalFailureStatus(input.providerStatus)) {
     const failureReason =
       extractProviderFailureReason(input.rawProviderResponse) ??
-      "Payment failed or was declined by TransVoucher.";
+      `Payment failed or was declined by ${providerName}.`;
 
     if (input.deposit.status !== "completed" && input.deposit.status !== "failed") {
       const user = await getUserById(input.deposit.userId);
@@ -9375,7 +12502,7 @@ async function reconcileTransVoucherDeposit(input: {
           amount: input.deposit.originalAmount ?? input.deposit.amount,
           currency: input.deposit.originalCurrency ?? "USD",
           paymentMethod: `${input.deposit.paymentMethod} ${paymentReference}`,
-          provider: "TransVoucher",
+          provider: providerName,
           transactionId: input.providerTransactionId,
           referenceId: input.providerReferenceId,
           reason: failureReason,
@@ -9395,7 +12522,7 @@ async function reconcileTransVoucherDeposit(input: {
         updated_at = ?
        where id = ?`,
       [
-        "TransVoucher",
+        providerName,
         input.providerTransactionId,
         input.providerReferenceId,
         paymentReference,
@@ -9419,7 +12546,7 @@ async function reconcileTransVoucherDeposit(input: {
         updated_at = ?
        where id = ?`,
       [
-        "TransVoucher",
+        providerName,
         input.providerTransactionId,
         input.providerReferenceId,
         input.paymentUrl,
@@ -9477,7 +12604,7 @@ async function reconcileTransVoucherDeposit(input: {
       updated_at = ?
      where id = ?`,
     [
-      "TransVoucher",
+      providerName,
       input.providerTransactionId,
       input.providerReferenceId,
       paymentReference,
@@ -9501,14 +12628,14 @@ async function reconcileTransVoucherDeposit(input: {
       updated_at = ?
      where id = ?`,
     [
-      "TransVoucher",
+      providerName,
       input.providerTransactionId,
       input.providerReferenceId,
       input.paymentUrl,
       input.providerStatus,
       rawProviderResponse,
       mapProviderStatusToTransactionStatus(input.providerStatus),
-      "TransVoucher deposit status updated",
+      `${providerName} deposit status updated`,
       toJson(mergedMeta),
       timestamp,
       input.transaction.id,
@@ -9542,37 +12669,83 @@ async function reconcileTransVoucherDeposit(input: {
 
 async function applyTransVoucherPaymentStatus(input: {
   transactionId?: string | null;
+  localReferenceId?: string | null;
   providerTransactionId?: string | null;
   providerReferenceId?: string | null;
+  providerName?: Exclude<PaymentProviderName, "Internal Wallet">;
   providerStatus: string;
+  source?: "webhook" | "reconciliation" | "manual_check";
   paymentUrl?: string | null;
   paidAt?: string | null;
   rawProviderResponse: unknown;
 }) {
   await ensureDatabase();
 
-  const transactionRow = input.transactionId
-    ? await queryOne("select * from transactions where id = ? limit 1", [
-        input.transactionId,
-      ])
-    : input.providerTransactionId
-      ? await queryOne(
-          "select * from transactions where transvoucher_transaction_id = ? limit 1",
-          [input.providerTransactionId],
-        )
-      : null;
+  const lookupIds = [
+    input.transactionId,
+    input.localReferenceId,
+    input.providerReferenceId,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean);
+
+  let transactionRow = null as Awaited<ReturnType<typeof queryOne>>;
+
+  for (const id of lookupIds) {
+    transactionRow = await queryOne(
+      `select * from transactions
+       where id = ? or reference_id = ? or transvoucher_reference_id = ?
+       limit 1`,
+      [id, id, id],
+    );
+    if (transactionRow) {
+      break;
+    }
+  }
+
+  if (!transactionRow && input.providerTransactionId) {
+    transactionRow = await queryOne(
+      "select * from transactions where transvoucher_transaction_id = ? limit 1",
+      [input.providerTransactionId],
+    );
+  }
 
   if (!transactionRow) {
+    console.warn("TransVoucher update skipped: local transaction not found.", {
+      providerTransactionId: input.providerTransactionId,
+      providerReferenceId: input.providerReferenceId,
+      localReferenceId: input.localReferenceId,
+      rawStatus: input.providerStatus,
+      normalizedStatus: normalizeProviderStatus(input.providerStatus),
+    });
     return null;
   }
 
   const transaction = normalizeTransaction(transactionRow);
+  const providerName =
+    input.providerName ??
+    (transaction.paymentProvider === "Cleffo" ? "Cleffo" : "TransVoucher");
   const normalizedProviderStatus = normalizeProviderStatus(input.providerStatus);
+  console.info(`Processing ${providerName} payment update.`, {
+    source: input.source ?? "manual_check",
+    transactionId: transaction.id,
+    providerTransactionId: input.providerTransactionId ?? transaction.transvoucherTransactionId,
+    providerReferenceId: input.providerReferenceId ?? transaction.transvoucherReferenceId,
+    rawStatus: input.providerStatus,
+    normalizedStatus: normalizedProviderStatus,
+    previousStatus: transaction.status,
+    kind: transaction.kind,
+  });
 
   if (
     transaction.processedAt &&
     ["completed", "failed", "expired"].includes(transaction.status)
   ) {
+    console.info("Skipped TransVoucher update because transaction is already final.", {
+      transactionId: transaction.id,
+      previousStatus: transaction.status,
+      processedAt: transaction.processedAt,
+    });
     return transaction;
   }
 
@@ -9618,6 +12791,7 @@ async function applyTransVoucherPaymentStatus(input: {
       transaction,
       deposit: normalizeDeposit(depositRow),
       session: sessionRow ? normalizeDepositPaymentSession(sessionRow) : null,
+      providerName,
       providerStatus: normalizedProviderStatus,
       providerTransactionId:
         input.providerTransactionId ?? transaction.transvoucherTransactionId,
@@ -9662,7 +12836,314 @@ async function applyTransVoucherPaymentStatus(input: {
     transaction.id,
   ]);
 
-  return updatedRow ? normalizeTransaction(updatedRow) : transaction;
+  const updated = updatedRow ? normalizeTransaction(updatedRow) : transaction;
+  console.info(`Finished ${providerName} payment update.`, {
+    source: input.source ?? "manual_check",
+    transactionId: transaction.id,
+    previousStatus: transaction.status,
+    newStatus: updated.status,
+    providerStatus: updated.providerStatus,
+    credited: Boolean(updated.creditedAt),
+  });
+
+  return updated;
+}
+
+function readCoinflowString(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === "number") {
+      return String(value);
+    }
+  }
+  return null;
+}
+
+function readCoinflowAmount(record: Record<string, unknown>) {
+  const cents = record.amountCents ?? record.amount_cents ?? record.cents;
+  if (typeof cents === "number" && Number.isFinite(cents)) {
+    return cents / 100;
+  }
+  const amount = record.amount ?? record.total ?? record.subtotal;
+  if (typeof amount === "number" && Number.isFinite(amount)) {
+    return amount;
+  }
+  if (typeof amount === "string" && amount.trim()) {
+    const parsed = Number(amount);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+export async function processCoinflowWebhookPayload(payload: Record<string, unknown>) {
+  await ensureDatabase();
+  await ensureCoinflowDepositPaymentSessionColumns();
+  const timestamp = nowIso();
+  const eventType = getCoinflowEventType(payload);
+  const eventId = getCoinflowEventId(payload);
+  const data = getCoinflowData(payload);
+  const webhookInfo = getCoinflowWebhookInfo(payload);
+  const sessionId = readCoinflowString(webhookInfo, ["rebohrome_session_id", "sessionId"]);
+  const localTransactionId = readCoinflowString(webhookInfo, [
+    "local_transaction_id",
+    "localTransactionId",
+  ]);
+  const providerPaymentId = readCoinflowString(data, ["id", "paymentId", "payment_id"]);
+  const rawStatus =
+    eventType || readCoinflowString(data, ["status", "paymentStatus", "state"]) || "pending";
+  const coinflowStatus = normalizeCoinflowStatus(rawStatus);
+  const providerStatus = mapCoinflowToProviderStatus(coinflowStatus);
+  const rawPayload = toJson(payload);
+  const requestedEnvironment =
+    readCoinflowString(webhookInfo, ["environment", "coinflow_env"]) ?? "sandbox";
+
+  console.info(`[COINFLOW_GATE4][${requestedEnvironment}][card] webhook_event_mapped`, {
+    eventType,
+    sessionId,
+    providerPaymentId,
+    status: coinflowStatus,
+  });
+
+  if (!sessionId && !localTransactionId && !providerPaymentId) {
+    console.warn(`[COINFLOW_GATE4][${requestedEnvironment}][card] webhook skipped: no local identifiers`);
+    return { ok: true, skipped: true, reason: "missing_identifier" };
+  }
+
+  const sessionRow = await queryOne(
+    `select *
+     from deposit_payment_sessions
+     where provider_key = 'coinflow'
+       and (
+        id = ?
+        or transaction_id = ?
+        or provider_payment_id = ?
+        or transvoucher_reference_id = ?
+       )
+     limit 1`,
+    [
+      sessionId ?? "",
+      localTransactionId ?? "",
+      providerPaymentId ?? "",
+      localTransactionId ?? "",
+    ],
+  );
+
+  if (!sessionRow) {
+    console.warn(`[COINFLOW_GATE4][${requestedEnvironment}][card] webhook skipped: session not found`, {
+      sessionId,
+      localTransactionId,
+      providerPaymentId,
+    });
+    return { ok: true, skipped: true, reason: "session_not_found" };
+  }
+
+  const session = normalizeDepositPaymentSession(sessionRow);
+  const sessionEnvironment = sessionRow.provider_environment
+    ? String(sessionRow.provider_environment)
+    : requestedEnvironment;
+  const amount = readCoinflowAmount(data);
+  const currency = readCoinflowString(data, ["currency", "fiatCurrency"]) ?? "USD";
+
+  if (amount !== null && Math.abs(amount - session.originalAmount) > 0.01) {
+    await execute(
+      `update deposit_payment_sessions set
+        provider_status = ?,
+        provider_raw_status = ?,
+        provider_raw_payload = ?,
+        raw_provider_response = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        "amount_mismatch",
+        rawStatus,
+        rawPayload,
+        rawPayload,
+        timestamp,
+        session.id,
+      ],
+    );
+    console.warn(`[COINFLOW_GATE4][${sessionEnvironment}][card] webhook amount mismatch`, {
+      sessionId: session.id,
+      expected: session.originalAmount,
+      actual: amount,
+    });
+    return { ok: true, skipped: true, reason: "amount_mismatch" };
+  }
+
+  if (currency !== "USD") {
+    return { ok: true, skipped: true, reason: "currency_mismatch" };
+  }
+
+  await execute(
+    `update deposit_payment_sessions set
+      provider_payment_id = coalesce(provider_payment_id, ?),
+      provider_order_id = coalesce(provider_order_id, ?),
+      provider_event_id = coalesce(provider_event_id, ?),
+      provider_status = ?,
+      provider_raw_status = ?,
+      provider_raw_payload = ?,
+      raw_provider_response = ?,
+      coinflow_payment_id = coalesce(coinflow_payment_id, ?),
+      coinflow_customer_id = coalesce(coinflow_customer_id, ?),
+      coinflow_last4 = coalesce(coinflow_last4, ?),
+      coinflow_bin = coalesce(coinflow_bin, ?),
+      updated_at = ?
+     where id = ?`,
+    [
+      providerPaymentId,
+      providerPaymentId,
+      eventId || null,
+      providerStatus,
+      rawStatus,
+      rawPayload,
+      rawPayload,
+      providerPaymentId,
+      readCoinflowString(data, ["customerId", "customer_id"]),
+      readCoinflowString(data, ["last4", "cardLast4"]),
+      readCoinflowString(data, ["bin", "cardBin"]),
+      timestamp,
+      session.id,
+    ],
+  );
+
+  let transactionRow = await queryOne(
+    "select * from transactions where id = ? and user_id = ? limit 1",
+    [session.transactionId ?? "", session.userId],
+  );
+  let depositRow = await queryOne(
+    "select * from deposits where id = ? and user_id = ? limit 1",
+    [session.depositId ?? "", session.userId],
+  );
+
+  if (!transactionRow || !depositRow) {
+    if (coinflowStatus !== "settled") {
+      return { ok: true, skipped: true, reason: "deposit_or_transaction_missing" };
+    }
+
+    const account = await getUserAndBalance(session.userId);
+    if (!account || !session.depositId || !session.transactionId) {
+      return { ok: true, skipped: true, reason: "deposit_or_transaction_missing" };
+    }
+
+    if (!depositRow) {
+      await execute(
+        `insert into deposits (
+          id, user_id, amount, original_amount, original_currency, credited_amount_usd,
+          exchange_rate, payment_method, payment_provider, transvoucher_transaction_id,
+          transvoucher_reference_id, cardholder_name, card_masked, status, balance_before,
+          balance_after, created_at, updated_at, completed_at, paid_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          session.depositId,
+          session.userId,
+          session.creditedAmountUsd,
+          session.originalAmount,
+          "USD",
+          session.creditedAmountUsd,
+          session.exchangeRate,
+          "card",
+          "Coinflow",
+          providerPaymentId,
+          localTransactionId ?? session.transvoucherReferenceId,
+          "Gate #4 hosted checkout",
+          localTransactionId ?? session.transactionId,
+          "processing",
+          account.balance.available,
+          account.balance.available,
+          timestamp,
+          timestamp,
+          null,
+          null,
+        ],
+      );
+    }
+
+    if (!transactionRow) {
+      await createTransactionRecord({
+        id: session.transactionId,
+        userId: session.userId,
+        kind: "deposit",
+        amount: session.creditedAmountUsd,
+        originalAmount: session.originalAmount,
+        originalCurrency: "USD",
+        displayCurrency: "USD",
+        creditedAmountUsd: session.creditedAmountUsd,
+        exchangeRate: session.exchangeRate,
+        paymentMethod: "card",
+        paymentProvider: "Coinflow",
+        transvoucherTransactionId: providerPaymentId,
+        transvoucherReferenceId: localTransactionId ?? session.transvoucherReferenceId,
+        paymentUrl: session.paymentUrl,
+        providerStatus,
+        rawProviderResponse: rawPayload,
+        status: "pending",
+        referenceId: session.depositId,
+        summary: "Awaiting Gate #4 deposit confirmation",
+        meta: {
+          provider: "Coinflow",
+          sessionId: session.id,
+          originalAmount: session.originalAmount,
+          originalCurrency: "USD",
+          creditedAmountUsd: session.creditedAmountUsd,
+          exchangeRate: session.exchangeRate,
+          paymentMethod: "card",
+          relatedOrderId: session.depositId,
+          environment: sessionEnvironment,
+        },
+      });
+    }
+
+    transactionRow = await queryOne(
+      "select * from transactions where id = ? and user_id = ? limit 1",
+      [session.transactionId, session.userId],
+    );
+    depositRow = await queryOne(
+      "select * from deposits where id = ? and user_id = ? limit 1",
+      [session.depositId, session.userId],
+    );
+
+    if (!transactionRow || !depositRow) {
+      return { ok: true, skipped: true, reason: "deposit_or_transaction_missing" };
+    }
+  }
+
+  if (coinflowStatus === "settled") {
+    console.info(`[COINFLOW_GATE4][${sessionEnvironment}][card] balance_credit_attempt`, {
+      sessionId: session.id,
+      providerPaymentId,
+    });
+  }
+
+  await reconcileTransVoucherDeposit({
+    transaction: normalizeTransaction(transactionRow),
+    deposit: normalizeDeposit(depositRow),
+    session,
+    providerName: "Coinflow",
+    providerStatus,
+    providerTransactionId: providerPaymentId,
+    providerReferenceId: localTransactionId ?? session.transvoucherReferenceId,
+    paymentUrl: session.paymentUrl,
+    paidAt: coinflowStatus === "settled" ? timestamp : null,
+    rawProviderResponse: sanitizeCoinflowResponse(payload),
+  });
+
+  if (coinflowStatus === "settled") {
+    console.info(`[COINFLOW_GATE4][${sessionEnvironment}][card] balance_credit_success`, {
+      sessionId: session.id,
+      providerPaymentId,
+    });
+  }
+
+  return {
+    ok: true,
+    environment: sessionEnvironment,
+    status: coinflowStatus,
+    providerStatus,
+    credited: coinflowStatus === "settled",
+  };
 }
 
 export async function refreshTransVoucherTransactionStatus(
@@ -9709,15 +13190,121 @@ export async function refreshTransVoucherTransactionStatus(
     providerTransactionId: providerStatus.transactionId,
     providerReferenceId: providerStatus.referenceId,
     providerStatus: providerStatus.status,
+    source: userId ? "manual_check" : "reconciliation",
     paymentUrl: providerStatus.paymentUrl,
     paidAt: providerStatus.paidAt,
     rawProviderResponse: providerStatus.raw,
   });
 }
 
+export async function refreshCleffoTransactionStatus(
+  transactionId: string,
+  userId?: string,
+) {
+  await ensureDatabase();
+  const transactionRow = await queryOne(
+    userId
+      ? "select * from transactions where id = ? and user_id = ? limit 1"
+      : "select * from transactions where id = ? limit 1",
+    userId ? [transactionId, userId] : [transactionId],
+  );
+
+  if (!transactionRow) {
+    return null;
+  }
+
+  const transaction = normalizeTransaction(transactionRow);
+
+  if (transaction.paymentProvider !== "Cleffo") {
+    return transaction;
+  }
+
+  if (!transaction.transvoucherTransactionId) {
+    return transaction;
+  }
+
+  const timestamp = nowIso();
+  await execute(
+    `update transactions set
+      provider_checked_at = ?,
+      reconciliation_attempts = reconciliation_attempts + 1,
+      updated_at = ?
+     where id = ?`,
+    [timestamp, timestamp, transaction.id],
+  );
+
+  try {
+    const providerStatus = await getCleffoPaymentLinkStatus(
+      transaction.transvoucherTransactionId,
+    );
+
+    const updated = await applyTransVoucherPaymentStatus({
+      transactionId: transaction.id,
+      providerName: "Cleffo",
+      providerTransactionId:
+        providerStatus.transactionReferenceNumber ??
+        transaction.transvoucherTransactionId,
+      providerReferenceId:
+        providerStatus.referenceId ?? transaction.transvoucherReferenceId,
+      providerStatus: providerStatus.status,
+      source: userId ? "manual_check" : "reconciliation",
+      paymentUrl: providerStatus.paymentUrl ?? transaction.paymentUrl,
+      paidAt: providerStatus.paidAt,
+      rawProviderResponse: providerStatus.raw,
+    });
+
+    await insertSecurityAuditEvent({
+      eventType: "cleffo_payment_status_updated",
+      userId: transaction.userId,
+      username: null,
+      telegramUsername: null,
+      role: null,
+      ipAddress: "system",
+      country: "unknown",
+      userAgent: "server",
+      language: "unknown",
+      route: "cleffo-status-refresh",
+      timestamp,
+    });
+
+    return updated;
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unable to refresh Gate #2 status.";
+    await execute(
+      `update transactions set
+        last_error = ?,
+        next_check_at = ?,
+        updated_at = ?
+       where id = ?`,
+      [
+        message,
+        new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        nowIso(),
+        transaction.id,
+      ],
+    );
+    await insertSecurityAuditEvent({
+      eventType: "cleffo_payment_failed",
+      userId: transaction.userId,
+      username: null,
+      telegramUsername: null,
+      role: null,
+      ipAddress: "system",
+      country: "unknown",
+      userAgent: "server",
+      language: "unknown",
+      route: "cleffo-status-refresh",
+      timestamp,
+    });
+    throw error;
+  }
+}
+
 export async function reconcilePendingTransVoucherPayments(input?: {
   limit?: number;
-  triggerSource?: "cron" | "manual";
+  triggerSource?: "cron" | "manual" | "active_polling";
+  activeOnly?: boolean;
 }) {
   await ensureDatabase();
 
@@ -9725,6 +13312,9 @@ export async function reconcilePendingTransVoucherPayments(input?: {
   const runId = randomUUID();
   const startedAt = nowIso();
   const baselineAt = await getTransVoucherReconciliationBaselineAt();
+  const activeWindowAt = input?.activeOnly
+    ? new Date(Date.now() - 30 * 60 * 1000).toISOString()
+    : null;
 
   await execute(
     `insert into payment_reconciliation_runs (
@@ -9738,16 +13328,20 @@ export async function reconcilePendingTransVoucherPayments(input?: {
      where payment_provider = 'TransVoucher'
        and transvoucher_transaction_id is not null
        and (? is null or created_at >= ?)
+       and (? is null or created_at >= ?)
        and processed_at is null
        and credited_at is null
        and (next_check_at is null or next_check_at <= ?)
        and (
          status in ('pending', 'attempting', 'processing')
-         or lower(coalesce(provider_status, '')) in ('', 'pending', 'attempting', 'processing', 'created')
+         or lower(coalesce(provider_status, '')) in (
+           '', 'pending', 'attempting', 'processing', 'created',
+           'waiting', 'in_progress', 'unknown'
+         )
        )
      order by coalesce(provider_checked_at, created_at) asc
      limit ?`,
-    [baselineAt, baselineAt, startedAt, limit],
+    [baselineAt, baselineAt, activeWindowAt, activeWindowAt, startedAt, limit],
   );
 
   const summary = {
@@ -9775,6 +13369,7 @@ export async function reconcilePendingTransVoucherPayments(input?: {
         providerTransactionId: before.transvoucherTransactionId,
         providerReferenceId: before.transvoucherReferenceId,
         providerStatus: "expired",
+        source: "reconciliation",
         paymentUrl: before.paymentUrl,
         paidAt: null,
         rawProviderResponse: {
@@ -9907,12 +13502,545 @@ export function getTransactionResultTarget(transaction: TransactionRecord | null
   return null;
 }
 
+function getNestedProviderString(payload: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const direct = payload[key];
+    if (typeof direct === "string" && direct.trim()) {
+      return direct.trim();
+    }
+
+    if (typeof direct === "number" && Number.isFinite(direct)) {
+      return String(direct);
+    }
+
+    for (const value of Object.values(payload)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const nested = (value as Record<string, unknown>)[key];
+        if (typeof nested === "string" && nested.trim()) {
+          return nested.trim();
+        }
+
+        if (typeof nested === "number" && Number.isFinite(nested)) {
+          return String(nested);
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+export function normalizeWertStatus(rawStatus: string | null | undefined) {
+  const normalized = String(rawStatus ?? "").trim().toLowerCase();
+
+  if (
+    ["success", "succeeded", "complete", "completed", "paid", "approved", "executed"].includes(
+      normalized,
+    )
+  ) {
+    return "succeeded";
+  }
+
+  if (
+    [
+      "failed",
+      "fail",
+      "declined",
+      "rejected",
+      "canceled",
+      "cancelled",
+      "expired",
+      "error",
+    ].includes(normalized)
+  ) {
+    return normalized === "expired" ? "expired" : "failed";
+  }
+
+  if (["pending", "processing", "created", "waiting", "submitted"].includes(normalized)) {
+    return normalized === "created" ? "pending" : normalized;
+  }
+
+  return normalized || "unknown";
+}
+
+function getWertOrderString(order: Record<string, unknown> | null, keys: string[]) {
+  if (!order) {
+    return null;
+  }
+
+  for (const key of keys) {
+    const value = order[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+
+  return null;
+}
+
+async function processWertOrderUpdate(input: {
+  clickId: string;
+  wertOrderId?: string | null;
+  order: Record<string, unknown> | null;
+  rawPayload: unknown;
+  source: "webhook" | "reconciliation" | "manual_check" | "status_poll";
+}) {
+  await ensureDatabase();
+  const timestamp = nowIso();
+  const rawStatus = getWertOrderString(input.order, ["status", "state"]) ?? "unknown";
+  const status = normalizeWertStatus(rawStatus);
+  const orderId =
+    input.wertOrderId ??
+    getWertOrderString(input.order, ["order_id", "id", "external_order_id"]);
+  const txHash = getWertOrderString(input.order, ["tx_id", "tx_hash", "transaction_hash"]);
+
+  const sessionRow = await queryOne(
+    `select * from deposit_payment_sessions
+     where provider_key = 'wert'
+       and (provider_click_id = ? or transvoucher_reference_id = ? or transaction_id = ?)
+     limit 1`,
+    [input.clickId, input.clickId, input.clickId],
+  );
+
+  if (!sessionRow) {
+    console.warn("Wert update skipped: local session not found.", {
+      clickId: input.clickId,
+      orderId,
+      status,
+    });
+    return { ok: false, skipped: true, reason: "session_not_found", status };
+  }
+  const wertSessionRow = await queryOne(
+    "select * from wert_payment_sessions where click_id = ? limit 1",
+    [input.clickId],
+  );
+
+  await execute(
+    `update wert_payment_sessions set
+      wert_order_id = coalesce(wert_order_id, ?),
+      wert_status = ?,
+      status = ?,
+      chain_tx_hash = coalesce(chain_tx_hash, ?),
+      provider_payload_safe = ?,
+      last_status_check_at = case when ? in ('reconciliation', 'manual_check', 'status_poll') then ? else last_status_check_at end,
+      last_webhook_at = case when ? = 'webhook' then ? else last_webhook_at end,
+      updated_at = ?
+     where click_id = ?`,
+    [
+      orderId,
+      status,
+      isProviderCompletedStatus(status)
+        ? "succeeded"
+        : isProviderTerminalFailureStatus(status)
+          ? status === "expired"
+            ? "expired"
+            : "failed"
+          : status === "unknown"
+            ? "manual_review"
+            : "pending",
+      txHash,
+      toJson(input.rawPayload),
+      input.source,
+      timestamp,
+      input.source,
+      timestamp,
+      timestamp,
+      input.clickId,
+    ],
+  );
+
+  if (status === "unknown") {
+    await insertSecurityAuditEvent({
+      eventType: "wert_unknown_status",
+      userId: sessionRow.user_id ? String(sessionRow.user_id) : null,
+      ipAddress: "unknown",
+      country: "unknown",
+      userAgent: "server",
+      language: "unknown",
+      route: "/api/webhooks/wert",
+      timestamp,
+    });
+    return { ok: true, status, transaction: null };
+  }
+
+  let transaction: TransactionRecord | null = null;
+
+  if (
+    isProviderCompletedStatus(status) &&
+    String(wertSessionRow?.type ?? "balance_topup") === "nft_purchase"
+  ) {
+    if (!wertSessionRow?.nft_delivered_at) {
+      await execute(
+        `insert into user_collectibles (
+          id, user_id, token_id, quantity, source_payment_session_id,
+          provider_key, chain_tx_hash, delivered_at, created_at
+        ) values (?, ?, ?, ?, ?, 'wert', ?, ?, ?)`,
+        [
+          randomUUID(),
+          String(sessionRow.user_id),
+          Number(wertSessionRow?.token_id ?? 1),
+          Number(wertSessionRow?.token_quantity ?? 1),
+          String(sessionRow.id),
+          txHash,
+          timestamp,
+          timestamp,
+        ],
+      );
+      await execute(
+        `update wert_payment_sessions set
+          nft_delivered_at = coalesce(nft_delivered_at, ?),
+          chain_tx_hash = coalesce(chain_tx_hash, ?),
+          status = 'succeeded',
+          updated_at = ?
+         where click_id = ?`,
+        [timestamp, txHash, timestamp, input.clickId],
+      );
+      await execute(
+        `update deposit_payment_sessions set
+          status = 'completed',
+          nft_delivered_at = coalesce(nft_delivered_at, ?),
+          chain_tx_hash = coalesce(chain_tx_hash, ?),
+          provider_status = ?,
+          raw_provider_response = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          timestamp,
+          txHash,
+          status,
+          toJson(input.rawPayload),
+          timestamp,
+          String(sessionRow.id),
+        ],
+      );
+    }
+  } else {
+    transaction = await applyTransVoucherPaymentStatus({
+    transactionId: String(sessionRow.transaction_id ?? input.clickId),
+    localReferenceId: String(sessionRow.deposit_id ?? ""),
+    providerTransactionId: orderId,
+    providerReferenceId: input.clickId,
+    providerName: "Wert.io",
+    providerStatus: status,
+    source: input.source === "webhook" ? "webhook" : "manual_check",
+    paymentUrl: String(sessionRow.payment_url ?? ""),
+    paidAt: isProviderCompletedStatus(status) ? timestamp : null,
+    rawProviderResponse: input.rawPayload,
+    });
+  }
+
+  if (txHash) {
+    await execute(
+      `update deposit_payment_sessions set
+        chain_tx_hash = coalesce(chain_tx_hash, ?),
+        updated_at = ?
+       where id = ?`,
+      [txHash, timestamp, String(sessionRow.id)],
+    );
+  }
+
+  await insertSecurityAuditEvent({
+    eventType: isProviderCompletedStatus(status)
+      ? "wert_payment_succeeded"
+      : isProviderTerminalFailureStatus(status)
+        ? "wert_payment_failed"
+        : "wert_status_updated",
+    userId: sessionRow.user_id ? String(sessionRow.user_id) : null,
+    ipAddress: "unknown",
+    country: "unknown",
+    userAgent: "server",
+    language: "unknown",
+    route: "/api/webhooks/wert",
+    timestamp,
+  });
+
+  if (isProviderCompletedStatus(status) && String(wertSessionRow?.type ?? "balance_topup") === "balance_topup") {
+    await execute(
+      `update wert_payment_sessions set
+        balance_credited_at = coalesce(balance_credited_at, ?)
+       where click_id = ?`,
+      [timestamp, input.clickId],
+    );
+    await insertSecurityAuditEvent({
+      eventType: "wert_credit_applied",
+      userId: sessionRow.user_id ? String(sessionRow.user_id) : null,
+      ipAddress: "unknown",
+      country: "unknown",
+      userAgent: "server",
+      language: "unknown",
+      route: "/api/webhooks/wert",
+      timestamp,
+    });
+  }
+
+  return { ok: true, status, transaction };
+}
+
+export async function syncWertOrderStatus(input: {
+  clickId?: string | null;
+  wertOrderId?: string | null;
+  source?: "reconciliation" | "manual_check" | "status_poll";
+}) {
+  const lookup = await lookupWertOrderStatus({
+    clickId: input.clickId,
+    wertOrderId: input.wertOrderId,
+  });
+  const clickId =
+    input.clickId ??
+    getWertOrderString(lookup.order, ["click_id"]) ??
+    "";
+
+  if (!clickId) {
+    throw new Error("Wert order lookup did not return click_id.");
+  }
+
+  return processWertOrderUpdate({
+    clickId,
+    wertOrderId:
+      input.wertOrderId ?? getWertOrderString(lookup.order, ["order_id", "id"]),
+    order: lookup.order,
+    rawPayload: lookup.raw,
+    source: input.source ?? "manual_check",
+  });
+}
+
+export async function reconcilePendingWertPayments(input?: {
+  limit?: number;
+  maxAgeMinutes?: number;
+}) {
+  await ensureDatabase();
+  const startedAt = nowIso();
+  const limit = Math.min(Math.max(input?.limit ?? 25, 1), 100);
+  const maxAgeMinutes = Math.min(Math.max(input?.maxAgeMinutes ?? 60, 5), 240);
+  const since = new Date(Date.now() - maxAgeMinutes * 60 * 1000).toISOString();
+  const rows = await queryMany(
+    `select * from wert_payment_sessions
+     where status in ('created', 'pending', 'manual_review')
+       and created_at >= ?
+     order by coalesce(last_status_check_at, created_at) asc
+     limit ?`,
+    [since, limit],
+  );
+  const summary = {
+    checked: 0,
+    updated: 0,
+    succeeded: 0,
+    failed: 0,
+    pending: 0,
+    manualReview: 0,
+    errors: 0,
+    lastRunAt: startedAt,
+    lastError: null as string | null,
+  };
+
+  for (const row of rows) {
+    summary.checked += 1;
+    try {
+      const result = await syncWertOrderStatus({
+        clickId: String(row.click_id),
+        wertOrderId: row.wert_order_id ? String(row.wert_order_id) : null,
+        source: "reconciliation",
+      });
+      if (result.status === "succeeded") {
+        summary.succeeded += 1;
+      } else if (["failed", "expired"].includes(String(result.status))) {
+        summary.failed += 1;
+      } else if (result.status === "unknown") {
+        summary.manualReview += 1;
+      } else {
+        summary.pending += 1;
+      }
+      summary.updated += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown Wert reconciliation error.";
+      summary.errors += 1;
+      summary.lastError = message;
+      await execute(
+        `update wert_payment_sessions set
+          last_status_check_at = ?,
+          provider_payload_safe = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          nowIso(),
+          toJson({ reconciliationError: message }),
+          nowIso(),
+          String(row.id),
+        ],
+      );
+    }
+  }
+
+  return summary;
+}
+
+export async function processWertWebhookPayload(payload: Record<string, unknown>) {
+  await ensureDatabase();
+  const timestamp = nowIso();
+  const clickId = getNestedProviderString(payload, [
+    "click_id",
+    "clickId",
+    "reference_id",
+    "referenceId",
+    "local_transaction_id",
+    "transaction_id",
+  ]);
+  const providerOrderId = getNestedProviderString(payload, [
+    "order_id",
+    "orderId",
+    "payment_id",
+    "paymentId",
+    "id",
+  ]);
+  const rawStatus =
+    getNestedProviderString(payload, ["status", "state", "order_status", "payment_status"]) ??
+    "unknown";
+  const status = normalizeWertStatus(rawStatus);
+
+  await insertSecurityAuditEvent({
+    eventType: "wert_webhook_received",
+    ipAddress: "unknown",
+    country: "unknown",
+    userAgent: "server",
+    language: "unknown",
+    route: "/api/webhooks/wert",
+    timestamp,
+  });
+
+  const sessionRow = clickId
+    ? await queryOne(
+        `select * from deposit_payment_sessions
+         where provider_key = 'wert'
+           and (provider_click_id = ? or transvoucher_reference_id = ? or transaction_id = ?)
+         limit 1`,
+        [clickId, clickId, clickId],
+      )
+    : null;
+
+  if (!sessionRow) {
+    await insertSecurityAuditEvent({
+      eventType: "wert_unknown_status",
+      ipAddress: "unknown",
+      country: "unknown",
+      userAgent: "server",
+      language: "unknown",
+      route: "/api/webhooks/wert",
+      timestamp,
+    });
+    console.warn("Wert webhook skipped: local session not found.", {
+      clickId,
+      providerOrderId,
+      status,
+    });
+    return { ok: false, skipped: true, reason: "session_not_found" };
+  }
+  const resolvedClickId = String(clickId);
+
+  if (providerOrderId) {
+    await execute(
+      `update deposit_payment_sessions set
+        provider_order_id = coalesce(provider_order_id, ?),
+        updated_at = ?
+       where id = ?`,
+      [providerOrderId, timestamp, String(sessionRow.id)],
+    );
+  }
+
+  await execute(
+    `update wert_payment_sessions set
+      last_webhook_at = ?,
+      provider_payload_safe = ?,
+      updated_at = ?
+     where click_id = ?`,
+    [timestamp, toJson(payload), timestamp, resolvedClickId],
+  );
+
+  const lookup = await lookupWertOrderStatus({
+    clickId: resolvedClickId,
+    wertOrderId: providerOrderId,
+  });
+
+  return processWertOrderUpdate({
+    clickId: resolvedClickId,
+    wertOrderId: providerOrderId,
+    order: lookup.order,
+    rawPayload: {
+      webhook: payload,
+      dataApi: lookup.raw,
+      webhookStatus: status,
+    },
+    source: "webhook",
+  });
+}
+
 function extractWebhookRecord(value: unknown) {
   if (!value || typeof value !== "object") {
     return {} as Record<string, unknown>;
   }
 
   return value as Record<string, unknown>;
+}
+
+function firstWebhookString(
+  ...values: unknown[]
+) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+
+  return null;
+}
+
+function extractTransVoucherWebhookStatus(
+  payload: Record<string, unknown>,
+  envelope: Record<string, unknown>,
+  eventType: string,
+) {
+  const directStatus = firstWebhookString(
+    envelope.status,
+    envelope.payment_status,
+    envelope.paymentStatus,
+    envelope.transaction_status,
+    envelope.transactionStatus,
+    envelope.provider_status,
+    envelope.providerStatus,
+    envelope.result,
+    envelope.state,
+    payload.status,
+    payload.payment_status,
+    payload.transaction_status,
+    payload.result,
+    payload.state,
+  );
+
+  if (directStatus) {
+    return directStatus;
+  }
+
+  const normalizedEvent = eventType.toLowerCase();
+  if (/(succeeded|success|paid|completed|approved|captured|confirmed)/.test(normalizedEvent)) {
+    return "succeeded";
+  }
+
+  if (/(declined|failed|rejected|cancelled|canceled|expired|error)/.test(normalizedEvent)) {
+    return "failed";
+  }
+
+  if (/(processing|attempting|pending|created|waiting)/.test(normalizedEvent)) {
+    return "processing";
+  }
+
+  return "pending";
 }
 
 export async function processTransVoucherWebhookPayload(
@@ -9931,33 +14059,51 @@ export async function processTransVoucherWebhookPayload(
   );
   const metadata = extractWebhookRecord(envelope.metadata ?? payload.metadata);
   const localTransactionId =
-    typeof metadata.internal_transaction_id === "string"
-      ? metadata.internal_transaction_id
-      : null;
+    firstWebhookString(
+      metadata.internal_transaction_id,
+      metadata.internalTransactionId,
+      metadata.transactionId,
+      metadata.transaction_id,
+      payload.internal_transaction_id,
+    );
+  const localReferenceId =
+    firstWebhookString(
+      metadata.depositId,
+      metadata.deposit_id,
+      metadata.orderId,
+      metadata.order_id,
+      metadata.referenceId,
+      metadata.reference_id,
+      envelope.external_id,
+      envelope.externalId,
+      envelope.reference,
+      payload.external_id,
+      payload.reference,
+    );
   const providerTransactionId =
-    typeof envelope.transaction_id === "string"
-      ? envelope.transaction_id
-      : typeof envelope.transactionId === "string"
-        ? envelope.transactionId
-        : null;
+    firstWebhookString(
+      envelope.transaction_id,
+      envelope.transactionId,
+      envelope.payment_id,
+      envelope.paymentId,
+      envelope.id,
+      payload.transaction_id,
+      payload.transactionId,
+      payload.payment_id,
+      payload.id,
+    );
   const providerReferenceId =
-    typeof envelope.reference_id === "string"
-      ? envelope.reference_id
-      : typeof envelope.referenceId === "string"
-        ? envelope.referenceId
-        : null;
-  const providerStatus =
-    typeof envelope.status === "string"
-      ? envelope.status
-      : eventType === "payment_intent.succeeded"
-        ? "succeeded"
-        : eventType === "payment_intent.failed"
-          ? "failed"
-          : eventType === "payment_intent.processing"
-            ? "processing"
-            : eventType === "payment_intent.attempting"
-              ? "attempting"
-              : "pending";
+    firstWebhookString(
+      envelope.reference_id,
+      envelope.referenceId,
+      envelope.reference,
+      envelope.external_id,
+      envelope.externalId,
+      payload.reference_id,
+      payload.referenceId,
+      payload.reference,
+    );
+  const providerStatus = extractTransVoucherWebhookStatus(payload, envelope, eventType);
   const paidAt =
     typeof envelope.paid_at === "string"
       ? envelope.paid_at
@@ -9973,9 +14119,11 @@ export async function processTransVoucherWebhookPayload(
 
   const transaction = await applyTransVoucherPaymentStatus({
     transactionId: localTransactionId,
+    localReferenceId,
     providerTransactionId,
     providerReferenceId,
     providerStatus,
+    source: "webhook",
     paymentUrl,
     paidAt,
     rawProviderResponse: payload,
@@ -9985,6 +14133,10 @@ export async function processTransVoucherWebhookPayload(
     ok: true as const,
     eventType,
     transactionId: transaction?.id ?? null,
+    providerTransactionId,
+    providerReferenceId,
+    rawStatus: providerStatus,
+    normalizedStatus: normalizeProviderStatus(providerStatus),
     status: transaction?.status ?? null,
     skipped: !transaction,
   };
@@ -10068,6 +14220,7 @@ export async function createCheckoutOrder(input: {
   }>;
 }) {
   await ensureDatabase();
+  await requireDocumentAcceptanceForUser(input.userId);
 
   const account = await getUserAndBalance(input.userId);
 
@@ -10399,14 +14552,14 @@ export async function getOrderById(orderId: string, userId?: string) {
 
 export async function getAdminStats() {
   await ensureDatabase();
-  const [revenue, orders, users, withdrawals] = await Promise.all([
+  const [revenue, orders, users, pendingOrders] = await Promise.all([
     queryOne("select coalesce(sum(total), 0) as value from orders where payment_state = 'completed'"),
     queryOne("select count(*) as value from orders"),
     queryOne("select count(*) as value from profiles where role = 'user'"),
     queryOne(
       `select count(*) as value
-       from withdrawal_requests
-       where status in ('pending', 'approved', 'processing')`,
+       from orders
+       where payment_state in ('pending', 'processing')`,
     ),
   ]);
 
@@ -10427,9 +14580,9 @@ export async function getAdminStats() {
       change: "Live",
     },
     {
-      label: "Pending withdrawals",
-      value: `${Number(withdrawals?.value ?? 0)}`,
-      change: "Action required",
+      label: "Pending orders",
+      value: `${Number(pendingOrders?.value ?? 0)}`,
+      change: "Review",
     },
   ];
 }
@@ -10464,35 +14617,1141 @@ export async function getAdminProducts() {
   return rows.map((row) => normalizeProduct(row));
 }
 
-export async function getAdminUsers() {
+type AdminAuditInput = {
+  adminId: string;
+  targetUserId?: string | null;
+  action: string;
+  entityType: string;
+  entityId: string;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  reason: string;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+};
+
+function requireReason(value: unknown) {
+  const reason = normalizeEditableOptionalString(value);
+  if (reason.length < 3) {
+    throw new Error("Reason is required.");
+  }
+  return reason;
+}
+
+function normalizePositiveAmount(value: unknown, label: string) {
+  const amount = normalizeEditableDepositLimit(value, label);
+  if (amount <= 0) {
+    throw new Error(`${label} must be greater than 0.`);
+  }
+  return amount;
+}
+
+function normalizePositiveQuantity(value: unknown) {
+  const quantity = Number(
+    typeof value === "string" ? value.trim() : value,
+  );
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new Error("Quantity must be a positive integer.");
+  }
+  return quantity;
+}
+
+function normalizeOptionalPastIsoDate(value: unknown, label: string) {
+  const raw = normalizeEditableOptionalString(value);
+  if (!raw) {
+    return null;
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`${label} is invalid.`);
+  }
+  if (date.getTime() > Date.now()) {
+    throw new Error(`${label} cannot be in the future.`);
+  }
+  return date.toISOString();
+}
+
+async function insertAdminAuditLog(input: AdminAuditInput) {
+  await ensureAdminUserManagementTables();
+  await execute(
+    `insert into admin_audit_logs (
+      id, admin_id, target_user_id, action, entity_type, entity_id,
+      before_json, after_json, reason, ip_address, user_agent, created_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      input.adminId,
+      input.targetUserId ?? null,
+      input.action,
+      input.entityType,
+      input.entityId,
+      input.before ? toJson(input.before) : null,
+      input.after ? toJson(input.after) : null,
+      input.reason,
+      input.ipAddress ?? null,
+      input.userAgent ?? null,
+      nowIso(),
+    ],
+  );
+}
+
+async function getBalanceRowForUser(userId: string) {
+  const row = await queryOne("select * from balances where user_id = ? limit 1", [userId]);
+  if (!row) {
+    throw new Error("User balance not found.");
+  }
+  return row;
+}
+
+async function getProductRowForAdmin(productId: string) {
+  const row = await queryOne(
+    "select * from products where id = ? and archived = 0 limit 1",
+    [productId],
+  );
+  if (!row) {
+    throw new Error("Product not found.");
+  }
+  return row;
+}
+
+export async function getAdminUserDetail(userId: string) {
   await ensureDatabase();
+  await ensureAdminUserManagementTables();
+  return getAdminUserEntryById(userId);
+}
+
+export async function getAdminUserTransactions(input: {
+  userId: string;
+  query?: string | null;
+  type?: string | null;
+  status?: string | null;
+  source?: string | null;
+  provider?: string | null;
+  limit?: number;
+}) {
+  await ensureDatabase();
+  await ensureAdminUserManagementTables();
+  const where = ["transactions.user_id = ?"];
+  const args: SqlValue[] = [input.userId];
+  const query = normalizeEditableOptionalString(input.query);
+
+  if (input.type && input.type !== "all") {
+    where.push("transactions.kind = ?");
+    args.push(input.type);
+  }
+  if (input.status && input.status !== "all") {
+    where.push("transactions.status = ?");
+    args.push(input.status);
+  }
+  if (input.source && input.source !== "all") {
+    where.push("coalesce(transactions.source, 'system') = ?");
+    args.push(input.source);
+  }
+  if (input.provider && input.provider !== "all") {
+    where.push("coalesce(transactions.payment_provider, '') = ?");
+    args.push(input.provider);
+  }
+  if (query) {
+    where.push(
+      `(transactions.id like ? or transactions.reference_id like ? or coalesce(transactions.transvoucher_transaction_id, '') like ? or coalesce(transactions.admin_note, '') like ? or coalesce(transactions.summary, '') like ?)`,
+    );
+    const like = `%${query}%`;
+    args.push(like, like, like, like, like);
+  }
+
+  args.push(Math.max(1, Math.min(200, input.limit ?? 100)));
+  const rows = await queryMany(
+    `select transactions.*, products.title as related_product_title, orders.id as related_order
+     from transactions
+     left join products on products.id = transactions.related_product_id
+     left join orders on orders.id = coalesce(transactions.related_order_id, transactions.reference_id)
+     where ${where.join(" and ")}
+     order by transactions.created_at desc
+     limit ?`,
+    args,
+  );
+
+  return rows.map((row) => ({
+    transaction: normalizeTransaction(row),
+    direction: row.direction ? String(row.direction) : inferTransactionDirection(String(row.kind)),
+    source: row.source ? String(row.source) : "system",
+    balanceBefore:
+      row.balance_before === null || row.balance_before === undefined
+        ? null
+        : Number(row.balance_before),
+    balanceAfter:
+      row.balance_after === null || row.balance_after === undefined
+        ? null
+        : Number(row.balance_after),
+    adminNote: row.admin_note ? String(row.admin_note) : null,
+    supportNote: row.support_note ? String(row.support_note) : null,
+    visibleDescription: row.visible_description ? String(row.visible_description) : null,
+    relatedProductId: row.related_product_id ? String(row.related_product_id) : null,
+    relatedProductTitle: row.related_product_title ? String(row.related_product_title) : null,
+    relatedOrderId: row.related_order_id
+      ? String(row.related_order_id)
+      : row.related_order
+        ? String(row.related_order)
+        : null,
+  }));
+}
+
+function inferTransactionDirection(kind: string) {
+  if (["deposit", "refund", "manual_credit", "product_remove"].includes(kind)) {
+    return "credit";
+  }
+  if (["withdrawal", "purchase", "manual_debit", "product_grant"].includes(kind)) {
+    return "debit";
+  }
+  return "neutral";
+}
+
+export async function getAdminUserInventory(userId: string) {
+  await ensureDatabase();
+  await ensureAdminUserManagementTables();
+  const rows = await queryMany(
+    `select
+      owned_cards.id as inventory_id,
+      owned_cards.quantity,
+      owned_cards.order_id,
+      owned_cards.acquired_at,
+      owned_cards.status as inventory_status,
+      owned_cards.acquisition_source,
+      owned_cards.removed_at,
+      owned_cards.delivery_mode,
+      owned_cards.admin_note,
+      owned_cards.visible_user_note,
+      owned_cards.related_transaction_id,
+      owned_cards.related_order_id,
+      products.*
+     from owned_cards
+     inner join products on products.id = owned_cards.product_id
+     where owned_cards.user_id = ?
+     order by owned_cards.acquired_at desc`,
+    [userId],
+  );
+
+  return rows.map((row) => ({
+    inventoryId: String(row.inventory_id),
+    quantity: Number(row.quantity),
+    orderId: String(row.related_order_id ?? row.order_id ?? ""),
+    acquiredAt: String(row.acquired_at),
+    status: row.inventory_status ? String(row.inventory_status) : "active",
+    acquisitionSource: row.acquisition_source
+      ? String(row.acquisition_source)
+      : "purchase",
+    removedAt: row.removed_at ? String(row.removed_at) : null,
+    deliveryMode: row.delivery_mode ? String(row.delivery_mode) : "digital",
+    adminNote: row.admin_note ? String(row.admin_note) : null,
+    visibleUserNote: row.visible_user_note ? String(row.visible_user_note) : null,
+    relatedTransactionId: row.related_transaction_id
+      ? String(row.related_transaction_id)
+      : null,
+    product: normalizeProduct(row),
+  }));
+}
+
+export async function searchAdminProducts(input: {
+  query?: string | null;
+  limit?: number;
+}) {
+  await ensureDatabase();
+  const query = normalizeEditableOptionalString(input.query);
+  const limit = Math.max(1, Math.min(50, input.limit ?? 20));
+  const rows = query
+    ? await queryMany(
+        `select * from products
+         where archived = 0
+           and (id like ? or title like ? or collection like ? or category like ? or edition like ?)
+         order by status = 'active' desc, title asc
+         limit ?`,
+        [`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, limit],
+      )
+    : await queryMany(
+        `select * from products
+         where archived = 0
+         order by status = 'active' desc, homepage_featured desc, updated_at desc
+         limit ?`,
+        [limit],
+      );
+
+  return rows.map((row) => normalizeProduct(row));
+}
+
+export async function getAdminUserAuditLog(userId: string, limit = 100) {
+  await ensureDatabase();
+  await ensureAdminUserManagementTables();
+  const rows = await queryMany(
+    `select admin_audit_logs.*, users.username as admin_username
+     from admin_audit_logs
+     left join users on users.id = admin_audit_logs.admin_id
+     where admin_audit_logs.target_user_id = ?
+     order by admin_audit_logs.created_at desc
+     limit ?`,
+    [userId, Math.max(1, Math.min(200, limit))],
+  );
+
+  return rows.map((row) => ({
+    id: String(row.id),
+    adminId: String(row.admin_id),
+    adminUsername: row.admin_username ? String(row.admin_username) : "Admin",
+    targetUserId: row.target_user_id ? String(row.target_user_id) : null,
+    action: String(row.action),
+    entityType: String(row.entity_type),
+    entityId: String(row.entity_id),
+    before: fromJson<Record<string, unknown>>(row.before_json),
+    after: fromJson<Record<string, unknown>>(row.after_json),
+    reason: String(row.reason),
+    ipAddress: row.ip_address ? String(row.ip_address) : null,
+    userAgent: row.user_agent ? String(row.user_agent) : null,
+    createdAt: String(row.created_at),
+  }));
+}
+
+export async function adminAdjustUserBalance(input: {
+  adminUserId: string;
+  targetUserId: string;
+  adjustmentType: unknown;
+  amount: unknown;
+  currency?: unknown;
+  reason: unknown;
+  internalNote?: unknown;
+  visibleUserNote?: unknown;
+  linkedTransactionId?: unknown;
+  linkedOrderId?: unknown;
+  ipAddress?: string;
+  userAgent?: string;
+}) {
+  await ensureDatabase();
+  const admin = await getAdminIdentity(input.adminUserId);
+  const target = await getAdminUserEntryById(input.targetUserId);
+  if (!target) {
+    throw new Error("User not found.");
+  }
+
+  const type = String(input.adjustmentType);
+  if (type !== "credit" && type !== "debit") {
+    throw new Error("Adjustment type must be credit or debit.");
+  }
+  const amount = normalizePositiveAmount(input.amount, "Amount");
+  const reason = requireReason(input.reason);
+  const currency = (normalizeEditableOptionalString(input.currency) || "USD") as SupportedCurrency;
+  if (currency !== "USD" && currency !== "EUR") {
+    throw new Error("Unsupported currency.");
+  }
+
+  const balanceRow = await getBalanceRowForUser(input.targetUserId);
+  const balanceBefore = Number(balanceRow.available);
+  const balanceAfter =
+    type === "credit" ? balanceBefore + amount : balanceBefore - amount;
+  if (balanceAfter < 0) {
+    throw new Error("Debit cannot make user balance negative.");
+  }
+
+  const timestamp = nowIso();
+  const transactionId = createReadableId("TXN");
+  const kind = type === "credit" ? "manual_credit" : "manual_debit";
+  const direction = type === "credit" ? "credit" : "debit";
+  const summary =
+    normalizeEditableOptionalString(input.visibleUserNote) ||
+    (type === "credit" ? "Manual balance credit" : "Manual balance debit");
+
+  await execute(
+    `insert into transactions (
+      id, user_id, kind, amount, original_amount, original_currency, display_currency,
+      credited_amount_usd, exchange_rate, payment_method, payment_provider, status,
+      reference_id, summary, meta_json, created_at, updated_at, processed_at, credited_at,
+      direction, balance_before, balance_after, source, admin_note, support_note,
+      visible_description, related_order_id, edited_by_admin_id, edited_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      transactionId,
+      input.targetUserId,
+      kind,
+      amount,
+      amount,
+      currency,
+      currency,
+      currency === "USD" ? amount : null,
+      currency === "USD" ? 1 : null,
+      "Admin Adjustment",
+      "Admin",
+      "completed",
+      normalizeEditableNullableString(input.linkedTransactionId) ?? transactionId,
+      summary,
+      toJson({ reason, linkedTransactionId: normalizeEditableNullableString(input.linkedTransactionId) }),
+      timestamp,
+      timestamp,
+      timestamp,
+      timestamp,
+      direction,
+      balanceBefore,
+      balanceAfter,
+      "admin_action",
+      normalizeEditableNullableString(input.internalNote),
+      null,
+      normalizeEditableNullableString(input.visibleUserNote),
+      normalizeEditableNullableString(input.linkedOrderId),
+      admin.id,
+      timestamp,
+    ],
+  );
+  await execute(
+    `update balances set available = ?, updated_at = ? where user_id = ?`,
+    [balanceAfter, timestamp, input.targetUserId],
+  );
+  await appendArchiveLedgerEntry({
+    eventType: kind,
+    userId: input.targetUserId,
+    adminId: admin.id,
+    entityType: "transaction",
+    entityId: transactionId,
+    relatedTransactionId: transactionId,
+    title: summary,
+    description: reason,
+    metadata: { balanceBefore, balanceAfter, amount, direction },
+  });
+  await insertAdminAuditLog({
+    adminId: admin.id,
+    targetUserId: input.targetUserId,
+    action: type === "credit" ? "balance_credit" : "balance_debit",
+    entityType: "transaction",
+    entityId: transactionId,
+    before: { available: balanceBefore },
+    after: { available: balanceAfter },
+    reason,
+    ipAddress: input.ipAddress,
+    userAgent: input.userAgent,
+  });
+
+  return getAdminUserDetail(input.targetUserId);
+}
+
+export async function adminAddProductToUser(input: {
+  adminUserId: string;
+  targetUserId: string;
+  productId: unknown;
+  quantity: unknown;
+  purchaseDate?: unknown;
+  acquisitionSource?: unknown;
+  reason: unknown;
+  adminNote?: unknown;
+  visibleUserNote?: unknown;
+  reduceStock?: unknown;
+  createTransaction?: unknown;
+  chargeBalance?: unknown;
+  ipAddress?: string;
+  userAgent?: string;
+}) {
+  await ensureDatabase();
+  const admin = await getAdminIdentity(input.adminUserId);
+  const target = await getAdminUserEntryById(input.targetUserId);
+  if (!target) {
+    throw new Error("User not found.");
+  }
+  const productId = normalizeEditableOptionalString(input.productId);
+  const productRow = await getProductRowForAdmin(productId);
+  const product = normalizeProduct(productRow);
+  const quantity = normalizePositiveQuantity(input.quantity);
+  const reason = requireReason(input.reason);
+  const reduceStock = normalizeEditableBoolean(input.reduceStock ?? true);
+  const createTransaction = normalizeEditableBoolean(input.createTransaction ?? true);
+  const chargeBalance = normalizeEditableBoolean(input.chargeBalance ?? true);
+  const grantedTimestamp = nowIso();
+  const purchaseTimestamp =
+    normalizeOptionalPastIsoDate(input.purchaseDate, "Purchase date") ?? grantedTimestamp;
+  const stockBefore = Number(productRow.stock);
+  const stockAfter = reduceStock ? stockBefore - quantity : stockBefore;
+  const purchaseAmount = Number((product.price * quantity).toFixed(2));
+  const balanceRow = await getBalanceRowForUser(input.targetUserId);
+  const balanceBefore = Number(balanceRow.available);
+  const balanceAfter = chargeBalance
+    ? Number((balanceBefore - purchaseAmount).toFixed(2))
+    : balanceBefore;
+  if (reduceStock && stockAfter < 0) {
+    throw new Error("Product stock is not sufficient.");
+  }
+  if (chargeBalance && balanceAfter < 0) {
+    throw new Error("User balance is not sufficient for this store purchase.");
+  }
+
+  const existingRow = await queryOne(
+    `select * from owned_cards
+     where user_id = ? and product_id = ? and coalesce(status, 'active') = 'active'
+     limit 1`,
+    [input.targetUserId, productId],
+  );
+  const quantityBefore = existingRow ? Number(existingRow.quantity) : 0;
+  const quantityAfter = quantityBefore + quantity;
+  const inventoryId = existingRow ? String(existingRow.id) : randomUUID();
+  const orderId = createReadableId("ORD");
+  const transactionId = createTransaction ? createReadableId("TXN") : null;
+  const nextAcquiredAt =
+    existingRow && String(existingRow.acquired_at) < purchaseTimestamp
+      ? String(existingRow.acquired_at)
+      : purchaseTimestamp;
+
+  if (existingRow) {
+    await execute(
+      `update owned_cards set
+        quantity = ?, order_id = ?, acquired_at = ?, acquisition_source = ?,
+        admin_note = ?, visible_user_note = ?, related_transaction_id = coalesce(?, related_transaction_id),
+        related_order_id = ?, updated_at = ?
+       where id = ?`,
+      [
+        quantityAfter,
+        orderId,
+        nextAcquiredAt,
+        normalizeEditableOptionalString(input.acquisitionSource) ||
+          (chargeBalance ? "store_checkout" : "admin_grant"),
+        normalizeEditableNullableString(input.adminNote),
+        normalizeEditableNullableString(input.visibleUserNote),
+        transactionId,
+        orderId,
+        grantedTimestamp,
+        inventoryId,
+      ],
+    );
+  } else {
+    await execute(
+      `insert into owned_cards (
+        id, user_id, product_id, order_id, quantity, acquired_at, status,
+        acquisition_source, delivery_mode, admin_note, visible_user_note,
+        related_transaction_id, related_order_id, updated_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        inventoryId,
+        input.targetUserId,
+        productId,
+        orderId,
+        quantity,
+        purchaseTimestamp,
+        "active",
+        normalizeEditableOptionalString(input.acquisitionSource) ||
+          (chargeBalance ? "store_checkout" : "admin_grant"),
+        product.defaultDeliveryType,
+        normalizeEditableNullableString(input.adminNote),
+        normalizeEditableNullableString(input.visibleUserNote),
+        transactionId,
+        orderId,
+        grantedTimestamp,
+      ],
+    );
+  }
+
+  await execute(
+    `insert into orders (
+      id, user_id, status, payment_state, subtotal, shipping, total, currency,
+      shipping_name, shipping_email, shipping_address, shipping_city,
+      shipping_postal_code, payment_method, payment_provider,
+      failure_reason, remaining_balance, created_at, updated_at, paid_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      orderId,
+      input.targetUserId,
+      "Completed",
+      "completed",
+      purchaseAmount,
+      0,
+      purchaseAmount,
+      product.currency,
+      target.user.name || target.user.username,
+      target.user.email,
+      "Digital delivery",
+      "Archive",
+      "00000",
+      chargeBalance ? "Archive Balance" : "Admin Grant",
+      chargeBalance ? "Internal Wallet" : "Admin",
+      null,
+      chargeBalance ? balanceAfter : balanceBefore,
+      purchaseTimestamp,
+      grantedTimestamp,
+      purchaseTimestamp,
+    ],
+  );
+
+  await execute(
+    `insert into order_items (
+      id, order_id, product_id, quantity, unit_price, delivery_type
+    ) values (?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      orderId,
+      productId,
+      quantity,
+      product.price,
+      product.defaultDeliveryType,
+    ],
+  );
+
+  if (reduceStock) {
+    await execute("update products set stock = ?, updated_at = ? where id = ?", [
+      stockAfter,
+      grantedTimestamp,
+      productId,
+    ]);
+    await execute(
+      `insert into product_inventory_movements (
+        id, product_id, movement_type, quantity_delta, stock_before, stock_after,
+        reason, source, admin_id, user_id, related_user_inventory_id,
+        related_transaction_id, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(),
+        productId,
+        "admin_grant",
+        -quantity,
+        stockBefore,
+        stockAfter,
+        reason,
+        chargeBalance ? "store_checkout" : "admin_action",
+        admin.id,
+        input.targetUserId,
+        inventoryId,
+        transactionId,
+        purchaseTimestamp,
+      ],
+    );
+  }
+
+  if (transactionId) {
+    await execute(
+      `insert into transactions (
+        id, user_id, kind, amount, original_amount, original_currency,
+        display_currency, credited_amount_usd, exchange_rate, payment_method,
+        payment_provider, status, reference_id, summary, meta_json, created_at,
+        updated_at, processed_at, credited_at, direction, balance_before,
+        balance_after, source, admin_note, visible_description, related_product_id,
+        edited_by_admin_id, edited_at, related_order_id
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        transactionId,
+        input.targetUserId,
+        "product_grant",
+        chargeBalance ? purchaseAmount : 0,
+        chargeBalance ? purchaseAmount : 0,
+        product.currency,
+        product.currency,
+        product.currency === "USD" && chargeBalance ? purchaseAmount : null,
+        product.currency === "USD" ? 1 : null,
+        "Archive Balance",
+        "Store Checkout",
+        "completed",
+        orderId,
+        chargeBalance ? `Purchased: ${product.title}` : `Product added: ${product.title}`,
+        toJson({
+          reason,
+          quantity,
+          stockImpact: reduceStock,
+          purchaseAmount,
+          balanceBefore,
+          balanceAfter,
+          chargedBalance: chargeBalance,
+          purchaseDate: purchaseTimestamp,
+          grantedAt: grantedTimestamp,
+          orderId,
+          inventoryId,
+        }),
+        purchaseTimestamp,
+        grantedTimestamp,
+        purchaseTimestamp,
+        chargeBalance ? purchaseTimestamp : null,
+        chargeBalance ? "debit" : "neutral",
+        chargeBalance ? balanceBefore : null,
+        chargeBalance ? balanceAfter : null,
+        chargeBalance ? "store_checkout" : "admin_action",
+        normalizeEditableNullableString(input.adminNote),
+        normalizeEditableNullableString(input.visibleUserNote),
+        productId,
+        admin.id,
+        grantedTimestamp,
+        orderId,
+      ],
+    );
+    if (chargeBalance) {
+      await execute(
+        "update balances set available = ?, total_spent = total_spent + ?, updated_at = ? where user_id = ?",
+        [balanceAfter, purchaseAmount, grantedTimestamp, input.targetUserId],
+      );
+      await appendArchiveLedgerEntry({
+        eventType: "purchase",
+        userId: input.targetUserId,
+        adminId: admin.id,
+        entityType: "transaction",
+        entityId: transactionId,
+        relatedOrderId: orderId,
+        relatedTransactionId: transactionId,
+        relatedProductId: productId,
+        title: `Purchased: ${product.title}`,
+        description: reason,
+        metadata: {
+          quantity,
+          purchaseAmount,
+          balanceBefore,
+          balanceAfter,
+          source: "store_checkout",
+          purchaseDate: purchaseTimestamp,
+          grantedAt: grantedTimestamp,
+        },
+        createdAt: purchaseTimestamp,
+      });
+    }
+  }
+
+  await execute(
+    `insert into user_inventory_ledger (
+      id, user_id, product_id, user_inventory_id, action_type, quantity_delta,
+      quantity_before, quantity_after, stock_before, stock_after, reason,
+      admin_note, visible_user_note, source, created_by_admin_id, created_at,
+      related_transaction_id, related_order_id
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      input.targetUserId,
+      productId,
+      inventoryId,
+      quantityBefore === 0 ? "admin_add" : "admin_increase",
+      quantity,
+      quantityBefore,
+      quantityAfter,
+      stockBefore,
+      stockAfter,
+      reason,
+      normalizeEditableNullableString(input.adminNote),
+      normalizeEditableNullableString(input.visibleUserNote),
+      chargeBalance
+        ? "store_checkout"
+        : reduceStock
+          ? "admin_grant"
+          : "admin_grant_no_stock_impact",
+      admin.id,
+      purchaseTimestamp,
+      transactionId,
+      orderId,
+    ],
+  );
+  await insertAdminAuditLog({
+    adminId: admin.id,
+    targetUserId: input.targetUserId,
+    action: "ADMIN_GRANTED_PRODUCT",
+    entityType: "owned_cards",
+    entityId: inventoryId,
+    before: { quantity: quantityBefore, stock: stockBefore },
+    after: {
+      quantity: quantityAfter,
+      stock: stockAfter,
+      productId,
+      orderId,
+      transactionId,
+      purchaseDate: purchaseTimestamp,
+      grantedAt: grantedTimestamp,
+    },
+    reason,
+    ipAddress: input.ipAddress,
+    userAgent: input.userAgent,
+  });
+
+  return {
+    detail: await getAdminUserDetail(input.targetUserId),
+    inventory: await getAdminUserInventory(input.targetUserId),
+    transactions: await getAdminUserTransactions({ userId: input.targetUserId, limit: 100 }),
+  };
+}
+
+export async function adminChangeUserInventoryQuantity(input: {
+  adminUserId: string;
+  targetUserId: string;
+  inventoryId: string;
+  action: "increase" | "decrease" | "remove";
+  quantity?: unknown;
+  reason: unknown;
+  adminNote?: unknown;
+  visibleUserNote?: unknown;
+  returnStock?: unknown;
+  reduceStock?: unknown;
+  ipAddress?: string;
+  userAgent?: string;
+}) {
+  await ensureDatabase();
+  const admin = await getAdminIdentity(input.adminUserId);
+  const reason = requireReason(input.reason);
+  const row = await queryOne(
+    `select owned_cards.*, products.stock, products.title
+     from owned_cards
+     inner join products on products.id = owned_cards.product_id
+     where owned_cards.id = ? and owned_cards.user_id = ?
+     limit 1`,
+    [input.inventoryId, input.targetUserId],
+  );
+  if (!row) {
+    throw new Error("User inventory item not found.");
+  }
+
+  const quantityBefore = Number(row.quantity);
+  const productId = String(row.product_id);
+  const stockBefore = Number(row.stock);
+  const timestamp = nowIso();
+  let delta = 0;
+  let quantityAfter = quantityBefore;
+  let stockAfter = stockBefore;
+  let nextStatus = row.status ? String(row.status) : "active";
+  const requestedQuantity =
+    input.action === "remove"
+      ? quantityBefore
+      : normalizePositiveQuantity(input.quantity ?? 1);
+
+  if (input.action === "increase") {
+    delta = requestedQuantity;
+    quantityAfter = quantityBefore + requestedQuantity;
+    if (normalizeEditableBoolean(input.reduceStock ?? true)) {
+      stockAfter = stockBefore - requestedQuantity;
+      if (stockAfter < 0) {
+        throw new Error("Product stock is not sufficient.");
+      }
+    }
+  } else {
+    delta = -requestedQuantity;
+    quantityAfter = quantityBefore - requestedQuantity;
+    if (quantityAfter < 0) {
+      throw new Error("Quantity cannot go below zero.");
+    }
+    if (normalizeEditableBoolean(input.returnStock ?? false)) {
+      stockAfter = stockBefore + requestedQuantity;
+    }
+    if (quantityAfter === 0 || input.action === "remove") {
+      quantityAfter = Math.max(0, quantityAfter);
+      nextStatus = "removed";
+    }
+  }
+
+  await execute(
+    `update owned_cards set
+      quantity = ?, status = ?, removed_at = ?, admin_note = ?, visible_user_note = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      quantityAfter,
+      nextStatus,
+      nextStatus === "removed" ? timestamp : null,
+      normalizeEditableNullableString(input.adminNote),
+      normalizeEditableNullableString(input.visibleUserNote),
+      timestamp,
+      input.inventoryId,
+    ],
+  );
+  if (stockAfter !== stockBefore) {
+    await execute("update products set stock = ?, updated_at = ? where id = ?", [
+      stockAfter,
+      timestamp,
+      productId,
+    ]);
+    await execute(
+      `insert into product_inventory_movements (
+        id, product_id, movement_type, quantity_delta, stock_before, stock_after,
+        reason, source, admin_id, user_id, related_user_inventory_id, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(),
+        productId,
+        input.action === "increase" ? "admin_grant" : "admin_return",
+        stockAfter - stockBefore,
+        stockBefore,
+        stockAfter,
+        reason,
+        "admin_action",
+        admin.id,
+        input.targetUserId,
+        input.inventoryId,
+        timestamp,
+      ],
+    );
+  }
+
+  const transactionId = createReadableId("TXN");
+  await execute(
+    `insert into transactions (
+      id, user_id, kind, amount, payment_method, payment_provider, status,
+      reference_id, summary, meta_json, created_at, updated_at, processed_at,
+      direction, source, admin_note, visible_description, related_product_id,
+      edited_by_admin_id, edited_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      transactionId,
+      input.targetUserId,
+      input.action === "remove" ? "product_remove" : "product_quantity_adjustment",
+      0,
+      "Admin Inventory",
+      "Admin",
+      "completed",
+      input.inventoryId,
+      `${input.action === "increase" ? "Increased" : input.action === "decrease" ? "Decreased" : "Removed"} product: ${String(row.title)}`,
+      toJson({ reason, quantityDelta: delta, quantityBefore, quantityAfter }),
+      timestamp,
+      timestamp,
+      timestamp,
+      "neutral",
+      "admin_action",
+      normalizeEditableNullableString(input.adminNote),
+      normalizeEditableNullableString(input.visibleUserNote),
+      productId,
+      admin.id,
+      timestamp,
+    ],
+  );
+  await execute(
+    `insert into user_inventory_ledger (
+      id, user_id, product_id, user_inventory_id, action_type, quantity_delta,
+      quantity_before, quantity_after, stock_before, stock_after, reason,
+      admin_note, visible_user_note, source, created_by_admin_id, created_at,
+      related_transaction_id
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      input.targetUserId,
+      productId,
+      input.inventoryId,
+      input.action === "increase"
+        ? "admin_increase"
+        : input.action === "decrease"
+          ? "admin_decrease"
+          : "admin_remove",
+      delta,
+      quantityBefore,
+      quantityAfter,
+      stockBefore,
+      stockAfter,
+      reason,
+      normalizeEditableNullableString(input.adminNote),
+      normalizeEditableNullableString(input.visibleUserNote),
+      "admin_action",
+      admin.id,
+      timestamp,
+      transactionId,
+    ],
+  );
+  await insertAdminAuditLog({
+    adminId: admin.id,
+    targetUserId: input.targetUserId,
+    action:
+      input.action === "increase"
+        ? "product_quantity_increase"
+        : input.action === "decrease"
+          ? "product_quantity_decrease"
+          : "product_remove_from_user",
+    entityType: "owned_cards",
+    entityId: input.inventoryId,
+    before: { quantity: quantityBefore, status: row.status ?? "active", stock: stockBefore },
+    after: { quantity: quantityAfter, status: nextStatus, stock: stockAfter },
+    reason,
+    ipAddress: input.ipAddress,
+    userAgent: input.userAgent,
+  });
+
+  return {
+    inventory: await getAdminUserInventory(input.targetUserId),
+    auditLog: await getAdminUserAuditLog(input.targetUserId),
+  };
+}
+
+export async function adminUpdateTransaction(input: {
+  adminUserId: string;
+  transactionId: string;
+  status?: unknown;
+  paymentProvider?: unknown;
+  source?: unknown;
+  adminNote?: unknown;
+  supportNote?: unknown;
+  visibleDescription?: unknown;
+  relatedProductId?: unknown;
+  relatedOrderId?: unknown;
+  reason: unknown;
+  ipAddress?: string;
+  userAgent?: string;
+}) {
+  await ensureDatabase();
+  const admin = await getAdminIdentity(input.adminUserId);
+  const currentRow = await queryOne("select * from transactions where id = ? limit 1", [
+    input.transactionId,
+  ]);
+  if (!currentRow) {
+    throw new Error("Transaction not found.");
+  }
+  const reason = requireReason(input.reason);
+  const status = normalizeEditableOptionalString(input.status) || String(currentRow.status);
+  const allowedStatuses = [
+    "pending",
+    "completed",
+    "failed",
+    "canceled",
+    "refunded",
+    "chargeback",
+    "reversed",
+    "manually_adjusted",
+  ];
+  if (!allowedStatuses.includes(status)) {
+    throw new Error("Unsupported transaction status.");
+  }
+  const paymentProvider =
+    normalizeEditableOptionalString(input.paymentProvider) ||
+    (currentRow.payment_provider ? String(currentRow.payment_provider) : null);
+  const allowedProviders = [
+    "Store Checkout",
+    "Internal Wallet",
+    "TransVoucher",
+    "Cleffo",
+    "Wert.io",
+    "Coinflow",
+    "Admin",
+  ];
+  if (paymentProvider && !allowedProviders.includes(paymentProvider)) {
+    throw new Error("Unsupported payment provider.");
+  }
+  const source =
+    normalizeEditableOptionalString(input.source) ||
+    (currentRow.source ? String(currentRow.source) : "system");
+  const allowedSources = [
+    "store_checkout",
+    "user_action",
+    "provider_webhook",
+    "provider_api_sync",
+    "admin_action",
+    "system",
+    "migration",
+  ];
+  if (!allowedSources.includes(source)) {
+    throw new Error("Unsupported transaction source.");
+  }
+
+  const timestamp = nowIso();
+  await execute(
+    `update transactions set
+      status = ?, payment_provider = ?, source = ?, admin_note = ?, support_note = ?, visible_description = ?,
+      related_product_id = ?, related_order_id = ?, edited_by_admin_id = ?,
+      edited_at = ?, updated_at = ?
+     where id = ?`,
+    [
+      status,
+      paymentProvider,
+      source,
+      normalizeEditableNullableString(input.adminNote),
+      normalizeEditableNullableString(input.supportNote),
+      normalizeEditableNullableString(input.visibleDescription),
+      normalizeEditableNullableString(input.relatedProductId),
+      normalizeEditableNullableString(input.relatedOrderId),
+      admin.id,
+      timestamp,
+      timestamp,
+      input.transactionId,
+    ],
+  );
+  await insertAdminAuditLog({
+    adminId: admin.id,
+    targetUserId: String(currentRow.user_id),
+    action: "transaction_update",
+    entityType: "transaction",
+    entityId: input.transactionId,
+    before: {
+      status: currentRow.status,
+      paymentProvider: currentRow.payment_provider ?? null,
+      source: currentRow.source ?? null,
+      adminNote: currentRow.admin_note ?? null,
+      supportNote: currentRow.support_note ?? null,
+    },
+    after: {
+      status,
+      paymentProvider,
+      source,
+      adminNote: normalizeEditableNullableString(input.adminNote),
+      supportNote: normalizeEditableNullableString(input.supportNote),
+    },
+    reason,
+    ipAddress: input.ipAddress,
+    userAgent: input.userAgent,
+  });
+
+  return getAdminUserTransactions({ userId: String(currentRow.user_id), limit: 100 });
+}
+
+export async function getAdminUsers() {
+  return withPerf("query=getAdminUsers", async () => {
+  await ensureDatabase();
+  await ensurePaymentProviderRegistry();
   const rows = await queryMany(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified,
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified,
       balances.available, balances.pending_withdrawal, balances.total_deposited,
-      balances.total_spent, balances.total_withdrawn, balances.updated_at as balance_updated_at
+      balances.total_spent, balances.total_withdrawn,
+      balances.payout_bonus_override_enabled, balances.payout_bonus_percent,
+      balances.updated_at as balance_updated_at
      from users
      inner join profiles on profiles.user_id = users.id
      inner join balances on balances.user_id = users.id
      order by users.created_at desc`,
   );
 
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const userIds = rows.map((row) => String(row.id));
+  const placeholders = userIds.map(() => "?").join(", ");
+  const [kycRows, providerRows, gateAccessRows] = await Promise.all([
+    queryMany(
+      `select * from user_kyc_profiles where user_id in (${placeholders})`,
+      userIds,
+    ),
+    queryMany(
+      `select * from payment_providers
+       order by priority asc, gate_number asc`,
+    ),
+    queryMany(
+      `select * from user_payment_gate_access where user_id in (${placeholders})`,
+      userIds,
+    ),
+  ]);
+
+  const kycByUserId = new Map(
+    kycRows.map((row) => [String(row.user_id), normalizeUserKycProfile(row)]),
+  );
+  const accessByUserAndProvider = new Map(
+    gateAccessRows.map((row) => [
+      `${String(row.user_id)}:${String(row.provider_key)}`,
+      row,
+    ]),
+  );
+
   return rows.map((row) => ({
-    user: normalizeUser(row),
-    balance: normalizeBalance({
-      user_id: row.id,
-      available: row.available,
-      pending_withdrawal: row.pending_withdrawal,
-      total_deposited: row.total_deposited,
-      total_spent: row.total_spent,
-      total_withdrawn: row.total_withdrawn,
-      updated_at: row.balance_updated_at,
-    }),
-  }));
+      user: normalizeUser(row),
+      balance: normalizeBalance({
+        user_id: row.id,
+        available: row.available,
+        pending_withdrawal: row.pending_withdrawal,
+        total_deposited: row.total_deposited,
+        total_spent: row.total_spent,
+        total_withdrawn: row.total_withdrawn,
+        payout_bonus_override_enabled: row.payout_bonus_override_enabled,
+        payout_bonus_percent: row.payout_bonus_percent,
+        updated_at: row.balance_updated_at,
+      }),
+      kycProfile: kycByUserId.get(String(row.id)) ?? null,
+      paymentGateAccess: providerRows.map((providerRow) => {
+        const accessRow = accessByUserAndProvider.get(
+          `${String(row.id)}:${String(providerRow.provider_key)}`,
+        );
+        return normalizePaymentGateAccess({
+          ...providerRow,
+          user_access_enabled: accessRow?.enabled ?? null,
+          reason: accessRow?.reason ?? null,
+          access_updated_at: accessRow?.updated_at ?? null,
+        });
+      }),
+    }));
+  });
 }
 
 export async function getPaymentReconciliationStatus(): Promise<PaymentReconciliationStatus> {
+  return withPerf("query=getPaymentReconciliationStatus", async () => {
   await ensureDatabase();
   await ensurePaymentReconciliationRunsTable();
   const baselineAt = await getTransVoucherReconciliationBaselineAt();
@@ -10560,15 +15819,18 @@ export async function getPaymentReconciliationStatus(): Promise<PaymentReconcili
     expiredByCron: Number(expiredRow?.count ?? 0),
     lastError: lastRun?.last_error ? String(lastRun.last_error) : null,
   };
+  });
 }
 
 async function getAdminUserEntryById(userId: string) {
   const row = await queryOne(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,
-      profiles.withdrawal_wallet, profiles.verified,
+      profiles.withdrawal_wallet, profiles.payment_phone, profiles.gate2_first_name, profiles.gate2_last_name, profiles.gate2_phone, profiles.gate2_details_updated_at, profiles.verified,
       balances.available, balances.pending_withdrawal, balances.total_deposited,
-      balances.total_spent, balances.total_withdrawn, balances.updated_at as balance_updated_at
+      balances.total_spent, balances.total_withdrawn,
+      balances.payout_bonus_override_enabled, balances.payout_bonus_percent,
+      balances.updated_at as balance_updated_at
      from users
      inner join profiles on profiles.user_id = users.id
      inner join balances on balances.user_id = users.id
@@ -10590,9 +15852,813 @@ async function getAdminUserEntryById(userId: string) {
       total_deposited: row.total_deposited,
       total_spent: row.total_spent,
       total_withdrawn: row.total_withdrawn,
+      payout_bonus_override_enabled: row.payout_bonus_override_enabled,
+      payout_bonus_percent: row.payout_bonus_percent,
       updated_at: row.balance_updated_at,
     }),
+    kycProfile: await getUserKycProfile(String(row.id)),
+    paymentGateAccess: await getUserPaymentGateAccess(String(row.id)),
   };
+}
+
+function normalizeEditableMoney(value: unknown, label: string) {
+  const numberValue =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value.trim())
+        : Number.NaN;
+
+  if (!Number.isFinite(numberValue) || numberValue < 0) {
+    throw new Error(`${label} must be a valid non-negative number.`);
+  }
+
+  return Number(numberValue.toFixed(2));
+}
+
+function normalizeEditablePercent(value: unknown, label: string) {
+  const numberValue =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value.trim())
+        : Number.NaN;
+
+  if (!Number.isFinite(numberValue) || numberValue < 0 || numberValue > 100) {
+    throw new Error(`${label} must be between 0 and 100.`);
+  }
+
+  return Math.floor(numberValue);
+}
+
+function normalizeEditableDepositLimit(value: unknown, label: string) {
+  const raw = typeof value === "string" ? value.trim() : value;
+  const numberValue =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && raw.length > 0
+        ? Number(raw)
+        : Number.NaN;
+
+  if (!Number.isFinite(numberValue)) {
+    throw new Error(`${label} must be a valid number.`);
+  }
+
+  if (numberValue <= 0) {
+    throw new Error(`${label} must be greater than 0.`);
+  }
+
+  if (!/^\d+(\.\d{1,2})?$/.test(String(raw))) {
+    throw new Error(`${label} can use up to 2 decimal places.`);
+  }
+
+  return Number(numberValue.toFixed(2));
+}
+
+function normalizeEditableOptionalDepositLimit(value: unknown, label: string) {
+  const raw = typeof value === "string" ? value.trim() : value;
+  if (raw === null || raw === undefined || raw === "") {
+    return null;
+  }
+
+  return normalizeEditableDepositLimit(raw, label);
+}
+
+function normalizeEditableOptionalString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeEditableNullableString(value: unknown) {
+  const next = normalizeEditableOptionalString(value);
+  return next.length > 0 ? next : null;
+}
+
+function normalizeEditableBoolean(value: unknown) {
+  return value === true || value === "true" || value === "1" || value === 1;
+}
+
+function normalizeEditableDateTime(value: unknown, label: string) {
+  const next = normalizeEditableOptionalString(value);
+  if (!next) {
+    return null;
+  }
+
+  const date = new Date(next);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`${label} must be a valid date/time.`);
+  }
+
+  return date.toISOString();
+}
+
+function collectChangedFields(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+) {
+  const changed: Record<string, { before: unknown; after: unknown }> = {};
+
+  for (const key of Object.keys(after)) {
+    if (before[key] !== after[key]) {
+      changed[key] = {
+        before: before[key] ?? null,
+        after: after[key] ?? null,
+      };
+    }
+  }
+
+  return changed;
+}
+
+export async function updateAdminUserAccountData(input: {
+  adminUserId: string;
+  targetUserId: string;
+  availableBalance: unknown;
+  pendingWithdrawal: unknown;
+  totalDeposited: unknown;
+  totalSpent: unknown;
+  totalWithdrawn: unknown;
+  payoutBonusOverrideEnabled: unknown;
+  payoutBonusPercent: unknown;
+  telegramUsername: unknown;
+  telegramId: unknown;
+  telegramChatId: unknown;
+  telegramVerified: unknown;
+  telegramVerifiedAt: unknown;
+  gate2FirstName: unknown;
+  gate2LastName: unknown;
+  gate2Phone: unknown;
+  email: unknown;
+  role: unknown;
+  status: unknown;
+  verificationStatus: unknown;
+  requirePasswordReset: unknown;
+  reason?: unknown;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+
+  const admin = await getAdminIdentity(input.adminUserId);
+  const currentEntry = await getAdminUserEntryById(input.targetUserId);
+
+  if (!currentEntry) {
+    throw new Error("User not found.");
+  }
+
+  const email = normalizeEmail(normalizeEditableOptionalString(input.email));
+  const role = String(input.role) as UserRole;
+  const status = String(input.status) as UserStatus;
+  const telegramUsername = normalizeTelegramUsername(
+    normalizeEditableOptionalString(input.telegramUsername),
+  );
+  const telegramId = normalizeEditableNullableString(input.telegramId);
+  const telegramChatId = normalizeEditableNullableString(input.telegramChatId);
+  const telegramVerified = normalizeEditableBoolean(input.telegramVerified);
+  const gate2Details = normalizeOptionalGate2Details({
+    firstName: input.gate2FirstName,
+    lastName: input.gate2LastName,
+    phone: input.gate2Phone,
+    username: currentEntry.user.username,
+  });
+  const verificationStatus = normalizeEditableBoolean(input.verificationStatus);
+  const requirePasswordReset = normalizeEditableBoolean(input.requirePasswordReset);
+  const payoutBonusOverrideEnabled = normalizeEditableBoolean(
+    input.payoutBonusOverrideEnabled,
+  );
+  const payoutBonusPercent = payoutBonusOverrideEnabled
+    ? normalizeEditablePercent(input.payoutBonusPercent, "Payout bonus percent")
+    : null;
+  const timestamp = input.timestamp || nowIso();
+  const telegramVerifiedAt = telegramVerified
+    ? normalizeEditableDateTime(input.telegramVerifiedAt, "Telegram verified at") ??
+      currentEntry.user.telegramVerifiedAt ??
+      timestamp
+    : null;
+  const reason = normalizeEditableOptionalString(input.reason);
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error("Enter a valid email address.");
+  }
+
+  if (!["user", "admin"].includes(role)) {
+    throw new Error("Role must be user or admin.");
+  }
+
+  if (!["active", "under_review", "frozen", "blocked", "suspended"].includes(status)) {
+    throw new Error("Account status is not allowed.");
+  }
+
+  if (input.targetUserId === input.adminUserId && (role !== "admin" || status !== "active")) {
+    throw new Error("You cannot remove your own admin access or block your own account.");
+  }
+
+  if (!isValidTelegramUsername(telegramUsername)) {
+    throw new Error("Telegram username must start with @ and use 5-32 valid characters.");
+  }
+
+  const [emailOwner, telegramOwner] = await Promise.all([
+    queryOne("select id from users where email = ? and id <> ? limit 1", [
+      email,
+      input.targetUserId,
+    ]),
+    queryOne(
+      "select user_id from profiles where telegram_username = ? and user_id <> ? limit 1",
+      [telegramUsername, input.targetUserId],
+    ),
+  ]);
+
+  if (emailOwner) {
+    throw new Error("Email is already connected to another account.");
+  }
+
+  if (telegramOwner) {
+    throw new Error("Telegram username is already connected to another account.");
+  }
+
+  const nextBalance = {
+    available: normalizeEditableMoney(input.availableBalance, "Available balance"),
+    pendingWithdrawal: normalizeEditableMoney(input.pendingWithdrawal, "Pending withdrawals"),
+    totalDeposited: normalizeEditableMoney(input.totalDeposited, "Total deposited"),
+    totalSpent: normalizeEditableMoney(input.totalSpent, "Total spent"),
+    totalWithdrawn: normalizeEditableMoney(input.totalWithdrawn, "Total withdrawn"),
+    payoutBonusOverrideEnabled,
+    payoutBonusPercent,
+  };
+  const currentBalance = {
+    available: currentEntry.balance.available,
+    pendingWithdrawal: currentEntry.balance.pendingWithdrawal,
+    totalDeposited: currentEntry.balance.totalDeposited,
+    totalSpent: currentEntry.balance.totalSpent,
+    totalWithdrawn: currentEntry.balance.totalWithdrawn,
+    payoutBonusOverrideEnabled: currentEntry.balance.payoutBonusOverrideEnabled,
+    payoutBonusPercent: currentEntry.balance.payoutBonusPercent,
+  };
+  const financialChanges = collectChangedFields(currentBalance, nextBalance);
+
+  if (Object.keys(financialChanges).length > 0 && !reason) {
+    throw new Error("Reason is required when editing financial data.");
+  }
+
+  const currentAccount = {
+    email: currentEntry.user.email,
+    role: currentEntry.user.role,
+    status: currentEntry.user.status,
+    verificationStatus: currentEntry.user.verified,
+    requirePasswordReset: currentEntry.user.requirePasswordReset,
+  };
+  const nextAccount = {
+    email,
+    role,
+    status,
+    verificationStatus,
+    requirePasswordReset,
+  };
+  const currentTelegram = {
+    telegramUsername: currentEntry.user.telegramUsername,
+    telegramId: currentEntry.user.telegramId,
+    telegramChatId: currentEntry.user.telegramChatId,
+    telegramVerified: currentEntry.user.telegramVerified,
+    telegramVerifiedAt: currentEntry.user.telegramVerifiedAt,
+  };
+  const nextTelegram = {
+    telegramUsername,
+    telegramId,
+    telegramChatId,
+    telegramVerified,
+    telegramVerifiedAt,
+  };
+  const currentGate2 = {
+    gate2FirstName: currentEntry.user.gate2FirstName,
+    gate2LastName: currentEntry.user.gate2LastName,
+    gate2Phone: currentEntry.user.gate2Phone ?? currentEntry.user.paymentPhone,
+  };
+  const nextGate2 = {
+    gate2FirstName: gate2Details.firstName,
+    gate2LastName: gate2Details.lastName,
+    gate2Phone: gate2Details.phone,
+  };
+  const changedFields = {
+    ...financialChanges,
+    ...collectChangedFields(currentAccount, nextAccount),
+    ...collectChangedFields(currentTelegram, nextTelegram),
+    ...collectChangedFields(currentGate2, nextGate2),
+  };
+
+  if (Object.keys(changedFields).length === 0) {
+    return currentEntry;
+  }
+
+  await execute(
+    `update users set
+      email = ?,
+      status = ?,
+      require_password_reset = ?,
+      updated_at = ?
+     where id = ?`,
+    [
+      email,
+      status,
+      requirePasswordReset ? 1 : 0,
+      timestamp,
+      input.targetUserId,
+    ],
+  );
+
+  await execute(
+    `update profiles set
+      role = ?,
+      telegram_username = ?,
+      telegram_id = ?,
+      telegram_chat_id = ?,
+      telegram_verified = ?,
+      telegram_verified_at = ?,
+      telegram_linked_at = ?,
+      gate2_first_name = ?,
+      gate2_last_name = ?,
+      gate2_phone = ?,
+      payment_phone = ?,
+      gate2_details_updated_at = case
+        when ? = 1 then ?
+        else gate2_details_updated_at
+      end,
+      verified = ?,
+      updated_at = ?
+     where user_id = ?`,
+    [
+      role,
+      telegramUsername,
+      telegramId,
+      telegramChatId,
+      telegramVerified ? 1 : 0,
+      telegramVerifiedAt,
+      telegramVerified ? telegramVerifiedAt : null,
+      gate2Details.firstName,
+      gate2Details.lastName,
+      gate2Details.phone,
+      gate2Details.phone,
+      Object.keys(collectChangedFields(currentGate2, nextGate2)).length > 0 ? 1 : 0,
+      timestamp,
+      verificationStatus ? 1 : 0,
+      timestamp,
+      input.targetUserId,
+    ],
+  );
+
+  await execute(
+    `update balances set
+      available = ?,
+      pending_withdrawal = ?,
+      total_deposited = ?,
+      total_spent = ?,
+      total_withdrawn = ?,
+      payout_bonus_override_enabled = ?,
+      payout_bonus_percent = ?,
+      updated_at = ?
+     where user_id = ?`,
+    [
+      nextBalance.available,
+      nextBalance.pendingWithdrawal,
+      nextBalance.totalDeposited,
+      nextBalance.totalSpent,
+      nextBalance.totalWithdrawn,
+      nextBalance.payoutBonusOverrideEnabled ? 1 : 0,
+      nextBalance.payoutBonusPercent,
+      timestamp,
+      input.targetUserId,
+    ],
+  );
+
+  await logAdminAction(
+    admin.id,
+    "admin_user_account_data_updated",
+    "user",
+    input.targetUserId,
+    `Updated account data for ${currentEntry.user.username}`,
+    {
+      metadata: {
+        adminId: admin.id,
+        adminUsername: admin.username,
+        targetUserId: currentEntry.user.id,
+        targetUsername: currentEntry.user.username,
+        changedFields,
+        financialChanges,
+        reason: reason || null,
+        effectivePayoutBonusPercent: getEffectivePayoutBonusPercent({
+          totalDepositedUsd: nextBalance.totalDeposited,
+          payoutBonusOverrideEnabled: nextBalance.payoutBonusOverrideEnabled,
+          payoutBonusPercent: nextBalance.payoutBonusPercent,
+        }),
+        ipAddress: input.ipAddress,
+        country: input.country,
+        timestamp,
+      },
+    },
+  );
+
+  await insertSecurityAuditEvent({
+    eventType: "admin_user_account_data_updated",
+    userId: currentEntry.user.id,
+    username: currentEntry.user.username,
+    telegramUsername,
+    role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp,
+  });
+
+  await appendArchiveLedgerEntry({
+    eventType:
+      Object.keys(financialChanges).length > 0
+        ? "admin_balance_adjusted"
+        : "admin_account_data_updated",
+    userId: currentEntry.user.id,
+    adminId: admin.id,
+    entityType: "user",
+    entityId: currentEntry.user.id,
+    title: "Admin account data updated",
+    description: `Admin ${admin.username} updated account data for ${currentEntry.user.username}.`,
+    metadata: {
+      changedFields,
+      financialChanges,
+      reason: reason || null,
+      timestamp,
+    },
+  });
+
+  revalidatePrivate(input.targetUserId);
+  revalidateAdmin();
+
+  return getAdminUserEntryById(input.targetUserId);
+}
+
+function buildWithdrawAccessAdminMessage(input: {
+  title: string;
+  admin: UserRecord;
+  target: UserRecord;
+  reason?: string | null;
+  timestamp: string;
+}) {
+  return [
+    `<b>${escapeTelegramHtml(input.title)}</b>`,
+    "",
+    `User: ${escapeTelegramHtml(input.target.username)}`,
+    `Telegram: ${escapeTelegramHtml(input.target.telegramUsername || "Not provided")}`,
+    `Admin: ${escapeTelegramHtml(input.admin.username)}`,
+    input.reason ? `Reason: ${escapeTelegramHtml(input.reason)}` : null,
+    `Time: ${escapeTelegramHtml(formatUtcDateTime(input.timestamp))} UTC`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export async function updateAdminUserWithdrawAccess(input: {
+  adminUserId: string;
+  targetUserId: string;
+  enabled: boolean;
+  reason?: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+
+  const admin = await getAdminIdentity(input.adminUserId);
+  const currentEntry = await getAdminUserEntryById(input.targetUserId);
+
+  if (!currentEntry) {
+    throw new Error("User not found.");
+  }
+
+  const timestamp = input.timestamp || nowIso();
+  const reason = input.reason?.trim() || "";
+
+  if (!input.enabled && !reason) {
+    throw new Error("Reason is required when disabling withdraw access.");
+  }
+
+  if (currentEntry.user.withdrawAccessEnabled === input.enabled) {
+    return currentEntry;
+  }
+
+  await execute(
+    `update users set
+      withdraw_access_enabled = ?,
+      withdraw_access_disabled_at = ?,
+      withdraw_access_disabled_by = ?,
+      withdraw_access_disabled_reason = ?,
+      withdraw_access_restored_at = ?,
+      withdraw_access_restored_by = ?,
+      updated_at = ?
+     where id = ?`,
+    input.enabled
+      ? [
+          1,
+          null,
+          null,
+          null,
+          timestamp,
+          admin.username,
+          timestamp,
+          input.targetUserId,
+        ]
+      : [
+          0,
+          timestamp,
+          admin.username,
+          reason,
+          null,
+          null,
+          timestamp,
+          input.targetUserId,
+        ],
+  );
+
+  const action = input.enabled
+    ? "user_withdraw_access_enabled"
+    : "user_withdraw_access_disabled";
+
+  await logAdminAction(
+    admin.id,
+    action,
+    "user",
+    input.targetUserId,
+    `${input.enabled ? "Restored" : "Disabled"} withdraw access for ${currentEntry.user.username}`,
+    {
+      metadata: {
+        adminId: admin.id,
+        adminUsername: admin.username,
+        targetUserId: currentEntry.user.id,
+        targetUsername: currentEntry.user.username,
+        oldValue: currentEntry.user.withdrawAccessEnabled,
+        newValue: input.enabled,
+        reason: reason || null,
+        ipAddress: input.ipAddress,
+        country: input.country,
+        timestamp,
+      },
+    },
+  );
+
+  await insertSecurityAuditEvent({
+    eventType: action,
+    userId: currentEntry.user.id,
+    username: currentEntry.user.username,
+    telegramUsername: currentEntry.user.telegramUsername,
+    role: currentEntry.user.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp,
+  });
+
+  await appendArchiveLedgerEntry({
+    eventType: "admin_withdraw_access_updated",
+    userId: currentEntry.user.id,
+    adminId: admin.id,
+    entityType: "user",
+    entityId: currentEntry.user.id,
+    title: input.enabled ? "Withdraw access restored" : "Withdraw access disabled",
+    description: `Admin ${admin.username} ${input.enabled ? "restored" : "disabled"} withdraw access for ${currentEntry.user.username}.`,
+    metadata: {
+      oldValue: currentEntry.user.withdrawAccessEnabled,
+      newValue: input.enabled,
+      reason: reason || null,
+      timestamp,
+    },
+  });
+
+  await notifySafely(() =>
+    sendTelegramAdminMessage(
+      buildWithdrawAccessAdminMessage({
+        title: input.enabled ? "Withdraw Access Restored" : "Withdraw Access Disabled",
+        admin,
+        target: currentEntry.user,
+        reason: reason || null,
+        timestamp,
+      }),
+    ),
+  );
+
+  revalidatePrivate(input.targetUserId);
+  revalidateAdmin();
+
+  return getAdminUserEntryById(input.targetUserId);
+}
+
+export async function updateAdminUserKycStatus(input: {
+  adminUserId: string;
+  targetUserId: string;
+  action: "approve" | "decline" | "reset";
+  reason?: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+
+  const admin = await getAdminIdentity(input.adminUserId);
+  const currentEntry = await getAdminUserEntryById(input.targetUserId);
+
+  if (!currentEntry) {
+    throw new Error("User not found.");
+  }
+
+  const reason = input.reason?.trim() ?? "";
+  if (!reason) {
+    throw new Error("Reason is required for KYC manual changes.");
+  }
+
+  const timestamp = input.timestamp || nowIso();
+  const nextStatus =
+    input.action === "approve"
+      ? "manual_approved"
+      : input.action === "decline"
+        ? "manual_rejected"
+        : "not_started";
+  const nextVerified = input.action === "approve";
+
+  await execute(
+    `update users set
+      kyc_status = ?,
+      kyc_verified = ?,
+      kyc_provider = case when ? = 'reset' then null else 'manual' end,
+      kyc_manual_override = ?,
+      kyc_manual_override_by = ?,
+      kyc_manual_override_at = ?,
+      kyc_manual_override_reason = ?,
+      kyc_verified_at = case when ? = 1 then ? else null end,
+      kyc_declined_at = case when ? = 'decline' then ? else null end,
+      veriff_session_id = case when ? = 'reset' then null else veriff_session_id end,
+      veriff_verification_id = case when ? = 'reset' then null else veriff_verification_id end,
+      veriff_status = case when ? = 'reset' then null else veriff_status end,
+      veriff_decision = case when ? = 'reset' then null else veriff_decision end,
+      veriff_reason = case when ? = 'reset' then null else veriff_reason end,
+      updated_at = ?
+     where id = ?`,
+    [
+      nextStatus,
+      nextVerified ? 1 : 0,
+      input.action,
+      input.action === "reset" ? 0 : 1,
+      input.action === "reset" ? null : admin.username,
+      input.action === "reset" ? null : timestamp,
+      input.action === "reset" ? null : reason,
+      nextVerified ? 1 : 0,
+      timestamp,
+      input.action,
+      timestamp,
+      input.action,
+      input.action,
+      input.action,
+      input.action,
+      input.action,
+      timestamp,
+      input.targetUserId,
+    ],
+  );
+
+  if (input.action === "reset") {
+    await execute("delete from user_kyc_profiles where user_id = ?", [input.targetUserId]);
+  }
+
+  const eventType =
+    input.action === "approve"
+      ? "kyc_manual_approved"
+      : input.action === "decline"
+        ? "kyc_manual_rejected"
+        : "kyc_reset";
+
+  await insertSecurityAuditEvent({
+    eventType,
+    userId: currentEntry.user.id,
+    username: currentEntry.user.username,
+    telegramUsername: currentEntry.user.telegramUsername,
+    role: currentEntry.user.role,
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp,
+  });
+  if (input.action === "approve") {
+    await insertSecurityAuditEvent({
+      eventType: "admin_manual_approved",
+      userId: currentEntry.user.id,
+      username: currentEntry.user.username,
+      telegramUsername: currentEntry.user.telegramUsername,
+      role: currentEntry.user.role,
+      ipAddress: input.ipAddress,
+      country: input.country,
+      userAgent: input.userAgent,
+      language: input.language,
+      route: input.route,
+      timestamp,
+    });
+  }
+
+  await logAdminAction(
+    admin.id,
+    eventType,
+    "user",
+    input.targetUserId,
+    `Updated KYC status for ${currentEntry.user.username}`,
+    {
+      metadata: {
+        adminId: admin.id,
+        adminUsername: admin.username,
+        targetUserId: currentEntry.user.id,
+        targetUsername: currentEntry.user.username,
+        previousStatus: currentEntry.user.kycStatus,
+        nextStatus,
+        previousVerified: currentEntry.user.kycVerified,
+        nextVerified,
+        reason,
+      },
+    },
+  );
+
+  revalidatePrivate(input.targetUserId);
+  revalidateAdmin();
+
+  return getAdminUserEntryById(input.targetUserId);
+}
+
+export async function syncAdminUserVeriffStatus(input: {
+  adminUserId: string;
+  targetUserId: string;
+  ipAddress: string;
+  country: string;
+  userAgent: string;
+  language: string;
+  route: string;
+  timestamp: string;
+}) {
+  await ensureDatabase();
+
+  const admin = await getAdminIdentity(input.adminUserId);
+  const currentEntry = await getAdminUserEntryById(input.targetUserId);
+
+  if (!currentEntry) {
+    throw new Error("User not found.");
+  }
+
+  if (!currentEntry.user.veriffSessionId) {
+    throw new Error("This user does not have a Veriff session to sync.");
+  }
+
+  const payload = await fetchVeriffSessionStatus(currentEntry.user.veriffSessionId);
+  const fields = extractVeriffWebhookFields(payload);
+  const result = await applyVeriffDecisionToUser({
+    userId: currentEntry.user.id,
+    sessionId: fields.sessionId ?? currentEntry.user.veriffSessionId,
+    verificationId: fields.verificationId ?? currentEntry.user.veriffVerificationId,
+    payload,
+    source: "manual_sync",
+    ipAddress: input.ipAddress,
+    country: input.country,
+    userAgent: input.userAgent,
+    language: input.language,
+    route: input.route,
+    timestamp: input.timestamp,
+  });
+
+  await logAdminAction(
+    admin.id,
+    "kyc_manual_veriff_sync",
+    "user",
+    input.targetUserId,
+    `Synced Veriff status for ${currentEntry.user.username}`,
+    {
+      metadata: {
+        adminId: admin.id,
+        adminUsername: admin.username,
+        targetUserId: currentEntry.user.id,
+        targetUsername: currentEntry.user.username,
+        previousStatus: currentEntry.user.kycStatus,
+        nextStatus: result.status,
+        previousVerified: currentEntry.user.kycVerified,
+        nextVerified: result.verified,
+      },
+    },
+  );
+
+  return getAdminUserEntryById(input.targetUserId);
 }
 
 function normalizeAdminCreatedStatus(status: UserStatus) {
@@ -11194,6 +17260,7 @@ export async function deleteAdminManagedUser(input: {
 }
 
 export async function getAdminWithdrawalRequests() {
+  return withPerf("query=getAdminWithdrawalRequests", async () => {
   await ensureDatabase();
   const rows = await queryMany(
     `select
@@ -11245,6 +17312,7 @@ export async function getAdminWithdrawalRequests() {
       history: historyByWithdrawalId.get(request.id) ?? [],
     };
   });
+  });
 }
 
 export async function getAdminTransactions(limit = 20) {
@@ -11265,6 +17333,46 @@ export async function getAdminTransactions(limit = 20) {
   }));
 }
 
+async function validateRandomizedProductConfiguration(input: {
+  productId: string;
+  isRandomized: boolean;
+  randomizedOutcomes: ProductRecord["randomizedOutcomes"];
+}) {
+  if (!input.isRandomized) {
+    return;
+  }
+
+  if (
+    !hasValidRandomizedProductOdds({
+      id: input.productId,
+      isRandomized: input.isRandomized,
+      randomizedOutcomes: input.randomizedOutcomes,
+    })
+  ) {
+    throw new Error(
+      "Randomized product probabilities must contain unique cards and total exactly 100%.",
+    );
+  }
+
+  const outcomeIds = input.randomizedOutcomes.map((outcome) => outcome.productId);
+  const placeholders = outcomeIds.map(() => "?").join(", ");
+  const rows = await queryMany(
+    `select id from products
+     where id in (${placeholders})
+       and archived = 0
+       and status = 'active'
+       and stock > 0
+       and coalesce(is_randomized, 0) = 0`,
+    outcomeIds,
+  );
+
+  if (rows.length !== outcomeIds.length) {
+    throw new Error(
+      "Every randomized outcome must reference an active, non-randomized product.",
+    );
+  }
+}
+
 export async function createProduct(
   input: Omit<ProductInput, "id" | "palette"> & {
     id?: string;
@@ -11277,6 +17385,12 @@ export async function createProduct(
   const palette = input.palette || getPaletteByRarity(input.rarity);
   const timestamp = nowIso();
 
+  await validateRandomizedProductConfiguration({
+    productId: id,
+    isRandomized: input.isRandomized,
+    randomizedOutcomes: input.isRandomized ? input.randomizedOutcomes : [],
+  });
+
   if (input.homepageFeatured) {
     await execute(
       "update products set homepage_featured = 0, featured_started_at = null where homepage_featured = 1",
@@ -11287,10 +17401,11 @@ export async function createProduct(
     `insert into products (
       id, title, rarity, price, currency, stock, collection, category, description,
       tagline, default_delivery_type, delivery_digital, delivery_physical, edition,
-      shape, image_url, image_path, image_updated_at, featured, homepage_featured, featured_started_at, showcase_float,
+      shape, image_url, image_path, image_updated_at, featured, homepage_featured,
+      featured_started_at, is_randomized, randomized_outcomes_json, showcase_float,
       showcase_rotation_seconds, status, archived, palette_glow, palette_glow_soft,
       palette_core, palette_ring, created_at, updated_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
     [
       id,
       input.title,
@@ -11313,6 +17428,8 @@ export async function createProduct(
       input.featured ? 1 : 0,
       input.homepageFeatured ? 1 : 0,
       input.homepageFeatured ? timestamp : null,
+      input.isRandomized ? 1 : 0,
+      toJson(input.randomizedOutcomes),
       1,
       12,
       input.status,
@@ -11367,8 +17484,18 @@ export async function updateProduct(
   const next = {
     ...current,
     ...input,
+    randomizedOutcomes:
+      input.isRandomized === false
+        ? []
+        : input.randomizedOutcomes ?? current.randomizedOutcomes,
     palette: input.rarity ? getPaletteByRarity(input.rarity) : current.palette,
   };
+
+  await validateRandomizedProductConfiguration({
+    productId: id,
+    isRandomized: next.isRandomized,
+    randomizedOutcomes: next.randomizedOutcomes,
+  });
 
   const timestamp = nowIso();
 
@@ -11384,7 +17511,8 @@ export async function updateProduct(
       title = ?, rarity = ?, price = ?, currency = ?, stock = ?, collection = ?,
       category = ?, description = ?, tagline = ?, default_delivery_type = ?,
       delivery_digital = ?, delivery_physical = ?, edition = ?, shape = ?, image_url = ?,
-      image_path = ?, image_updated_at = ?, featured = ?, homepage_featured = ?, featured_started_at = ?, showcase_float = ?,
+      image_path = ?, image_updated_at = ?, featured = ?, homepage_featured = ?, featured_started_at = ?,
+      is_randomized = ?, randomized_outcomes_json = ?, showcase_float = ?,
       showcase_rotation_seconds = ?, status = ?, palette_glow = ?, palette_glow_soft = ?,
       palette_core = ?, palette_ring = ?, updated_at = ?
      where id = ?`,
@@ -11413,6 +17541,8 @@ export async function updateProduct(
           ? current.featuredStartedAt ?? timestamp
           : timestamp
         : null,
+      next.isRandomized ? 1 : 0,
+      toJson(next.randomizedOutcomes),
       1,
       12,
       next.status,
@@ -11648,9 +17778,58 @@ export async function sendWithdrawalViaXRocket(input: {
   );
 
   try {
+    const depositId = `${request.id}-APP-DEPOSIT`;
+    const existingXRocketRaw = parseJsonRecord(request.xrocketRawResponse);
+    let appDepositResponse =
+      existingXRocketRaw && "appDeposit" in existingXRocketRaw
+        ? (existingXRocketRaw.appDeposit as Record<string, unknown>)
+        : null;
+    const feeResponse = await getXRocketWithdrawalQuotas();
+    const withdrawalFee = extractXRocketWithdrawalFee(
+      feeResponse,
+      XROCKET_DEFAULT_CURRENCY,
+      XROCKET_DEFAULT_NETWORK,
+    );
+    const appDepositAmount = Number(amount.toFixed(9));
+    const netWithdrawalAmount = Number((amount - withdrawalFee).toFixed(9));
+
+    if (!Number.isFinite(netWithdrawalAmount) || netWithdrawalAmount <= 0) {
+      throw new Error(
+        `xRocket provider fee ${withdrawalFee} ${XROCKET_DEFAULT_CURRENCY} is greater than or equal to payout amount.`,
+      );
+    }
+
+    if (!appDepositResponse) {
+      appDepositResponse = await createXRocketAppDeposit({
+        depositId,
+        amount: appDepositAmount,
+        currency: XROCKET_DEFAULT_CURRENCY,
+      });
+
+      await execute(
+        `update withdrawal_requests set
+          xrocket_status = 'deposit_created',
+          xrocket_raw_response = ?,
+          updated_at = ?
+         where id = ?`,
+        [
+          toJson({
+            withdrawalFee,
+            appDepositAmount,
+            netWithdrawalAmount,
+            feePaidBy: "user",
+            withdrawalFees: feeResponse,
+            appDeposit: appDepositResponse,
+          }),
+          nowIso(),
+          request.id,
+        ],
+      );
+    }
+
     const response = await createXRocketWithdrawal({
       clientWithdrawalId: request.id,
-      amount,
+      amount: netWithdrawalAmount,
       address: wallet,
       network: XROCKET_DEFAULT_NETWORK,
       currency: XROCKET_DEFAULT_CURRENCY,
@@ -11675,7 +17854,15 @@ export async function sendWithdrawalViaXRocket(input: {
       [
         xrocketWithdrawalId || null,
         xrocketStatus,
-        toJson(response),
+        toJson({
+          withdrawalFee,
+          appDepositAmount,
+          netWithdrawalAmount,
+          feePaidBy: "user",
+          withdrawalFees: feeResponse,
+          appDeposit: appDepositResponse,
+          withdrawal: response,
+        }),
         confirmedAt,
         txHash,
         failed ? "xRocket payout failed. Review provider response." : null,
@@ -11706,7 +17893,7 @@ export async function sendWithdrawalViaXRocket(input: {
         actionType: "xrocket-payout-failed",
         previousStatus: "processing",
         nextStatus: "approved",
-        source: "admin",
+        source: "dashboard",
         adminUserId: admin.id,
         adminUsername: admin.username,
         adminTelegramUsername: admin.telegramUsername,
@@ -11728,6 +17915,10 @@ export async function sendWithdrawalViaXRocket(input: {
         xrocketStatus,
         txHash,
         amount,
+        withdrawalFee,
+        appDepositAmount,
+        netWithdrawalAmount,
+        feePaidBy: "user",
         currency: XROCKET_DEFAULT_CURRENCY,
         network: XROCKET_DEFAULT_NETWORK,
       },
@@ -11739,7 +17930,9 @@ export async function sendWithdrawalViaXRocket(input: {
           `<b>xRocket Payout ${paid ? "Paid" : failed ? "Failed" : "Submitted"}</b>`,
           "",
           `Request ID: ${escapeTelegramHtml(request.id)}`,
-          `Amount: ${escapeTelegramHtml(String(amount))} ${escapeTelegramHtml(XROCKET_DEFAULT_CURRENCY)}`,
+          `Gross payout: ${escapeTelegramHtml(String(amount))} ${escapeTelegramHtml(XROCKET_DEFAULT_CURRENCY)}`,
+          `Provider fee: ${escapeTelegramHtml(String(withdrawalFee))} ${escapeTelegramHtml(XROCKET_DEFAULT_CURRENCY)}`,
+          `Sent to user: ${escapeTelegramHtml(String(netWithdrawalAmount))} ${escapeTelegramHtml(XROCKET_DEFAULT_CURRENCY)}`,
           txHash ? `Tx Hash: ${escapeTelegramHtml(txHash)}` : null,
           `Status: ${escapeTelegramHtml(xrocketStatus.toUpperCase())}`,
         ]
@@ -11772,7 +17965,7 @@ export async function sendWithdrawalViaXRocket(input: {
       actionType: "xrocket-payout-failed",
       previousStatus: "processing",
       nextStatus: "approved",
-      source: "admin",
+      source: "dashboard",
       adminUserId: admin.id,
       adminUsername: admin.username,
       adminTelegramUsername: admin.telegramUsername,

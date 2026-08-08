@@ -9,6 +9,7 @@ import {
   Settings2,
   ShieldCheck,
   Signal,
+  Printer,
   Upload,
   Users,
 } from "lucide-react";
@@ -33,6 +34,14 @@ const adminNav = [
     icon: Signal,
     id: "provider-intelligence",
   },
+  {
+    href: "/admin/providers",
+    label: "Providers",
+    icon: Settings2,
+    id: "providers",
+  },
+  { href: "/admin/print-engine", label: "Print Engine", icon: Printer, id: "print-engine" },
+  { href: "/admin/receipts", label: "Receipts", icon: ReceiptText, id: "receipts" },
   { href: "/admin/broadcasts", label: "Broadcasts", icon: Megaphone, id: "broadcasts" },
   { href: "/admin/analytics", label: "Analytics", icon: BarChart3, id: "analytics" },
   { href: "/admin/upload", label: "Upload", icon: Upload, id: "upload" },
@@ -114,7 +123,7 @@ export async function AdminShell({
               Protected Admin Layer
             </div>
             <div className="mt-3 text-sm leading-7 text-muted">
-              Product controls, withdrawal review, and user operations stay isolated from the public archive surface.
+              Product controls, payment review, and user operations stay isolated from the public archive surface.
             </div>
           </section>
         </div>
@@ -122,30 +131,38 @@ export async function AdminShell({
       showCart={false}
       showQuickAction={false}
       sidebar={
-        <div className="flex h-full flex-col p-5">
-          <div className="text-[11px] uppercase tracking-[0.24em] text-muted">
+        <div className="flex h-full flex-col pb-4">
+          <div className="overflow-hidden whitespace-nowrap px-5 text-[11px] uppercase tracking-[0.24em] text-muted opacity-0 transition-all duration-200 -translate-x-2 group-hover/sidebar:translate-x-0 group-hover/sidebar:opacity-100">
             Operations
           </div>
-          <nav className="mt-4 space-y-1.5">
+          <nav className="mt-4 space-y-1">
             {adminNav.map((item) => (
               <Link
                 key={item.href}
                 className={cn(
-                  "flex items-center gap-3 rounded-[12px] px-3 py-2.5 text-sm text-muted transition hover:bg-[var(--background-strong)] hover:text-foreground",
-                  active === item.id && "bg-[var(--accent-soft)] text-[var(--accent)]",
+                  "group/item relative flex h-11 w-[72px] items-center justify-center gap-3 overflow-visible text-sm text-muted transition before:absolute before:left-0 before:top-1/2 before:h-5 before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-[var(--accent)] before:opacity-0 before:transition-opacity hover:text-foreground group-hover/sidebar:w-full group-hover/sidebar:justify-start group-hover/sidebar:px-5",
+                  active === item.id && "text-foreground before:opacity-100",
                 )}
                 href={item.href}
               >
-                <item.icon className="size-4" />
-                {item.label}
+                <item.icon className="size-4 shrink-0" />
+                <span className="pointer-events-none absolute left-[52px] whitespace-nowrap opacity-0 transition-all duration-200 -translate-x-2 group-hover/sidebar:pointer-events-auto group-hover/sidebar:static group-hover/sidebar:translate-x-0 group-hover/sidebar:opacity-100">
+                  {item.label}
+                </span>
+                <span className="pointer-events-none absolute left-[54px] z-[190] rounded-lg border border-white/10 bg-[#111827] px-2 py-1 text-xs text-foreground opacity-0 shadow-xl transition group-hover/item:opacity-100 group-hover/sidebar:hidden">
+                  {item.label}
+                </span>
               </Link>
             ))}
           </nav>
 
-          <div className="mt-auto rounded-[14px] border border-line bg-[var(--background-soft)] p-4">
-            <div className="text-sm font-semibold text-foreground">Admin Access</div>
-            <div className="mt-2 text-sm leading-6 text-muted">
-              Moderation, financial review, and inventory control are restricted to protected sessions.
+          <div className="mt-auto">
+            <div className="flex h-11 w-[72px] items-center justify-center text-muted group-hover/sidebar:hidden">
+              <ShieldCheck className="size-4" />
+            </div>
+            <div className="hidden rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-3 group-hover/sidebar:block">
+              <div className="text-sm font-semibold text-foreground">Admin Access</div>
+              <div className="mt-1 text-xs text-muted">Protected workspace</div>
             </div>
           </div>
         </div>

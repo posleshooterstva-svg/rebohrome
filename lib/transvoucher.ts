@@ -32,12 +32,25 @@ type TransVoucherEnvelope = {
   referenceId?: string;
   payment_url?: string;
   paymentUrl?: string;
+  payment_link?: string;
+  paymentLink?: string;
+  embed_url?: string;
+  embedUrl?: string;
+  use_embed?: boolean;
+  useEmbed?: boolean;
   url?: string;
   expires_at?: string;
   expiresAt?: string;
   amount?: number | string;
   currency?: string;
   status?: string;
+  payment_status?: string;
+  paymentStatus?: string;
+  transaction_status?: string;
+  transactionStatus?: string;
+  provider_status?: string;
+  providerStatus?: string;
+  state?: string;
   paid_at?: string;
   paidAt?: string;
   metadata?: Record<string, unknown>;
@@ -54,6 +67,8 @@ export type TransVoucherPaymentResponse = {
   transactionId: string;
   referenceId: string | null;
   paymentUrl: string;
+  embedUrl: string | null;
+  useEmbed: boolean;
   expiresAt: string | null;
   amount: number;
   currency: string;
@@ -94,6 +109,56 @@ function getTransVoucherConfig() {
 
 function normalizeStatus(value: unknown) {
   return String(value ?? "").trim().toLowerCase();
+}
+
+export type NormalizedTransVoucherStatus =
+  | "succeeded"
+  | "failed"
+  | "declined"
+  | "expired"
+  | "processing"
+  | "pending"
+  | "unknown";
+
+export function normalizeTransVoucherStatus(rawStatus: unknown): NormalizedTransVoucherStatus {
+  const normalized = normalizeStatus(rawStatus).replace(/[\s-]+/g, "_");
+
+  if (
+    [
+      "success",
+      "succeeded",
+      "paid",
+      "completed",
+      "complete",
+      "approved",
+      "captured",
+      "confirmed",
+    ].includes(normalized)
+  ) {
+    return "succeeded";
+  }
+
+  if (["expired", "timeout", "timed_out"].includes(normalized)) {
+    return "expired";
+  }
+
+  if (["declined", "decline", "rejected", "canceled", "cancelled"].includes(normalized)) {
+    return "declined";
+  }
+
+  if (["failed", "fail", "error", "errored"].includes(normalized)) {
+    return "failed";
+  }
+
+  if (["processing", "in_progress", "attempting"].includes(normalized)) {
+    return "processing";
+  }
+
+  if (["pending", "created", "waiting", "new", "initialized", ""].includes(normalized)) {
+    return "pending";
+  }
+
+  return "unknown";
 }
 
 export function mapTransVoucherMethod(
@@ -160,26 +225,67 @@ function extractTransVoucherEnvelope(payload: TransVoucherApiResponse) {
   return payload?.data ?? payload?.result ?? payload ?? {};
 }
 
+function extractTransVoucherStatus(envelope: TransVoucherEnvelope) {
+  const record = envelope as Record<string, unknown>;
+  return normalizeStatus(
+    envelope.status ??
+      envelope.payment_status ??
+      envelope.paymentStatus ??
+      envelope.transaction_status ??
+      envelope.transactionStatus ??
+      envelope.provider_status ??
+      envelope.providerStatus ??
+      record.result ??
+      envelope.state,
+  );
+}
+
+function normalizeCustomerEmail(value: string | null | undefined) {
+  const email = value?.trim().toLowerCase() ?? "";
+  return email || null;
+}
+
+export function buildTransVoucherPaymentCreateBody(
+  payload: TransVoucherPaymentCreatePayload,
+) {
+  const customerEmail = normalizeCustomerEmail(payload.customerDetails.email);
+  const customerDetails = customerEmail ? { email: customerEmail } : {};
+  const metadata = {
+    ...payload.metadata,
+    ...(customerEmail ? { customer_email: customerEmail } : {}),
+  };
+
+  return {
+    amount: payload.amount,
+    currency: payload.currency,
+    title: payload.title,
+    description: payload.description,
+    success_url: payload.successUrl,
+    cancel_url: payload.cancelUrl,
+    redirect_url: payload.redirectUrl,
+    // TransVoucher has accepted customer_details in the current integration.
+    // The aliases below keep hosted checkout email prefill working if their
+    // frontend reads a different customer field than the API stores.
+    customer_details: customerDetails,
+    customerDetails,
+    customer: customerDetails,
+    customer_email: customerEmail,
+    email: customerEmail,
+    payer_email: customerEmail,
+    metadata,
+    theme: payload.theme ?? "dark",
+    lang: payload.lang ?? "en",
+    default_payment_method: payload.defaultPaymentMethod,
+    payment_method_forced: payload.paymentMethodForced,
+  };
+}
+
 export async function createTransVoucherPayment(
   payload: TransVoucherPaymentCreatePayload,
 ): Promise<TransVoucherPaymentResponse> {
   const result = await transVoucherRequest<TransVoucherApiResponse>("/payment/create", {
     method: "POST",
-    body: JSON.stringify({
-      amount: payload.amount,
-      currency: payload.currency,
-      title: payload.title,
-      description: payload.description,
-      success_url: payload.successUrl,
-      cancel_url: payload.cancelUrl,
-      redirect_url: payload.redirectUrl,
-      customer_details: payload.customerDetails,
-      metadata: payload.metadata,
-      theme: payload.theme ?? "dark",
-      lang: payload.lang ?? "en",
-      default_payment_method: payload.defaultPaymentMethod,
-      payment_method_forced: payload.paymentMethodForced,
-    }),
+    body: JSON.stringify(buildTransVoucherPaymentCreateBody(payload)),
   });
 
   const envelope = extractTransVoucherEnvelope(result);
@@ -193,15 +299,25 @@ export async function createTransVoucherPayment(
         ? String(envelope.reference_id ?? envelope.referenceId)
         : null,
     paymentUrl: String(
-      envelope.payment_url ?? envelope.paymentUrl ?? envelope.url ?? "",
+      envelope.payment_url ??
+        envelope.paymentUrl ??
+        envelope.payment_link ??
+        envelope.paymentLink ??
+        envelope.url ??
+        "",
     ),
+    embedUrl:
+      envelope.embed_url || envelope.embedUrl
+        ? String(envelope.embed_url ?? envelope.embedUrl)
+        : null,
+    useEmbed: Boolean(envelope.use_embed ?? envelope.useEmbed),
     expiresAt:
       envelope.expires_at || envelope.expiresAt
         ? String(envelope.expires_at ?? envelope.expiresAt)
         : null,
     amount: Number(envelope.amount ?? payload.amount),
     currency: String(envelope.currency ?? payload.currency),
-    status: normalizeStatus(envelope.status),
+    status: extractTransVoucherStatus(envelope),
     raw: result,
   };
 }
@@ -223,7 +339,7 @@ export async function getTransVoucherPaymentStatus(
       envelope.reference_id || envelope.referenceId
         ? String(envelope.reference_id ?? envelope.referenceId)
         : null,
-    status: normalizeStatus(envelope.status),
+    status: extractTransVoucherStatus(envelope),
     amount:
       envelope.amount === null || envelope.amount === undefined
         ? null
@@ -248,13 +364,23 @@ export function verifyTransVoucherWebhookSignature(
   rawBody: string,
   signatureHeader: string | null,
 ) {
-  if (!signatureHeader?.startsWith("sha256=")) {
+  const requireSignature = process.env.TRANSVOUCHER_WEBHOOK_REQUIRE_SIGNATURE === "true";
+  const webhookSecret = process.env.TRANSVOUCHER_WEBHOOK_SECRET?.trim() ?? "";
+
+  if (!signatureHeader) {
+    return !requireSignature;
+  }
+
+  if (!signatureHeader.startsWith("sha256=")) {
     return false;
   }
 
-  const config = getTransVoucherConfig();
+  if (!webhookSecret) {
+    return false;
+  }
+
   const provided = signatureHeader.slice("sha256=".length).trim();
-  const expected = createHmac("sha256", config.webhookSecret)
+  const expected = createHmac("sha256", webhookSecret)
     .update(rawBody)
     .digest("hex");
 

@@ -6,7 +6,7 @@ import { CardArtwork } from "@/components/rebohrome/card-artwork";
 import { RarityBadge } from "@/components/rebohrome/rarity-badge";
 import { Button } from "@/components/ui/button";
 import { getCartSummary } from "@/lib/cart";
-import { formatUsd, type ProductRecord } from "@/lib/rebohrome-data";
+import { formatUsd, getPublicProductTitle, type ProductRecord } from "@/lib/rebohrome-data";
 import { useCartStore } from "@/lib/stores/cart-store";
 
 type CartPageClientProps = {
@@ -73,7 +73,7 @@ export function CartPageClient({ products }: CartPageClientProps) {
             </p>
             <div className="mt-5">
               <Button asChild>
-                <Link href="/marketplace">Explore Marketplace</Link>
+                <Link href="/dashboard/marketplace">Explore Marketplace</Link>
               </Button>
             </div>
           </div>
@@ -119,7 +119,7 @@ export function CartPageClient({ products }: CartPageClientProps) {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="text-lg font-semibold text-foreground">
-                      {item.product.title}
+                      {getPublicProductTitle(item.product.title)}
                     </div>
                     <p className="mt-1 text-sm text-muted">
                       {item.product.collection} ·{" "}
@@ -234,7 +234,7 @@ export function CartPageClient({ products }: CartPageClientProps) {
             </Button>
           )}
           <Button asChild className="w-full" variant="secondary">
-            <Link href="/marketplace">Continue shopping</Link>
+            <Link href="/dashboard/marketplace">Continue shopping</Link>
           </Button>
         </div>
       </section>

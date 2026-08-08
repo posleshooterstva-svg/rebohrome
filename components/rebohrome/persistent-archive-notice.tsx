@@ -20,8 +20,18 @@ export function PersistentArchiveNotice() {
 
   useEffect(() => {
     let active = true;
+    let lastLoadedAt = 0;
 
-    async function load() {
+    async function load(force = false) {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+
+      if (!force && Date.now() - lastLoadedAt < 55_000) {
+        return;
+      }
+
+      lastLoadedAt = Date.now();
       try {
         const response = await fetch("/api/notifications/active-popups", {
           cache: "no-store",
@@ -37,11 +47,18 @@ export function PersistentArchiveNotice() {
       }
     }
 
-    load();
-    const timer = window.setInterval(load, 45_000);
+    window.setTimeout(() => load(true), 0);
+    const timer = window.setInterval(load, 60_000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void load();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       active = false;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
 
@@ -50,7 +67,7 @@ export function PersistentArchiveNotice() {
   }
 
   return (
-    <aside className="fixed bottom-5 left-5 z-[230] w-[calc(100vw-2.5rem)] max-w-[380px] rounded-[20px] border border-purple-300/20 bg-[rgba(14,20,34,0.92)] p-4 text-white shadow-[0_24px_80px_rgba(139,92,246,0.26)] backdrop-blur-2xl sm:bottom-6 sm:left-6">
+    <aside className="fixed bottom-5 left-5 z-[130] w-[calc(100vw-2.5rem)] max-w-[380px] rounded-[20px] border border-purple-300/20 bg-[rgba(14,20,34,0.92)] p-4 text-white shadow-[0_24px_80px_rgba(139,92,246,0.26)] backdrop-blur-2xl sm:bottom-6 sm:left-6 xl:left-[88px]">
       <div className="absolute inset-0 -z-10 rounded-[20px] bg-[radial-gradient(circle_at_16%_0%,rgba(139,92,246,0.2),transparent_45%)]" />
       <div className="flex items-start gap-3">
         <div className="flex size-10 shrink-0 items-center justify-center rounded-[14px] border border-purple-300/20 bg-purple-500/15 text-purple-200">

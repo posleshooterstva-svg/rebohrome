@@ -2,7 +2,7 @@
 
 import { PaymentSuccessModal, type PaymentSuccessRow } from "@/components/rebohrome/payment-success-modal";
 import { SuccessStateSync } from "@/components/rebohrome/success-state-sync";
-import { formatCurrency, formatDisplayDateTime, formatUsd, type ProductRecord, type SupportedCurrency } from "@/lib/rebohrome-data";
+import { formatCurrency, formatDisplayDateTime, formatUsd, getPublicProductTitle, type ProductRecord, type SupportedCurrency } from "@/lib/rebohrome-data";
 
 type OrderSuccessViewProps = {
   userId: string;
@@ -111,7 +111,7 @@ export function OrderSuccessView({
       `Updated Balance: ${formatUsd(remainingBalance ?? 0)}`,
       `Timestamp: ${formatDisplayDateTime(createdAt)}`,
       "Purchased Items:",
-      ...items.map((item) => `- ${item.product.title} x${item.quantity}`),
+      ...items.map((item) => `- ${getPublicProductTitle(item.product.title)} x${item.quantity}`),
       "Status: SUCCESS",
     ].join("\n");
 

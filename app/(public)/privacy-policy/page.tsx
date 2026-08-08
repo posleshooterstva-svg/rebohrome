@@ -1,15 +1,10 @@
-import { LegalDocumentPage } from "@/components/rebohrome/legal-document";
-import {
-  GLOBAL_COLLECTIBLE_DISCLAIMER,
-  privacyPolicyDocument,
-} from "@/lib/legal-content";
+import { LegalMarkdownDocumentPage } from "@/components/rebohrome/legal-markdown-document";
+import { getLegalMarkdownDocument } from "@/lib/legal-markdown";
 
-export default function PrivacyPolicyPage() {
+export default async function PrivacyPolicyPage() {
+  const markdown = await getLegalMarkdownDocument("privacy");
+
   return (
-    <LegalDocumentPage
-      document={privacyPolicyDocument}
-      eyebrow="Privacy"
-      footerNote={GLOBAL_COLLECTIBLE_DISCLAIMER}
-    />
+    <LegalMarkdownDocumentPage eyebrow="Privacy" markdown={markdown} />
   );
 }

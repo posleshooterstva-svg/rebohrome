@@ -1,15 +1,8 @@
-import { LegalDocumentPage } from "@/components/rebohrome/legal-document";
-import {
-  GLOBAL_COLLECTIBLE_DISCLAIMER,
-  termsDocument,
-} from "@/lib/legal-content";
+import { LegalMarkdownDocumentPage } from "@/components/rebohrome/legal-markdown-document";
+import { getLegalMarkdownDocument } from "@/lib/legal-markdown";
 
-export default function TermsPage() {
-  return (
-    <LegalDocumentPage
-      document={termsDocument}
-      eyebrow="Terms"
-      footerNote={GLOBAL_COLLECTIBLE_DISCLAIMER}
-    />
-  );
+export default async function TermsPage() {
+  const markdown = await getLegalMarkdownDocument("terms");
+
+  return <LegalMarkdownDocumentPage eyebrow="Terms" markdown={markdown} />;
 }

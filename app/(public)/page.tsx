@@ -1,64 +1,26 @@
 import Link from "next/link";
 import { AddToCartButton } from "@/components/cart/add-to-cart-button";
-import { ArchiveSidebar } from "@/components/rebohrome/archive-sidebar";
-import { ArchiveSurfaceLayout } from "@/components/rebohrome/archive-surface-layout";
 import { CardArtwork } from "@/components/rebohrome/card-artwork";
-import { CollectorRail } from "@/components/rebohrome/collector-rail";
 import { FeaturedHeroProduct } from "@/components/rebohrome/featured-hero-product";
 import { RarityBadge } from "@/components/rebohrome/rarity-badge";
 import { Button } from "@/components/ui/button";
 import {
-  getFinancialOverview,
   getHomepageFeaturedProduct,
-  getHeaderAccount,
   getMarketplaceProducts,
-  getUserById,
-  getUserInventory,
-  getUserOrders,
 } from "@/lib/db/repository";
 import {
-  formatCurrency,
   formatUsd,
+  getPublicProductTitle,
+  hasValidRandomizedProductOdds,
 } from "@/lib/rebohrome-data";
-import { getSessionState } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
-function formatMemberSince(value: string) {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    year: "numeric",
-  }).format(new Date(value));
-}
-
 export default async function HomePage() {
-  const session = await getSessionState();
-  const isAuthenticated = Boolean(session.userId && session.isUserAuthenticated);
-
   const [
-    account,
-    financialOverview,
-    user,
-    inventory,
-    orders,
     homepageFeaturedProduct,
     latestProducts,
   ] = await Promise.all([
-    isAuthenticated && session.userId
-      ? getHeaderAccount(session.userId)
-      : Promise.resolve(null),
-    isAuthenticated && session.userId
-      ? getFinancialOverview(session.userId)
-      : Promise.resolve(null),
-    isAuthenticated && session.userId
-      ? getUserById(session.userId)
-      : Promise.resolve(null),
-    isAuthenticated && session.userId
-      ? getUserInventory(session.userId)
-      : Promise.resolve([]),
-    isAuthenticated && session.userId
-      ? getUserOrders(session.userId)
-      : Promise.resolve([]),
     getHomepageFeaturedProduct(),
     getMarketplaceProducts({ sort: "newest" }),
   ]);
@@ -66,172 +28,39 @@ export default async function HomePage() {
   const heroCard = homepageFeaturedProduct ?? latestProducts[0] ?? null;
   const newDropCards = latestProducts.slice(0, 4);
 
-  const totalCollectionValue = inventory.reduce(
-    (sum, item) => sum + item.product.price * item.quantity,
-    0,
-  );
-  const cardsOwned = inventory.reduce((sum, item) => sum + item.quantity, 0);
   const guestCollections = new Set(latestProducts.map((product) => product.collection)).size;
   const guestStock = latestProducts.reduce((sum, product) => sum + product.stock, 0);
 
-  const workspaceStats = isAuthenticated
-    ? [
-        { label: "Total Collection Value", value: formatUsd(totalCollectionValue) },
-        { label: "Cards Owned", value: `${cardsOwned}` },
-        { label: "Total Orders", value: `${orders.length}` },
-        { label: "Vault Items", value: `${cardsOwned}` },
-        { label: "Member Since", value: user ? formatMemberSince(user.createdAt) : "Private" },
-      ]
-    : [
-        { label: "Live Products", value: `${latestProducts.length}` },
-        { label: "Collections", value: `${guestCollections}` },
-        { label: "Archive Stock", value: `${guestStock}` },
-        { label: "Featured Drops", value: `${newDropCards.length}` },
-        { label: "Delivery", value: "Instant" },
-      ];
-
-  const activityItems =
-    isAuthenticated && financialOverview
-      ? financialOverview.recentTransactions.slice(0, 4).map((transaction) => ({
-          id: transaction.id,
-          title:
-            transaction.kind === "deposit"
-              ? "Deposit"
-              : transaction.kind === "purchase"
-                ? "Purchase"
-                : transaction.kind === "withdrawal"
-                  ? "Withdrawal Request"
-                  : "Archive Activity",
-          meta: transaction.summary,
-          amount: `${transaction.amount >= 0 ? "+" : ""}${formatCurrency(
-            transaction.amount,
-            transaction.displayCurrency ?? "USD",
-          )}`,
-          tone:
-            transaction.amount > 0
-              ? ("positive" as const)
-              : transaction.amount < 0
-                ? ("negative" as const)
-                : ("neutral" as const),
-        }))
-      : newDropCards.map((card) => ({
-          id: card.id,
-          title: card.title,
-          meta: `${card.collection} / ${card.rarity}`,
-          amount: formatUsd(card.price),
-          tone: "neutral" as const,
-        }));
-
-  const securityItems = isAuthenticated
-    ? [
-        {
-          id: "verification",
-          label: "Account Verification",
-          status: user?.verified ? "Verified" : "Pending",
-          tone: user?.verified ? ("positive" as const) : ("warning" as const),
-        },
-        {
-          id: "telegram",
-          label: "Telegram Username",
-          status: user?.telegramUsername || "Missing",
-          tone: user?.telegramUsername ? ("positive" as const) : ("warning" as const),
-        },
-        {
-          id: "wallet",
-          label: "Withdrawal Wallet",
-          status: user?.withdrawalWallet ? "Connected" : "Missing",
-          tone: user?.withdrawalWallet ? ("positive" as const) : ("warning" as const),
-        },
-        {
-          id: "payments",
-          label: "Encrypted Transactions",
-          status: "Active",
-          tone: "positive" as const,
-        },
-      ]
-    : [
-        {
-          id: "verified-marketplace",
-          label: "Verified Marketplace",
-          status: "Active",
-          tone: "positive" as const,
-        },
-        {
-          id: "secure-payments",
-          label: "Encrypted Checkout",
-          status: "Enabled",
-          tone: "positive" as const,
-        },
-        {
-          id: "digital-delivery",
-          label: "Instant Delivery",
-          status: "Ready",
-          tone: "positive" as const,
-        },
-        {
-          id: "withdraw-review",
-          label: "Manual Withdrawals",
-          status: "Reviewed",
-          tone: "neutral" as const,
-        },
-      ];
+  const workspaceStats = [
+    { label: "Live Products", value: `${latestProducts.length}` },
+    { label: "Collections", value: `${guestCollections}` },
+    { label: "Archive Stock", value: `${guestStock}` },
+    { label: "Featured Drops", value: `${newDropCards.length}` },
+    { label: "Delivery", value: "Instant" },
+  ];
 
   return (
-    <main className="mx-auto w-full max-w-[1540px] px-4 py-6 sm:px-6 lg:px-8">
-      <ArchiveSurfaceLayout
-        rightRail={
-          <CollectorRail
-            activityItems={activityItems}
-            balanceNote={
-              isAuthenticated
-                ? "Available balance is synced with your archive wallet."
-                : "Sign in to fund your archive balance and preserve purchases in your private vault."
-            }
-            emptyActivity="Sign in to track deposits, purchases, and withdrawal review from one private rail."
-            initialBalance={{
-              available: account?.balance.available ?? 0,
-              pendingWithdrawal: account?.balance.pendingWithdrawal ?? 0,
-              totalDeposited: account?.balance.totalDeposited ?? 0,
-              totalSpent: account?.balance.totalSpent ?? 0,
-              totalWithdrawn: account?.balance.totalWithdrawn ?? 0,
-            }}
-            primaryActionHref={
-              isAuthenticated ? "/dashboard/deposit" : "/login?redirectTo=/dashboard/deposit"
-            }
-            primaryActionLabel="Deposit"
-            secondaryActionHref={isAuthenticated ? "/withdraw" : "/login?redirectTo=/withdraw"}
-            secondaryActionLabel="Withdraw"
-            securityItems={securityItems}
-            userId={account?.user.id ?? null}
-          />
-        }
-        sidebar={
-          <ArchiveSidebar
-            account={account}
-            active="dashboard"
-            mode="public"
-          />
-        }
-      >
-        <div className="p-6 sm:p-8">
+    <main className="min-h-dvh w-full overflow-x-hidden bg-panel">
+      <section className="w-full bg-[linear-gradient(180deg,rgba(14,20,34,0.84)_0%,rgba(9,13,22,0.96)_100%)] px-4 py-8 sm:px-6 lg:px-8">
+        <div className="mx-auto w-full max-w-[1480px]">
           <div className="grid gap-8 xl:grid-cols-[0.98fr_1.02fr]">
             <section className="pt-4">
               <div className="text-[11px] uppercase tracking-[0.28em] text-muted">
-                Welcome to ReboHrome
+                WELCOME TO REBOHROME
               </div>
               <h1 className="mt-4 display-font max-w-[680px] text-5xl font-semibold leading-[0.96] tracking-[-0.06em] text-foreground sm:text-6xl">
-                The Future of Digital Collectibles
+                Collectibles, secured in your archive
               </h1>
               <p className="mt-5 max-w-[520px] text-base leading-8 text-muted">
-                Premium digital artifacts curated for private ownership, verified provenance,
-                and archive-grade preservation.
+                Discover digital and physical collectible cards, complete secure purchases, and
+                keep your collection organized in one private ReboHrome archive.
               </p>
               <div className="mt-8 flex flex-wrap gap-3">
                 <Button asChild>
-                  <Link href="/marketplace">Explore Marketplace</Link>
+                  <Link href="/dashboard/marketplace">Explore Marketplace</Link>
                 </Button>
                 <Button asChild variant="secondary">
-                  <Link href={isAuthenticated ? "/dashboard/collection" : "/marketplace"}>
+                  <Link href="/dashboard/collection">
                     View Collection
                   </Link>
                 </Button>
@@ -265,7 +94,7 @@ export default async function HomePage() {
               </div>
               <Link
                 className="text-sm font-medium text-muted transition hover:text-foreground"
-                href="/marketplace"
+                href="/dashboard/marketplace"
               >
                 View all
               </Link>
@@ -286,7 +115,7 @@ export default async function HomePage() {
                     </div>
                     <div className="mt-3">
                       <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-foreground">
-                        {card.title}
+                        {getPublicProductTitle(card.title)}
                       </h2>
                       <div className="mt-1 text-[11px] uppercase tracking-[0.18em] text-muted">
                         Series {card.edition}
@@ -301,8 +130,9 @@ export default async function HomePage() {
                   </Link>
                   <div className="mt-3">
                     <AddToCartButton
-                      disabled={card.stock <= 0}
+                      disabled={card.stock <= 0 || !hasValidRandomizedProductOdds(card)}
                       fullWidth
+                      label={hasValidRandomizedProductOdds(card) ? "Add to cart" : "Odds pending"}
                       productId={card.id}
                     />
                   </div>
@@ -311,7 +141,7 @@ export default async function HomePage() {
             </div>
           </section>
         </div>
-      </ArchiveSurfaceLayout>
+      </section>
     </main>
   );
 }

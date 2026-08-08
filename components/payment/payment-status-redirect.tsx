@@ -124,13 +124,13 @@ export function PaymentStatusRedirect({
         </p>
         <div className="mt-8 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
           <Link
-            className="inline-flex min-w-[220px] items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#111827,#7266ff)] px-5 py-3 text-sm font-medium text-white transition hover:translate-y-[-1px]"
+            className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#111827,#7266ff)] px-5 py-3 text-sm font-medium text-white transition hover:translate-y-[-1px] sm:w-auto sm:min-w-[220px]"
             href={fallbackHref}
           >
             {busy ? "Checking payment status..." : fallbackLabel}
           </Link>
           <button
-            className="inline-flex min-w-[220px] items-center justify-center rounded-2xl border border-line bg-panel px-5 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--foreground-soft)]"
+            className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl border border-line bg-panel px-5 py-3 text-sm font-medium text-foreground transition hover:bg-[var(--foreground-soft)] sm:w-auto sm:min-w-[220px]"
             onClick={() => router.refresh()}
             type="button"
           >

@@ -29,6 +29,8 @@ type CollectorRailProps = {
   primaryActionLabel: string;
   secondaryActionHref: string;
   secondaryActionLabel: string;
+  secondaryActionDisabled?: boolean;
+  secondaryActionDisabledLabel?: string;
   activityItems: LiveActivityItem[];
   emptyActivity: string;
   securityItems: RailSecurityItem[];
@@ -43,6 +45,8 @@ export function CollectorRail({
   primaryActionLabel,
   secondaryActionHref,
   secondaryActionLabel,
+  secondaryActionDisabled = false,
+  secondaryActionDisabledLabel = "Locked",
   activityItems,
   emptyActivity,
   securityItems,
@@ -74,6 +78,8 @@ export function CollectorRail({
           primaryActionLabel={primaryActionLabel}
           secondaryActionHref={secondaryActionHref}
           secondaryActionLabel={secondaryActionLabel}
+          secondaryActionDisabled={secondaryActionDisabled}
+          secondaryActionDisabledLabel={secondaryActionDisabledLabel}
         />
         <RailActivityCard activityItems={renderedActivityItems} emptyActivity={emptyActivity} />
         <RailSecurityCard securityItems={securityItems} />
@@ -88,6 +94,8 @@ export function CollectorRail({
           primaryActionLabel={primaryActionLabel}
           secondaryActionHref={secondaryActionHref}
           secondaryActionLabel={secondaryActionLabel}
+          secondaryActionDisabled={secondaryActionDisabled}
+          secondaryActionDisabledLabel={secondaryActionDisabledLabel}
         />
         <RailActivityCard activityItems={renderedActivityItems} emptyActivity={emptyActivity} />
         <RailSecurityCard securityItems={securityItems} />
@@ -104,6 +112,8 @@ function RailWalletCard({
   primaryActionLabel,
   secondaryActionHref,
   secondaryActionLabel,
+  secondaryActionDisabled,
+  secondaryActionDisabledLabel,
 }: Omit<CollectorRailProps, "activityItems" | "emptyActivity" | "initialBalance" | "securityItems" | "userId"> & {
   balanceValue: string;
 }) {
@@ -128,12 +138,21 @@ function RailWalletCard({
         >
           {primaryActionLabel}
         </Link>
-        <Link
-          className="inline-flex items-center justify-center rounded-[10px] border border-line bg-white px-4 py-2.5 text-sm font-medium text-foreground transition hover:bg-[var(--background-strong)]"
-          href={secondaryActionHref}
-        >
-          {secondaryActionLabel}
-        </Link>
+        {secondaryActionDisabled ? (
+          <div
+            aria-disabled="true"
+            className="inline-flex cursor-not-allowed items-center justify-center rounded-[10px] border border-amber-300/30 bg-amber-400/10 px-4 py-2.5 text-sm font-medium text-amber-700"
+          >
+            {secondaryActionDisabledLabel ?? secondaryActionLabel}
+          </div>
+        ) : (
+          <Link
+            className="inline-flex items-center justify-center rounded-[10px] border border-line bg-white px-4 py-2.5 text-sm font-medium text-foreground transition hover:bg-[var(--background-strong)]"
+            href={secondaryActionHref}
+          >
+            {secondaryActionLabel}
+          </Link>
+        )}
       </div>
     </section>
   );

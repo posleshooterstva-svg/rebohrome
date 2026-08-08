@@ -1,15 +1,39 @@
 import Link from "next/link";
+import Image from "next/image";
+import { cn } from "@/lib/utils";
 
-export function RebohromeLogo() {
+type RebohromeLogoProps = {
+  className?: string;
+  href?: string;
+  iconClassName?: string;
+  showText?: boolean;
+  textClassName?: string;
+};
+
+export function RebohromeLogo({
+  className,
+  href = "/",
+  iconClassName,
+  showText = true,
+  textClassName,
+}: RebohromeLogoProps) {
   return (
-    <Link className="inline-flex items-center gap-3" href="/">
-      <span className="relative flex size-8 items-center justify-center">
-        <span className="absolute inset-0 rotate-45 rounded-[9px] border border-[rgba(120,112,241,0.28)] bg-[rgba(120,112,241,0.08)]" />
-        <span className="absolute inset-[5px] rotate-45 rounded-[7px] border border-white bg-[linear-gradient(135deg,rgba(255,255,255,0.96),rgba(227,223,255,0.92))]" />
+    <Link className={cn("inline-flex items-center gap-3", className)} href={href}>
+      <span className={cn("relative flex size-8 shrink-0 items-center justify-center", iconClassName)}>
+        <Image
+          alt="ReboHrome"
+          className="h-full w-full object-contain"
+          height={64}
+          priority
+          src="/uploads/rebohrome-veriff-logo-icon.png"
+          width={64}
+        />
       </span>
-      <span className="text-sm font-semibold uppercase tracking-[0.14em] text-foreground">
-        ReboHrome
-      </span>
+      {showText ? (
+        <span className={cn("translate-y-[1px] text-sm font-semibold uppercase leading-none tracking-[0.14em] text-foreground", textClassName)}>
+          ReboHrome
+        </span>
+      ) : null}
     </Link>
   );
 }

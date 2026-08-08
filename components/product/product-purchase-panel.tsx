@@ -12,10 +12,12 @@ import { cn } from "@/lib/utils";
 
 type ProductPurchasePanelProps = {
   product: ProductRecord;
+  disabledReason?: string | null;
 };
 
 export function ProductPurchasePanel({
   product,
+  disabledReason = null,
 }: ProductPurchasePanelProps) {
   const router = useRouter();
   const addItem = useCartStore((state) => state.addItem);
@@ -33,7 +35,7 @@ export function ProductPurchasePanel({
   }, [isAdded]);
 
   function commitToCart() {
-    if (product.stock <= 0) {
+    if (product.stock <= 0 || disabledReason) {
       return;
     }
 
@@ -120,12 +122,22 @@ export function ProductPurchasePanel({
       </div>
 
       <div className="mt-6 flex flex-col gap-3 sm:flex-row">
-        <Button className="sm:flex-1" disabled={product.stock <= 0} onClick={handleAddToCart}>
-          {product.stock <= 0 ? "Out of stock" : isAdded ? "Added to cart" : "Add to cart"}
+        <Button
+          className="sm:flex-1"
+          disabled={product.stock <= 0 || Boolean(disabledReason)}
+          onClick={handleAddToCart}
+        >
+          {product.stock <= 0
+            ? "Out of stock"
+            : disabledReason
+              ? "Purchase unavailable"
+              : isAdded
+                ? "Added to cart"
+                : "Add to cart"}
         </Button>
         <Button
           className="sm:flex-1"
-          disabled={product.stock <= 0}
+          disabled={product.stock <= 0 || Boolean(disabledReason)}
           onClick={handleBuyNow}
           type="button"
           variant="secondary"
@@ -133,6 +145,11 @@ export function ProductPurchasePanel({
           Buy now
         </Button>
       </div>
+      {disabledReason ? (
+        <p className="mt-3 text-sm leading-6 text-amber-700 dark:text-amber-300">
+          {disabledReason}
+        </p>
+      ) : null}
     </>
   );
 }

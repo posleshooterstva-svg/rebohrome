@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { createCheckoutPaymentSession } from "@/lib/db/repository";
+import {
+  DocumentAcceptanceRequiredError,
+  KycVerificationRequiredError,
+  createCheckoutPaymentSession,
+} from "@/lib/db/repository";
+import { getMaintenanceApiResponse } from "@/lib/server/maintenance-guard";
 import { getSessionState } from "@/lib/session";
 
 const paymentMethods = ["Credit Card", "Apple Pay", "Google Pay"] as const;
@@ -23,6 +28,11 @@ const sessionSchema = z.object({
 
 export async function POST(request: Request) {
   try {
+    const maintenanceResponse = await getMaintenanceApiResponse();
+    if (maintenanceResponse) {
+      return maintenanceResponse;
+    }
+
     const payload = sessionSchema.parse(await request.json());
     const sessionInput = {
       paymentMethod: payload.paymentMethod,
@@ -43,6 +53,28 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof DocumentAcceptanceRequiredError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "DOCUMENT_ACCEPTANCE_REQUIRED",
+          message: "Required documents must be accepted before continuing.",
+          error: "Please accept the required ReboHrome documents before continuing.",
+        },
+        { status: 403 },
+      );
+    }
+
+    if (error instanceof KycVerificationRequiredError) {
+      return NextResponse.json(
+        {
+          error: "Please complete verification before making a card payment.",
+          requiresVerification: true,
+        },
+        { status: 403 },
+      );
+    }
+
     return NextResponse.json(
       {
         error:

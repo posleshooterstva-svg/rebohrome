@@ -1,6 +1,10 @@
-import { LegalDocumentPage } from "@/components/rebohrome/legal-document";
-import { complianceDocument } from "@/lib/legal-content";
+import { LegalMarkdownDocumentPage } from "@/components/rebohrome/legal-markdown-document";
+import { getLegalMarkdownDocument } from "@/lib/legal-markdown";
 
-export default function CompliancePage() {
-  return <LegalDocumentPage document={complianceDocument} eyebrow="Compliance" />;
+export default async function CompliancePage() {
+  const markdown = await getLegalMarkdownDocument("compliance");
+
+  return (
+    <LegalMarkdownDocumentPage eyebrow="Compliance" markdown={markdown} />
+  );
 }

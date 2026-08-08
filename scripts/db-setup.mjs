@@ -125,6 +125,12 @@ const CREATE_STATEMENTS = [
     password_hash text not null,
     status text not null,
     require_password_reset integer not null default 0,
+    withdraw_access_enabled integer not null default 1,
+    withdraw_access_disabled_at text,
+    withdraw_access_disabled_by text,
+    withdraw_access_disabled_reason text,
+    withdraw_access_restored_at text,
+    withdraw_access_restored_by text,
     is_deleted integer not null default 0,
     deleted_at text,
     deleted_by text,
@@ -142,9 +148,63 @@ const CREATE_STATEMENTS = [
     telegram_verified_at text,
     telegram_linked_at text,
     withdrawal_wallet text,
+    payment_phone text,
+    gate2_first_name text,
+    gate2_last_name text,
+    gate2_phone text,
+    gate2_details_updated_at text,
     verified integer not null default 1,
     created_at text not null,
     updated_at text not null
+  )`,
+  `create table if not exists user_kyc_profiles (
+    id text primary key,
+    user_id text not null unique,
+    first_name text not null,
+    last_name text not null,
+    date_of_birth text not null,
+    country_of_residence text not null,
+    document_country text not null,
+    email text not null,
+    phone text,
+    address_line1 text,
+    address_line2 text,
+    city text,
+    postal_code text,
+    state text,
+    created_at text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists payment_providers (
+    provider_key text primary key,
+    gate_number integer not null unique,
+    provider_name text not null,
+    public_name text not null,
+    admin_name text not null,
+    enabled integer not null default 1,
+    default_user_visible integer not null default 0,
+    supports_usd integer not null default 1,
+    supports_eur integer not null default 1,
+    min_amount integer not null default 1,
+    max_amount integer,
+    min_deposit_amount real not null default 10,
+    max_deposit_amount real,
+    default_deposit_amount real,
+    currency text not null default 'USD',
+    priority integer not null default 100,
+    created_at text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists user_payment_gate_access (
+    id text primary key,
+    user_id text not null,
+    provider_key text not null,
+    enabled integer not null default 0,
+    reason text,
+    updated_by text,
+    created_at text not null,
+    updated_at text not null,
+    unique(user_id, provider_key)
   )`,
   `create table if not exists telegram_identities (
     id text primary key,
@@ -218,6 +278,8 @@ const CREATE_STATEMENTS = [
     total_deposited integer not null default 0,
     total_spent integer not null default 0,
     total_withdrawn integer not null default 0,
+    payout_bonus_override_enabled integer not null default 0,
+    payout_bonus_percent integer,
     updated_at text not null
   )`,
   `create table if not exists sessions (
@@ -251,6 +313,8 @@ const CREATE_STATEMENTS = [
     featured integer not null default 0,
     homepage_featured integer not null default 0,
     featured_started_at text,
+    is_randomized integer not null default 0,
+    randomized_outcomes_json text not null default '[]',
     showcase_float real not null default 1,
     showcase_rotation_seconds integer not null default 12,
     status text not null default 'active',
@@ -306,6 +370,10 @@ const CREATE_STATEMENTS = [
     payment_url text,
     provider_status text,
     raw_provider_response text,
+    provider_key text,
+    provider_click_id text,
+    provider_order_id text,
+    balance_credited_at text,
     created_at text not null,
     updated_at text not null,
     expires_at text not null
@@ -331,6 +399,52 @@ const CREATE_STATEMENTS = [
     created_at text not null,
     updated_at text not null,
     expires_at text not null
+  )`,
+  `create table if not exists wert_payment_sessions (
+    id text primary key,
+    user_id text not null,
+    provider_key text not null default 'wert',
+    gate_number integer not null default 3,
+    type text not null default 'balance_topup',
+    local_transaction_id text not null unique,
+    deposit_id text,
+    click_id text not null unique,
+    wert_order_id text,
+    wert_status text,
+    amount_fiat real not null,
+    fiat_currency text not null default 'USD',
+    commodity text not null,
+    commodity_amount real not null,
+    network text not null,
+    user_wallet_address text,
+    sc_address text not null,
+    sc_input_data text not null,
+    signature_hash text,
+    token_id integer,
+    token_quantity integer,
+    contract_order_id text,
+    recipient_wallet text,
+    nft_delivery_mode text,
+    chain_tx_hash text,
+    status text not null default 'created',
+    balance_credited_at text,
+    nft_delivered_at text,
+    provider_payload_safe text,
+    last_status_check_at text,
+    last_webhook_at text,
+    created_at text not null,
+    updated_at text not null
+  )`,
+  `create table if not exists user_collectibles (
+    id text primary key,
+    user_id text not null,
+    token_id integer not null,
+    quantity integer not null default 1,
+    source_payment_session_id text,
+    provider_key text not null default 'wert',
+    chain_tx_hash text,
+    delivered_at text not null,
+    created_at text not null
   )`,
   `create table if not exists order_items (
     id text primary key,
@@ -634,6 +748,12 @@ const COLUMN_PATCHES = [
   ["profiles", "telegram_chat_id text"],
   ["profiles", "telegram_verified integer not null default 0"],
   ["users", "require_password_reset integer not null default 0"],
+  ["users", "withdraw_access_enabled integer not null default 1"],
+  ["users", "withdraw_access_disabled_at text"],
+  ["users", "withdraw_access_disabled_by text"],
+  ["users", "withdraw_access_disabled_reason text"],
+  ["users", "withdraw_access_restored_at text"],
+  ["users", "withdraw_access_restored_by text"],
   ["users", "is_deleted integer not null default 0"],
   ["users", "deleted_at text"],
   ["users", "deleted_by text"],
@@ -642,8 +762,19 @@ const COLUMN_PATCHES = [
   ["users", "vault_integrity_updated_at text"],
   ["users", "archive_rules_accepted_at text"],
   ["users", "latest_terms_accepted_at text"],
+  ["balances", "payout_bonus_override_enabled integer not null default 0"],
+  ["balances", "payout_bonus_percent integer"],
   ["profiles", "telegram_verified_at text"],
   ["profiles", "telegram_linked_at text"],
+  ["profiles", "payment_phone text"],
+  ["profiles", "gate2_first_name text"],
+  ["profiles", "gate2_last_name text"],
+  ["profiles", "gate2_phone text"],
+  ["profiles", "gate2_details_updated_at text"],
+  ["payment_providers", "min_deposit_amount real not null default 10"],
+  ["payment_providers", "max_deposit_amount real"],
+  ["payment_providers", "default_deposit_amount real"],
+  ["payment_providers", "currency text not null default 'USD'"],
   ["withdrawal_requests", "telegram_chat_id text"],
   ["withdrawal_requests", "telegram_message_id text"],
   ["withdrawal_requests", "telegram_sync_status text not null default 'pending'"],
@@ -679,6 +810,30 @@ const COLUMN_PATCHES = [
   ["deposit_payment_sessions", "payment_url text"],
   ["deposit_payment_sessions", "provider_status text"],
   ["deposit_payment_sessions", "raw_provider_response text"],
+  ["deposit_payment_sessions", "provider_key text"],
+  ["deposit_payment_sessions", "provider_click_id text"],
+  ["deposit_payment_sessions", "provider_order_id text"],
+  ["deposit_payment_sessions", "balance_credited_at text"],
+  ["payment_sessions", "token_id integer"],
+  ["payment_sessions", "token_quantity integer"],
+  ["payment_sessions", "contract_address text"],
+  ["payment_sessions", "contract_order_id text"],
+  ["payment_sessions", "sc_input_data text"],
+  ["payment_sessions", "chain_network text"],
+  ["payment_sessions", "recipient_wallet text"],
+  ["payment_sessions", "nft_delivery_mode text"],
+  ["payment_sessions", "chain_tx_hash text"],
+  ["payment_sessions", "nft_delivered_at text"],
+  ["deposit_payment_sessions", "token_id integer"],
+  ["deposit_payment_sessions", "token_quantity integer"],
+  ["deposit_payment_sessions", "contract_address text"],
+  ["deposit_payment_sessions", "contract_order_id text"],
+  ["deposit_payment_sessions", "sc_input_data text"],
+  ["deposit_payment_sessions", "chain_network text"],
+  ["deposit_payment_sessions", "recipient_wallet text"],
+  ["deposit_payment_sessions", "nft_delivery_mode text"],
+  ["deposit_payment_sessions", "chain_tx_hash text"],
+  ["deposit_payment_sessions", "nft_delivered_at text"],
   ["transactions", "original_amount integer"],
   ["transactions", "original_currency text"],
   ["transactions", "display_currency text"],
@@ -719,6 +874,8 @@ const COLUMN_PATCHES = [
   ["products", "featured integer not null default 0"],
   ["products", "homepage_featured integer not null default 0"],
   ["products", "featured_started_at text"],
+  ["products", "is_randomized integer not null default 0"],
+  ["products", "randomized_outcomes_json text not null default '[]'"],
   ["products", "image_path text"],
   ["products", "image_updated_at text"],
   ["products", "showcase_float real not null default 1"],
@@ -747,6 +904,7 @@ const DATA_PATCHES = [
   "update products set default_delivery_type = 'digital' where default_delivery_type is null or default_delivery_type = ''",
   "update products set status = 'active' where status is null or status = ''",
   "update products set homepage_featured = 0 where homepage_featured is null",
+  "update products set randomized_outcomes_json = '[]' where randomized_outcomes_json is null or trim(randomized_outcomes_json) = ''",
   "update products set showcase_float = 1 where showcase_float is null or showcase_float <= 0",
   "update products set showcase_rotation_seconds = 12 where showcase_rotation_seconds is null or showcase_rotation_seconds <= 0",
 ];
@@ -793,9 +951,61 @@ async function main() {
     await execute(statement);
   }
 
+  const randomizedProductsMigrationKey = "randomized_products_v1_migrated";
+  const randomizedProductsMigration = await queryOne(
+    "select key from system_settings where key = ? limit 1",
+    [randomizedProductsMigrationKey],
+  );
+
+  if (!randomizedProductsMigration) {
+    const timestamp = nowIso();
+    await execute(
+      "update products set is_randomized = 1 where lower(category) in ('gacha pack', 'randomized pack', 'mystery pack')",
+    );
+    await execute(
+      `insert into system_settings (key, value, updated_by, updated_at)
+       values (?, ?, ?, ?)`,
+      [randomizedProductsMigrationKey, "completed", "system", timestamp],
+    );
+  }
+
   await execute(
     "create unique index if not exists idx_profiles_telegram_id on profiles(telegram_id) where telegram_id is not null",
   );
+
+  const providerTimestamp = nowIso();
+  const paymentProviders = [
+    ["transvoucher", 1, "TransVoucher", "Gate #1", "Gate #1 - TransVoucher", 1, 1, 1, 1, 10, 20000, 10, 20000, 250, "USD", 10],
+    ["cleffo", 2, "Cleffo", "Gate #2", "Gate #2 - Cleffo", 1, 0, 1, 0, 10, 500, 10, 500, 250, "USD", 20],
+    ["wert", 3, "Wert.io", "Gate #3", "Gate #3 - Wert.io", 1, 0, 1, 0, 10, 500, 10, 500, 250, "USD", 30],
+  ];
+  for (const provider of paymentProviders) {
+    await execute(
+      `insert into payment_providers (
+        provider_key, gate_number, provider_name, public_name, admin_name,
+        enabled, default_user_visible, supports_usd, supports_eur,
+        min_amount, max_amount, min_deposit_amount, max_deposit_amount,
+        default_deposit_amount, currency, priority, created_at, updated_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(provider_key) do update set
+        gate_number = excluded.gate_number,
+        provider_name = excluded.provider_name,
+        public_name = excluded.public_name,
+        admin_name = excluded.admin_name,
+        default_user_visible = excluded.default_user_visible,
+        supports_usd = excluded.supports_usd,
+        supports_eur = excluded.supports_eur,
+        min_amount = case when payment_providers.min_amount <= 1 then excluded.min_amount else payment_providers.min_amount end,
+        max_amount = coalesce(payment_providers.max_amount, excluded.max_amount),
+        min_deposit_amount = case when payment_providers.min_deposit_amount <= 1 then excluded.min_deposit_amount else payment_providers.min_deposit_amount end,
+        max_deposit_amount = coalesce(payment_providers.max_deposit_amount, excluded.max_deposit_amount),
+        default_deposit_amount = coalesce(payment_providers.default_deposit_amount, excluded.default_deposit_amount),
+        currency = coalesce(payment_providers.currency, excluded.currency),
+        priority = excluded.priority,
+        updated_at = excluded.updated_at`,
+      [...provider, providerTimestamp, providerTimestamp],
+    );
+  }
 
   if (shouldSeed) {
     const productsRow = await queryOne("select count(*) as count from products");
@@ -808,10 +1018,11 @@ async function main() {
           `insert into products (
             id, title, rarity, price, currency, stock, collection, category, description, tagline,
             default_delivery_type, delivery_digital, delivery_physical, edition, shape,
-            image_url, image_path, image_updated_at, featured, homepage_featured, featured_started_at, showcase_float,
+            image_url, image_path, image_updated_at, featured, homepage_featured,
+            featured_started_at, is_randomized, randomized_outcomes_json, showcase_float,
             showcase_rotation_seconds, status, archived, palette_glow, palette_glow_soft,
             palette_core, palette_ring, created_at, updated_at
-          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             product.id,
             product.title,
@@ -834,6 +1045,8 @@ async function main() {
             product.featured ? 1 : 0,
             0,
             null,
+            product.isRandomized ? 1 : 0,
+            JSON.stringify(product.randomizedOutcomes ?? []),
             1,
             12,
             product.status,

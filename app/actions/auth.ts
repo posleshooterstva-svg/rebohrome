@@ -54,7 +54,9 @@ export async function loginAction(formData: FormData) {
     ipAddress: meta.ipAddress,
   });
 
-  await trackUserLogin({
+  await setSessionCookie(token);
+
+  void trackUserLogin({
     eventType: "user_login",
     userId: user.id,
     username: user.username,
@@ -66,9 +68,10 @@ export async function loginAction(formData: FormData) {
     language: meta.language,
     route: meta.route,
     timestamp: meta.timestamp,
+  }).catch((error) => {
+    console.warn("Login audit tracking failed", error);
   });
 
-  await setSessionCookie(token);
   redirect(user.role === "admin" ? "/admin" : getRedirectPath(formData, "/dashboard"));
 }
 

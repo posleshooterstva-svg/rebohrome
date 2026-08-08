@@ -59,7 +59,7 @@ export function PaymentStatusRefreshButton({
   return (
     <div className="flex flex-col items-center gap-3">
       <button
-        className="inline-flex min-w-[220px] items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#111827,#7266ff)] px-5 py-3 text-sm font-medium text-white transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-60"
+        className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#111827,#7266ff)] px-5 py-3 text-sm font-medium text-white transition hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto sm:min-w-[220px]"
         disabled={busy}
         onClick={handleClick}
         type="button"

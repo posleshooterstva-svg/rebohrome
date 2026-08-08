@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 type ArchiveSurfaceLayoutProps = {
   sidebar: React.ReactNode;
   children: React.ReactNode;
-  rightRail: React.ReactNode;
+  rightRail?: React.ReactNode;
   className?: string;
   sidebarClassName?: string;
   rightRailClassName?: string;
@@ -17,10 +17,15 @@ export function ArchiveSurfaceLayout({
   sidebarClassName,
   rightRailClassName,
 }: ArchiveSurfaceLayoutProps) {
+  const hasRightRail = Boolean(rightRail);
+
   return (
     <div
       className={cn(
-        "grid overflow-hidden rounded-[16px] border border-line bg-panel shadow-panel xl:grid-cols-[228px_minmax(0,1fr)_318px]",
+        "grid min-h-[calc(100dvh-73px)] w-full overflow-hidden bg-panel",
+        hasRightRail
+          ? "xl:grid-cols-[260px_minmax(0,1fr)_340px]"
+          : "xl:grid-cols-[260px_minmax(0,1fr)]",
         className,
       )}
     >
@@ -32,17 +37,24 @@ export function ArchiveSurfaceLayout({
       >
         {sidebar}
       </aside>
-      <section className="min-w-0 border-b border-line bg-[linear-gradient(180deg,rgba(14,20,34,0.84)_0%,rgba(9,13,22,0.94)_100%)] xl:border-b-0 xl:border-r">
-        {children}
-      </section>
-      <aside
+      <section
         className={cn(
-          "min-w-0 border-t border-line bg-[linear-gradient(180deg,rgba(17,24,39,0.82)_0%,rgba(9,13,22,0.94)_100%)] xl:border-t-0",
-          rightRailClassName,
+          "min-w-0 border-b border-line bg-[linear-gradient(180deg,rgba(14,20,34,0.84)_0%,rgba(9,13,22,0.94)_100%)] xl:border-b-0",
+          hasRightRail ? "xl:border-r" : "",
         )}
       >
-        {rightRail}
-      </aside>
+        {children}
+      </section>
+      {hasRightRail ? (
+        <aside
+          className={cn(
+            "min-w-0 border-t border-line bg-[linear-gradient(180deg,rgba(17,24,39,0.82)_0%,rgba(9,13,22,0.94)_100%)] xl:border-t-0",
+            rightRailClassName,
+          )}
+        >
+          {rightRail}
+        </aside>
+      ) : null}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { checkActivePaymentSessionStatus } from "@/lib/db/repository";
 import { getSessionState } from "@/lib/session";
 
 const schema = z.object({
+  sessionId: z.string().min(1).optional(),
   type: z.enum(["deposit", "purchase"]).optional(),
 });
 
@@ -17,6 +18,7 @@ export async function POST(request: Request) {
   const payload = schema.parse(await request.json().catch(() => ({})));
   const result = await checkActivePaymentSessionStatus({
     userId: session.userId,
+    sessionId: payload.sessionId,
     type: payload.type,
   });
 

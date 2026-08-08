@@ -1,6 +1,11 @@
 import Link from "next/link";
 import { AddToCartButton } from "@/components/cart/add-to-cart-button";
-import { type ProductRecord, formatUsd } from "@/lib/rebohrome-data";
+import {
+  type ProductRecord,
+  formatUsd,
+  getPublicProductTitle,
+  hasValidRandomizedProductOdds,
+} from "@/lib/rebohrome-data";
 import { CardArtwork } from "./card-artwork";
 import { RarityBadge } from "./rarity-badge";
 
@@ -9,6 +14,9 @@ type MarketCardProps = {
 };
 
 export function MarketCard({ card }: MarketCardProps) {
+  const title = getPublicProductTitle(card.title);
+  const oddsConfigured = hasValidRandomizedProductOdds(card);
+
   return (
     <article className="rounded-[14px] border border-line bg-white p-3 transition-transform duration-200 hover:-translate-y-0.5">
       <Link className="group block" href={`/product/${card.id}`}>
@@ -18,7 +26,7 @@ export function MarketCard({ card }: MarketCardProps) {
             <div className="text-[10px] uppercase tracking-[0.18em] text-muted">
               {card.edition}
             </div>
-            <h3 className="mt-1 text-sm font-semibold text-foreground">{card.title}</h3>
+            <h3 className="mt-1 text-sm font-semibold text-foreground">{title}</h3>
             <p className="mt-1 text-xs text-muted">{card.collection}</p>
             <div className="mt-2">
               <RarityBadge rarity={card.rarity} />
@@ -34,9 +42,9 @@ export function MarketCard({ card }: MarketCardProps) {
       </Link>
       <div className="mt-3">
         <AddToCartButton
-          disabled={card.stock <= 0}
+          disabled={card.stock <= 0 || !oddsConfigured}
           fullWidth
-          label="Add to cart"
+          label={oddsConfigured ? "Add to cart" : "Odds pending"}
           productId={card.id}
         />
       </div>

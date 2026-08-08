@@ -12,6 +12,7 @@ import {
   getAdminBroadcasts,
 } from "@/lib/db/repository";
 import { formatUtcDateTime } from "@/lib/rebohrome-data";
+import { withPerf } from "@/lib/server/perf";
 
 type AdminBroadcastsPageProps = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -20,6 +21,7 @@ type AdminBroadcastsPageProps = {
 export default async function AdminBroadcastsPage({
   searchParams,
 }: AdminBroadcastsPageProps) {
+  return withPerf("route=/admin/broadcasts", async () => {
   const params = await searchParams;
   const [broadcasts, debugStats] = await Promise.all([
     getAdminBroadcasts(),
@@ -176,6 +178,7 @@ export default async function AdminBroadcastsPage({
       </section>
     </AdminShell>
   );
+  });
 }
 
 function safeParseChannels(value: string | null) {

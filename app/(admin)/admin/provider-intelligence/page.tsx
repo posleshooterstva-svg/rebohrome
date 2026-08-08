@@ -5,6 +5,7 @@ import { AdminShell } from "@/components/rebohrome/shells/admin-shell";
 import { Button } from "@/components/ui/button";
 import { getProviderIntelligence } from "@/lib/db/repository";
 import { formatUtcDateTime } from "@/lib/rebohrome-data";
+import { withPerf } from "@/lib/server/perf";
 
 async function runManualReconciliation() {
   "use server";
@@ -31,6 +32,7 @@ function normalizeRange(value: string | string[] | undefined) {
 export default async function ProviderIntelligencePage({
   searchParams,
 }: ProviderIntelligencePageProps) {
+  return withPerf("route=/admin/provider-intelligence", async () => {
   const params = await searchParams;
   const range = normalizeRange(params.range);
   const intel = await getProviderIntelligence({
@@ -195,6 +197,7 @@ export default async function ProviderIntelligencePage({
       </section>
     </AdminShell>
   );
+  });
 }
 
 function MetricCard({ label, value }: { label: string; value: string | number }) {

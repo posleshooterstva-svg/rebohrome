@@ -50,8 +50,6 @@ export function DepositSidebarRail({
             ? "Deposit"
             : transaction.kind === "purchase"
               ? "Purchase"
-              : transaction.kind === "withdrawal"
-                ? "Withdrawal"
                 : "Refund",
         meta: formatDisplayDateTime(transaction.createdAt),
         amount: `${transaction.amount > 0 ? "+" : transaction.amount < 0 ? "-" : ""}${formatCurrency(
@@ -177,8 +175,6 @@ export function DepositSidebarRail({
                         ? "Deposit"
                         : transaction.kind === "purchase"
                           ? "Purchase"
-                          : transaction.kind === "withdrawal"
-                            ? "Withdrawal"
                             : "Refund"}
                     </div>
                     <div className="mt-1 text-xs text-muted">

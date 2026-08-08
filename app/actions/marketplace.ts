@@ -15,7 +15,6 @@ import {
   reconcilePendingTransVoucherPayments,
   recalculateVaultIntegrity,
   refreshTransVoucherTransactionStatus,
-  retryWithdrawalTelegramSync,
   retryBroadcastTelegramChannel,
   setHomepageFeaturedProduct,
   updateMaintenanceModeConfig,
@@ -23,45 +22,83 @@ import {
   updateOrderStatus,
   updateProduct,
   updateUserEmailAddress,
+  updateUserGate2PaymentDetails,
   updateUserProfile,
-  updateWithdrawalStatus,
   markNotificationRead,
   sendBroadcastNow,
-  sendWithdrawalViaXRocket,
 } from "@/lib/db/repository";
 import { getRequestMeta, requireAdminSession, requireUserSession } from "@/lib/session";
 
-const productSchema = z.object({
-  title: z.string().min(2),
-  rarity: z.enum(["Legendary", "Epic", "Rare"]),
-  price: z.coerce.number().min(0),
-  currency: z.enum(["USD", "EUR"]),
-  stock: z.coerce.number().int().min(0),
-  collection: z.string().min(2),
-  category: z.string().min(2),
-  description: z.string().min(10),
-  tagline: z.string().min(4),
-  defaultDeliveryType: z.enum(["digital", "physical"]),
-  deliveryDigital: z.string().min(4),
-  deliveryPhysical: z.string().min(4),
-  edition: z.string().min(2),
-  featured: z.boolean(),
-  homepageFeatured: z.boolean().default(false),
-  status: z.enum(["active", "inactive"]),
-  shape: z.enum(["spire", "void", "halo", "crescent", "shard"]),
-});
+const productSchema = z
+  .object({
+    title: z.string().min(2),
+    rarity: z.enum(["Legendary", "Epic", "Rare"]),
+    price: z.coerce.number().min(0),
+    currency: z.enum(["USD", "EUR"]),
+    stock: z.coerce.number().int().min(0),
+    collection: z.string().min(2),
+    category: z.string().min(2),
+    description: z.string().min(10),
+    tagline: z.string().min(4),
+    defaultDeliveryType: z.enum(["digital", "physical"]),
+    deliveryDigital: z.string().min(4),
+    deliveryPhysical: z.string().min(4),
+    edition: z.string().min(2),
+    featured: z.boolean(),
+    homepageFeatured: z.boolean().default(false),
+    isRandomized: z.boolean().default(false),
+    randomizedOutcomes: z
+      .array(
+        z.object({
+          productId: z.string().min(1),
+          probabilityBps: z.number().int().min(1).max(10_000),
+        }),
+      )
+      .max(250)
+      .default([]),
+    status: z.enum(["active", "inactive"]),
+    shape: z.enum(["spire", "void", "halo", "crescent", "shard"]),
+  })
+  .superRefine((value, context) => {
+    if (!value.isRandomized) {
+      return;
+    }
+
+    const ids = new Set(value.randomizedOutcomes.map((outcome) => outcome.productId));
+    const total = value.randomizedOutcomes.reduce(
+      (sum, outcome) => sum + outcome.probabilityBps,
+      0,
+    );
+
+    if (value.randomizedOutcomes.length === 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Add at least one possible card to a randomized product.",
+        path: ["randomizedOutcomes"],
+      });
+    }
+
+    if (ids.size !== value.randomizedOutcomes.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Each possible card can appear only once.",
+        path: ["randomizedOutcomes"],
+      });
+    }
+
+    if (total !== 10_000) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Randomized product probabilities must total exactly 100%.",
+        path: ["randomizedOutcomes"],
+      });
+    }
+  });
 
 const profileSchema = z.object({
   name: z.string().min(2),
   telegramUsername: z.string().min(2),
   telegramId: z.string().optional(),
-  withdrawalWallet: z
-    .string()
-    .optional()
-    .refine(
-      (value) => !value || /^0x[a-fA-F0-9]{40}$/.test(value.trim()),
-      "Please enter a valid USDT BEP20 wallet address.",
-    ),
 });
 
 const emailUpdateSchema = z
@@ -82,7 +119,6 @@ const adminUserSchema = z.object({
   status: z.enum(["active", "under_review", "frozen", "blocked", "suspended"]),
   telegramUsername: z.string().min(2),
   telegramId: z.string().optional(),
-  withdrawalWallet: z.string().optional(),
   verified: z.boolean(),
 });
 
@@ -133,7 +169,7 @@ const broadcastSchema = z.object({
     "new_drop",
     "maintenance",
     "payment_notice",
-    "withdrawal_notice",
+    "account_notice",
     "security_alert",
     "policy_update",
     "promotional",
@@ -155,12 +191,6 @@ const broadcastSchema = z.object({
 const statusSchema = z.object({
   orderId: z.string().min(1),
   status: z.enum(["Completed", "Processing", "Pending", "Declined"]),
-});
-
-const withdrawalStatusSchema = z.object({
-  withdrawalId: z.string().min(1),
-  status: z.enum(["pending", "approved", "processing", "completed", "declined"]),
-  adminNote: z.string().optional(),
 });
 
 function readString(formData: FormData, key: string) {
@@ -203,6 +233,16 @@ function normalizeDateTimeInput(value: string) {
 }
 
 function parseProductForm(formData: FormData) {
+  let randomizedOutcomes: unknown = [];
+
+  try {
+    randomizedOutcomes = JSON.parse(
+      readString(formData, "randomizedOutcomes") || "[]",
+    );
+  } catch {
+    throw new Error("Randomized product probabilities are not valid JSON.");
+  }
+
   return productSchema.parse({
     title: readString(formData, "title"),
     rarity: readString(formData, "rarity"),
@@ -219,6 +259,8 @@ function parseProductForm(formData: FormData) {
     edition: readString(formData, "edition"),
     featured: readBoolean(formData, "featured"),
     homepageFeatured: readBoolean(formData, "homepageFeatured"),
+    isRandomized: readBoolean(formData, "isRandomized"),
+    randomizedOutcomes,
     status: readString(formData, "status"),
     shape: readString(formData, "shape"),
   });
@@ -328,17 +370,31 @@ export async function saveProfileAction(formData: FormData) {
     name: readString(formData, "name"),
     telegramUsername: readString(formData, "telegramUsername"),
     telegramId: readString(formData, "telegramId"),
-    withdrawalWallet: readString(formData, "withdrawalWallet"),
   });
 
   await updateUserProfile(session.userId, {
     name: values.name,
     telegramUsername: values.telegramUsername,
     telegramId: values.telegramId ?? "",
-    withdrawalWallet: values.withdrawalWallet ?? "",
+    withdrawalWallet: "",
   });
 
   redirect("/dashboard/settings?saved=1");
+}
+
+export async function savePaymentPhoneAction(formData: FormData) {
+  const session = await requireUserSession("/login");
+  const meta = await getRequestMeta("/dashboard/settings");
+
+  await updateUserGate2PaymentDetails({
+    userId: session.userId,
+    firstName: readString(formData, "gate2FirstName"),
+    lastName: readString(formData, "gate2LastName"),
+    phone: readString(formData, "gate2Phone"),
+    ...meta,
+  });
+
+  redirect("/dashboard/settings?section=payments&phoneSaved=1");
 }
 
 export async function changeEmailAction(formData: FormData) {
@@ -723,51 +779,21 @@ export async function reconcileTransVoucherPaymentsInlineAction(): Promise<Recon
 }
 
 export async function updateWithdrawalStatusAction(formData: FormData) {
-  const session = await requireAdminSession("/");
-
-  const values = withdrawalStatusSchema.parse({
-    withdrawalId: readString(formData, "withdrawalId"),
-    status: readString(formData, "status"),
-    adminNote: readString(formData, "adminNote"),
-  });
-
-  await updateWithdrawalStatus({
-    withdrawalId: values.withdrawalId,
-    status: values.status,
-    adminUserId: session.userId,
-    adminNote: values.adminNote,
-  });
-
-  redirect("/admin/users?withdrawalUpdated=1");
+  void formData;
+  await requireAdminSession("/");
+  throw new Error("Withdrawals are currently disabled.");
 }
 
 export async function retryWithdrawalTelegramSyncAction(formData: FormData) {
-  const session = await requireAdminSession("/");
-  const withdrawalId = readString(formData, "withdrawalId");
-
-  if (!withdrawalId) {
-    throw new Error("Missing withdrawal id");
-  }
-
-  await retryWithdrawalTelegramSync(withdrawalId, session.userId);
-  redirect("/admin/users?telegramSynced=1");
+  void formData;
+  await requireAdminSession("/");
+  throw new Error("Withdrawals are currently disabled.");
 }
 
 export async function sendWithdrawalViaXRocketAction(formData: FormData) {
-  const session = await requireAdminSession("/");
-  const withdrawalId = readString(formData, "withdrawalId");
-  const confirmation = readString(formData, "confirmation");
-
-  if (!withdrawalId) {
-    throw new Error("Missing withdrawal id");
-  }
-
-  await sendWithdrawalViaXRocket({
-    withdrawalId,
-    adminUserId: session.userId,
-    confirmation,
-  });
-  redirect("/admin/users?withdrawalUpdated=1");
+  void formData;
+  await requireAdminSession("/");
+  throw new Error("Withdrawals are currently disabled.");
 }
 
 export async function saveMaintenanceModeAction(formData: FormData) {
@@ -861,7 +887,6 @@ export async function updateAdminUserInlineAction(
       status: readString(formData, "status"),
       telegramUsername: readString(formData, "telegramUsername"),
       telegramId: readString(formData, "telegramId"),
-      withdrawalWallet: readString(formData, "withdrawalWallet"),
       verified: readBoolean(formData, "verified"),
     });
   } catch (error) {
@@ -880,7 +905,7 @@ export async function updateAdminUserInlineAction(
       status: values.status,
       telegramUsername: values.telegramUsername,
       telegramId: values.telegramId ?? "",
-      withdrawalWallet: values.withdrawalWallet ?? "",
+      withdrawalWallet: "",
       verified: values.verified,
     });
 

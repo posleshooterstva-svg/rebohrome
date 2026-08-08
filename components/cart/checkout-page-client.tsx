@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { getCartSummary } from "@/lib/cart";
 import { GLOBAL_COLLECTIBLE_DISCLAIMER } from "@/lib/legal-content";
 import {
+  type ActivePaymentSessionRecord,
   checkoutPaymentOptions,
   composePaymentLabel,
   formatCurrency,
@@ -53,8 +54,12 @@ type CheckoutResult =
 type CheckoutSessionResponse =
   | {
       sessionId: string;
-      paymentUrl?: string;
+      paymentUrl?: string | null;
+      embedUrl?: string | null;
+      useEmbed?: boolean;
       redirectPath: string;
+      activeSession?: ActivePaymentSessionRecord | null;
+      reusedExistingSession?: boolean;
     }
   | { error?: string };
 
@@ -76,6 +81,13 @@ export function CheckoutPageClient({
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [openedPayment, setOpenedPayment] = useState<{
+    sessionId: string;
+    paymentUrl: string;
+    embedUrl: string | null;
+    useEmbed: boolean;
+    reusedExistingSession: boolean;
+  } | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -165,6 +177,7 @@ export function CheckoutPageClient({
 
     setIsSubmitting(true);
     setError(null);
+    setOpenedPayment(null);
 
     try {
       if (paymentMethod === "Archive Balance") {
@@ -249,14 +262,32 @@ export function CheckoutPageClient({
         );
       }
 
-      const paymentLink = payload.paymentUrl ?? payload.redirectPath;
-      window.open(paymentLink, "_blank");
+      const embedUrl = payload.embedUrl || null;
+      const paymentUrl = payload.paymentUrl || payload.redirectPath;
+      if (!paymentUrl) {
+        throw new Error("Payment page could not be created.");
+      }
+
+      if (payload.useEmbed && embedUrl) {
+        openEmbedPayment(embedUrl);
+      } else {
+        window.open(paymentUrl, "_blank");
+      }
+      setOpenedPayment({
+        sessionId: payload.sessionId,
+        paymentUrl,
+        embedUrl,
+        useEmbed: Boolean(payload.useEmbed && embedUrl),
+        reusedExistingSession: Boolean(payload.reusedExistingSession),
+      });
+      router.refresh();
     } catch (checkoutError) {
       setError(
         checkoutError instanceof Error
           ? checkoutError.message
-          : "Unable to continue to secure payment.",
+          : "Payment page could not be created. Please try again.",
       );
+    } finally {
       setIsSubmitting(false);
     }
   }
@@ -278,6 +309,54 @@ export function CheckoutPageClient({
     );
   }
 
+  function openEmbedPayment(embedUrl: string) {
+    let overlay = document.getElementById("transvoucher-iframe-overlay");
+    let iframe = document.getElementById("transvoucher-iframe") as HTMLIFrameElement | null;
+
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "transvoucher-iframe-overlay";
+      overlay.style.cssText =
+        "display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:999999;";
+
+      const closeButton = document.createElement("button");
+      closeButton.id = "transvoucher-close-payment";
+      closeButton.innerHTML = "&times;";
+      closeButton.type = "button";
+      closeButton.style.cssText =
+        "position:absolute;top:14px;right:14px;width:44px;height:44px;border:0;border-radius:999px;background:#fff;color:#111;font-size:28px;line-height:44px;cursor:pointer;box-shadow:0 12px 30px rgba(0,0,0,.35);z-index:1000000;";
+      closeButton.onclick = closeEmbedPayment;
+
+      iframe = document.createElement("iframe");
+      iframe.id = "transvoucher-iframe";
+      iframe.style.cssText = "width:100%;height:100%;border:0;";
+      iframe.setAttribute("allowpaymentrequest", "true");
+
+      overlay.appendChild(closeButton);
+      overlay.appendChild(iframe);
+      document.body.appendChild(overlay);
+    }
+
+    if (!iframe) {
+      iframe = document.getElementById("transvoucher-iframe") as HTMLIFrameElement | null;
+    }
+
+    if (iframe) {
+      iframe.src = embedUrl;
+    }
+
+    overlay.style.display = "block";
+    document.body.style.overflow = "hidden";
+  }
+
+  function closeEmbedPayment() {
+    const overlay = document.getElementById("transvoucher-iframe-overlay");
+    if (overlay) {
+      overlay.style.display = "none";
+      document.body.style.overflow = "";
+    }
+  }
+
   if (summary.isEmpty) {
     return (
       <section className="rounded-[18px] border border-line bg-panel px-5 py-6 shadow-panel sm:px-6">
@@ -289,7 +368,7 @@ export function CheckoutPageClient({
         </p>
         <div className="mt-6">
           <Button asChild>
-            <Link href="/marketplace">Return to marketplace</Link>
+            <Link href="/dashboard/marketplace">Return to marketplace</Link>
           </Button>
         </div>
       </section>
@@ -549,6 +628,47 @@ export function CheckoutPageClient({
           ) : null}
           {error ? (
             <p className="mt-4 text-sm leading-6 text-rose-600">{error}</p>
+          ) : null}
+          {openedPayment ? (
+            <div className="mt-4 rounded-[16px] border border-emerald-300/25 bg-emerald-400/10 px-4 py-4 text-sm text-emerald-50">
+              <div className="font-semibold text-foreground">
+                {openedPayment.reusedExistingSession
+                  ? "Active payment session opened"
+                  : "Payment session created"}
+              </div>
+              <p className="mt-2 leading-6 text-muted">
+                Checkout opened. We will verify it automatically.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  className="rounded-[12px] bg-[linear-gradient(135deg,#a78bfa,#6d4df2)] px-4 py-3 text-sm font-medium text-white"
+                  onClick={() => {
+                    if (openedPayment.useEmbed && openedPayment.embedUrl) {
+                      openEmbedPayment(openedPayment.embedUrl);
+                    } else {
+                      window.open(openedPayment.paymentUrl, "_blank");
+                    }
+                  }}
+                  type="button"
+                >
+                  Open checkout
+                </button>
+                <button
+                  className="rounded-[12px] border border-white/10 bg-white/[0.05] px-4 py-3 text-sm font-medium text-foreground"
+                  onClick={() => router.refresh()}
+                  type="button"
+                >
+                  Check status
+                </button>
+                <button
+                  className="rounded-[12px] border border-white/10 bg-white/[0.05] px-4 py-3 text-sm font-medium text-foreground"
+                  onClick={() => router.push("/dashboard")}
+                  type="button"
+                >
+                  Back to dashboard
+                </button>
+              </div>
+            </div>
           ) : null}
 
           <div className="sticky bottom-4 mt-6 space-y-3 rounded-[18px] border border-line bg-[rgba(255,255,255,0.96)] p-3 shadow-[0_18px_48px_rgba(15,23,42,0.08)] backdrop-blur lg:static lg:rounded-none lg:border-0 lg:bg-transparent lg:p-0 lg:shadow-none lg:backdrop-blur-0">

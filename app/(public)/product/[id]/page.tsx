@@ -1,16 +1,21 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Dices, ShieldCheck } from "lucide-react";
 import { notFound } from "next/navigation";
 import { CardArtwork } from "@/components/rebohrome/card-artwork";
 import { MarketCard } from "@/components/rebohrome/market-card";
 import { ProductPurchasePanel } from "@/components/product/product-purchase-panel";
 import { RarityBadge } from "@/components/rebohrome/rarity-badge";
 import { Button } from "@/components/ui/button";
-import { getProductById, getRelatedProducts } from "@/lib/db/repository";
+import {
+  getProductById,
+  getRandomizedProductDisclosure,
+  getRelatedProducts,
+} from "@/lib/db/repository";
 import {
   formatDisplayDate,
   formatUsd,
+  getPublicProductTitle,
 } from "@/lib/rebohrome-data";
 
 type ProductPageProps = {
@@ -26,9 +31,10 @@ export async function generateMetadata({
 }: ProductPageProps): Promise<Metadata> {
   const { id } = await params;
   const card = await getProductById(id);
+  const title = card ? getPublicProductTitle(card.title) : null;
 
   return {
-    title: card ? card.title : "Product Not Found",
+    title: title ?? "Product Not Found",
     description: card?.description,
   };
 }
@@ -41,14 +47,22 @@ export default async function ProductPage({ params }: ProductPageProps) {
     notFound();
   }
 
-  const relatedCards = await getRelatedProducts(card.id, 4);
+  const [relatedCards, randomization] = await Promise.all([
+    getRelatedProducts(card.id, 4),
+    getRandomizedProductDisclosure(card.id),
+  ]);
+  const title = getPublicProductTitle(card.title);
+  const randomizedPurchaseDisabledReason =
+    randomization?.isRandomized && !randomization.isReady
+      ? "This randomized product is paused until its complete card probabilities are published."
+      : null;
 
   return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+    <main className="min-h-dvh w-full overflow-x-hidden px-4 py-6 sm:px-6 lg:px-8">
       <section className="rounded-[32px] border border-line bg-panel px-6 py-8 shadow-panel sm:px-8">
         <Link
           className="inline-flex items-center gap-2 text-sm text-muted transition hover:text-foreground"
-          href="/marketplace"
+          href="/dashboard/marketplace"
         >
           <ArrowLeft className="size-4" />
           Back to marketplace
@@ -85,7 +99,7 @@ export default async function ProductPage({ params }: ProductPageProps) {
               </span>
             </div>
             <h1 className="mt-4 display-font text-4xl font-semibold tracking-[-0.04em] text-foreground sm:text-5xl">
-              {card.title}
+              {title}
             </h1>
             <div className="mt-4 flex flex-wrap items-center gap-4">
               <span className="text-3xl font-semibold text-foreground">
@@ -109,7 +123,90 @@ export default async function ProductPage({ params }: ProductPageProps) {
               <p className="mt-2 text-sm leading-6 text-muted">{card.tagline}</p>
             </div>
 
-            <ProductPurchasePanel product={card} />
+            {randomization?.isRandomized ? (
+              <section
+                aria-labelledby="randomized-product-odds"
+                className="mt-6 rounded-[24px] border border-line bg-[linear-gradient(145deg,var(--panel-strong),var(--panel))] p-5"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <span className="inline-flex size-10 shrink-0 items-center justify-center rounded-2xl border border-line bg-panel text-[var(--accent)]">
+                      <Dices className="size-5" />
+                    </span>
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.24em] text-muted">
+                        Randomized contents
+                      </p>
+                      <h2
+                        className="mt-1 text-lg font-semibold text-foreground"
+                        id="randomized-product-odds"
+                      >
+                        Your chance of receiving each card
+                      </h2>
+                    </div>
+                  </div>
+                  {randomization.isReady ? (
+                    <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300">
+                      <ShieldCheck className="size-3.5" />
+                      Total probability 100%
+                    </span>
+                  ) : null}
+                </div>
+
+                {randomization.isReady ? (
+                  <>
+                    <p className="mt-4 text-sm leading-6 text-muted">
+                      One card is selected from the pool below. Probabilities are fixed at
+                      checkout and are shown before purchase.
+                    </p>
+                    <div className="mt-4 max-h-[520px] space-y-2 overflow-y-auto pr-1">
+                      {randomization.outcomes.map(({ product, probabilityBps }) => (
+                        <div
+                          className="grid grid-cols-[56px_minmax(0,1fr)_auto] items-center gap-3 rounded-[18px] border border-line bg-panel p-2.5"
+                          key={product.id}
+                        >
+                          <CardArtwork
+                            card={product}
+                            className="aspect-square w-14 rounded-[14px]"
+                            compact
+                          />
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-semibold text-foreground">
+                              {getPublicProductTitle(product.title)}
+                            </div>
+                            <div className="mt-1 text-xs text-muted">
+                              {product.rarity} В· Reference value {formatUsd(product.price)}
+                            </div>
+                          </div>
+                          <div className="rounded-xl border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-right">
+                            <div className="text-sm font-semibold text-foreground">
+                              {(probabilityBps / 100).toFixed(2)}%
+                            </div>
+                            <div className="mt-0.5 text-[10px] uppercase tracking-[0.16em] text-muted">
+                              chance
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-4 text-xs leading-5 text-muted">
+                      Reference values are informational and may change. No particular
+                      result or resale value is guaranteed.
+                    </p>
+                  </>
+                ) : (
+                  <p className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+                    Complete card probabilities are being updated. Purchases remain paused
+                    until the full 100% distribution is available here.
+                  </p>
+                )}
+              </section>
+            ) : null}
+
+            <ProductPurchasePanel
+              disabledReason={randomizedPurchaseDisabledReason}
+              product={card}
+            />
           </div>
         </div>
       </section>
@@ -125,7 +222,7 @@ export default async function ProductPage({ params }: ProductPageProps) {
             </h2>
           </div>
           <Button asChild variant="ghost">
-            <Link href="/marketplace">Back to marketplace</Link>
+            <Link href="/dashboard/marketplace">Back to marketplace</Link>
           </Button>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

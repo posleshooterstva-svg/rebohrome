@@ -5,6 +5,7 @@ import { CardArtwork } from "@/components/rebohrome/card-artwork";
 import { RarityBadge } from "@/components/rebohrome/rarity-badge";
 import {
   formatDisplayDate,
+  getPublicProductTitle,
   type ProductRecord,
 } from "@/lib/rebohrome-data";
 
@@ -64,7 +65,7 @@ export function MobileVaultCarousel({ inventory }: MobileVaultCarouselProps) {
             <div className="mt-4 flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-base font-semibold tracking-[-0.03em] text-foreground">
-                  {entry.product.title}
+                  {getPublicProductTitle(entry.product.title)}
                 </h2>
                 <p className="mt-1 text-sm text-muted">{entry.product.collection}</p>
               </div>

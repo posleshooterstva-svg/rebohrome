@@ -30,17 +30,17 @@ export default async function RegisterPage({
             Open your archive account.
           </h1>
           <p className="mt-4 max-w-2xl text-sm leading-7 text-muted">
-            Registration now pauses until Telegram ownership is verified. Your profile,
-            wallet, and private vault are created only after the 6-digit bot code is
-            confirmed.
+            Create your collector profile with username, email, and password.
+            Identity verification happens after account creation and unlocks
+            deposits and card payments.
           </p>
 
           <div className="mt-10 space-y-4">
             {[
               "Secure username, email, and password access",
-              "Mandatory Telegram ownership verification before account creation",
-              `Open ${TELEGRAM_BOT_USERNAME.startsWith("@") ? TELEGRAM_BOT_USERNAME : `@${TELEGRAM_BOT_USERNAME}`} and press Start before requesting a code`,
-              "Private vault, balance wallet, and order access are created only after verification succeeds",
+              "Telegram username is optional and no longer blocks registration",
+              "Veriff identity verification unlocks financial actions",
+              "Private vault, balance wallet, and order access are created immediately",
             ].map((item) => (
               <div
                 key={item}

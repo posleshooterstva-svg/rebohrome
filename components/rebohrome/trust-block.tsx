@@ -9,7 +9,7 @@ const trustItems = [
   {
     icon: ShieldCheck,
     title: "Encrypted Transactions",
-    text: "Protected payment and withdrawal event tracking.",
+    text: "Protected payment and balance event tracking.",
   },
   {
     icon: CheckCircle2,

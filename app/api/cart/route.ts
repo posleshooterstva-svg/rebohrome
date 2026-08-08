@@ -4,6 +4,7 @@ import {
   getUserCartItems,
   replaceUserCartItems,
 } from "@/lib/db/repository";
+import { getMaintenanceApiResponse } from "@/lib/server/maintenance-guard";
 import { getSessionState } from "@/lib/session";
 
 const cartSchema = z.object({
@@ -29,6 +30,11 @@ export async function GET() {
 
 export async function PUT(request: Request) {
   try {
+    const maintenanceResponse = await getMaintenanceApiResponse();
+    if (maintenanceResponse) {
+      return maintenanceResponse;
+    }
+
     const session = await getSessionState();
 
     if (!session.userId) {

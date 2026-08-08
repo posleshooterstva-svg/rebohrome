@@ -29,14 +29,14 @@ const sections = [
     body: "After a successful purchase, the collectible is assigned to the user’s vault and recorded in the internal Archive Ledger as a delivery proof record.",
   },
   {
-    id: "withdrawals",
-    title: "Withdrawals",
-    body: "Withdrawals are manually reviewed and paid in USDT BEP20 when approved. Users must provide a Telegram account and a valid USDT BEP20 wallet before withdrawal.",
+    id: "balance-usage",
+    title: "Balance Usage",
+    body: "Archive balance is intended for purchases on ReboHrome. It is not withdrawable unless ReboHrome expressly enables such functionality in the future.",
   },
   {
     id: "verification",
     title: "Verification",
-    body: "Telegram verification is required for account creation and platform safety. Verification keeps archive notices, withdrawal updates, and support communication aligned.",
+    body: "Telegram verification is required for account creation and platform safety. Verification keeps archive notices and support communication aligned.",
   },
   {
     id: "refunds",
@@ -52,7 +52,7 @@ const sections = [
 
 export default function ArchiveRulesPage() {
   return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+    <main className="min-h-dvh w-full overflow-x-hidden px-4 py-8 sm:px-6 lg:px-8">
       <section className="rounded-[28px] border border-line bg-panel p-6 shadow-panel sm:p-8">
         <div className="grid gap-8 lg:grid-cols-[280px_minmax(0,1fr)]">
           <aside className="lg:sticky lg:top-8 lg:h-fit">
@@ -85,14 +85,14 @@ export default function ArchiveRulesPage() {
               </h1>
               <p className="mt-4 max-w-3xl text-sm leading-7 text-muted">
                 A clear guide to ReboHrome balance, digital collectibles, delivery,
-                withdrawals, verification, and support standards.
+                verification, and support standards.
               </p>
               <div className="mt-6 flex flex-wrap gap-3">
                 <Button asChild>
                   <Link href="/dashboard/settings">Accept in Settings</Link>
                 </Button>
                 <Button asChild variant="secondary">
-                  <Link href="/marketplace">Explore marketplace</Link>
+                  <Link href="/dashboard/marketplace">Explore marketplace</Link>
                 </Button>
               </div>
             </div>

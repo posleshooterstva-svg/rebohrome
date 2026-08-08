@@ -1,8 +1,16 @@
 {
   "crons": [
     {
-      "path": "/api/cron/reconcile-transvoucher",
-      "schedule": "0 3 * * *"
+      "path": "/api/cron/reconcile-active-payments",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-payments",
+      "schedule": "15 2 * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-wert-payments",
+      "schedule": "30 2 * * *"
     },
     {
       "path": "/api/cron/send-scheduled-broadcasts",

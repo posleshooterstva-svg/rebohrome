@@ -15,6 +15,7 @@ import {
   ImagePlus,
   Loader2,
   PencilLine,
+  Plus,
   Search,
   Sparkles,
   Star,
@@ -70,6 +71,11 @@ type ProductDraft = {
   deliveryPhysical: string;
   featured: boolean;
   homepageFeatured: boolean;
+  isRandomized: boolean;
+  randomizedOutcomes: Array<{
+    productId: string;
+    probabilityPercent: string;
+  }>;
 };
 
 type ToastState = {
@@ -102,7 +108,19 @@ function createDraft(product: ProductRecord): ProductDraft {
     deliveryPhysical: product.deliveryPhysical,
     featured: product.featured,
     homepageFeatured: product.homepageFeatured,
+    isRandomized: product.isRandomized,
+    randomizedOutcomes: product.randomizedOutcomes.map((outcome) => ({
+      productId: outcome.productId,
+      probabilityPercent: String(outcome.probabilityBps / 100),
+    })),
   };
+}
+
+function getRandomizedOutcomeWeights(draft: ProductDraft) {
+  return draft.randomizedOutcomes.map((outcome) => ({
+    productId: outcome.productId.trim(),
+    probabilityBps: Math.round(Number(outcome.probabilityPercent) * 100),
+  }));
 }
 
 function normalizeDraft(draft: ProductDraft) {
@@ -529,6 +547,7 @@ export function AdminProductsManager({
       <AnimatePresence>
         {activeProduct ? (
           <ProductEditDrawer
+            availableProducts={products}
             key={activeProduct.id}
             onClose={() => setActiveProductId(null)}
             onFeature={handleFeature}
@@ -547,12 +566,14 @@ export function AdminProductsManager({
 
 function ProductEditDrawer({
   product,
+  availableProducts,
   onClose,
   onSaved,
   onNotify,
   onFeature,
 }: {
   product: ProductRecord;
+  availableProducts: ProductRecord[];
   onClose: () => void;
   onSaved: (product: ProductRecord) => void;
   onNotify: (toast: ToastState) => void;
@@ -598,6 +619,13 @@ function ProductEditDrawer({
 
   const displayedImageUrl =
     previewUrl ?? uploadedImage?.imageUrl ?? (removeImage ? null : product.imageUrl);
+  const randomizedProbabilityTotal = draft.randomizedOutcomes.reduce(
+    (total, outcome) => total + (Number(outcome.probabilityPercent) || 0),
+    0,
+  );
+  const outcomeProducts = availableProducts
+    .filter((candidate) => candidate.id !== product.id && !candidate.isRandomized)
+    .sort((left, right) => left.title.localeCompare(right.title));
   const previewProduct: ProductRecord = {
     ...product,
     title: draft.title,
@@ -617,6 +645,8 @@ function ProductEditDrawer({
     deliveryPhysical: draft.deliveryPhysical,
     featured: draft.featured,
     homepageFeatured: draft.homepageFeatured,
+    isRandomized: draft.isRandomized,
+    randomizedOutcomes: getRandomizedOutcomeWeights(draft),
     imageUrl: displayedImageUrl,
     palette: getPaletteByRarity(draft.rarity),
   };
@@ -714,6 +744,31 @@ function ProductEditDrawer({
       return;
     }
 
+    const randomizedOutcomes = getRandomizedOutcomeWeights(draft);
+    if (draft.isRandomized) {
+      const total = randomizedOutcomes.reduce(
+        (sum, outcome) => sum + outcome.probabilityBps,
+        0,
+      );
+      const ids = new Set(randomizedOutcomes.map((outcome) => outcome.productId));
+
+      if (
+        randomizedOutcomes.length === 0 ||
+        randomizedOutcomes.some(
+          (outcome) => !outcome.productId || outcome.probabilityBps <= 0,
+        ) ||
+        ids.size !== randomizedOutcomes.length ||
+        total !== 10_000
+      ) {
+        onNotify({
+          tone: "error",
+          message:
+            "Add unique cards with positive probabilities totaling exactly 100%.",
+        });
+        return;
+      }
+    }
+
     startTransition(async () => {
       const formData = new FormData();
       formData.append("id", product.id);
@@ -736,6 +791,11 @@ function ProductEditDrawer({
       formData.append(
         "homepageFeatured",
         draft.homepageFeatured ? "true" : "false",
+      );
+      formData.append("isRandomized", draft.isRandomized ? "true" : "false");
+      formData.append(
+        "randomizedOutcomes",
+        JSON.stringify(draft.isRandomized ? randomizedOutcomes : []),
       );
       formData.append(
         "imageUploadState",
@@ -1031,7 +1091,120 @@ function ProductEditDrawer({
                 label="Show on Homepage Hero"
                 onChange={(value) => updateField("homepageFeatured", value)}
               />
+              <ToggleField
+                checked={draft.isRandomized}
+                description="Require a complete public card pool and exact probabilities before purchase."
+                label="Randomized product"
+                onChange={(value) => {
+                  updateField("isRandomized", value);
+                  if (!value) {
+                    updateField("randomizedOutcomes", []);
+                  }
+                }}
+              />
             </div>
+
+            {draft.isRandomized ? (
+              <div className="mt-4 rounded-[18px] border border-[rgba(120,112,241,0.18)] bg-[rgba(120,112,241,0.05)] p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-foreground">
+                      Public card probabilities
+                    </div>
+                    <p className="mt-1 max-w-xl text-xs leading-5 text-muted">
+                      Every possible card is shown to buyers before checkout. The total must
+                      equal exactly 100%; unavailable or inactive cards pause purchases.
+                    </p>
+                  </div>
+                  <div
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-xs font-semibold",
+                      Math.abs(randomizedProbabilityTotal - 100) < 0.001
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : "border-rose-200 bg-rose-50 text-rose-700",
+                    )}
+                  >
+                    Total {randomizedProbabilityTotal.toFixed(2)}%
+                  </div>
+                </div>
+
+                <div className="mt-4 space-y-2">
+                  {draft.randomizedOutcomes.map((outcome, index) => (
+                    <div
+                      className="grid gap-2 rounded-[14px] border border-line bg-white p-2 sm:grid-cols-[minmax(0,1fr)_120px_40px]"
+                      key={`${index}-${outcome.productId}`}
+                    >
+                      <select
+                        aria-label={`Possible card ${index + 1}`}
+                        className="min-w-0 rounded-xl border border-line bg-panel px-3 py-2 text-sm text-foreground outline-none focus:border-[var(--accent)]"
+                        onChange={(event) => {
+                          const next = [...draft.randomizedOutcomes];
+                          next[index] = { ...next[index], productId: event.target.value };
+                          updateField("randomizedOutcomes", next);
+                        }}
+                        value={outcome.productId}
+                      >
+                        <option value="">Select a card</option>
+                        {outcomeProducts.map((candidate) => (
+                          <option key={candidate.id} value={candidate.id}>
+                            {candidate.title} ({formatCurrency(candidate.price, candidate.currency)})
+                          </option>
+                        ))}
+                      </select>
+                      <label className="flex items-center gap-2 rounded-xl border border-line bg-panel px-3">
+                        <input
+                          aria-label={`Probability for card ${index + 1}`}
+                          className="min-w-0 flex-1 bg-transparent py-2 text-right text-sm text-foreground outline-none"
+                          max="100"
+                          min="0.01"
+                          onChange={(event) => {
+                            const next = [...draft.randomizedOutcomes];
+                            next[index] = {
+                              ...next[index],
+                              probabilityPercent: event.target.value,
+                            };
+                            updateField("randomizedOutcomes", next);
+                          }}
+                          step="0.01"
+                          type="number"
+                          value={outcome.probabilityPercent}
+                        />
+                        <span className="text-xs text-muted">%</span>
+                      </label>
+                      <button
+                        aria-label={`Remove possible card ${index + 1}`}
+                        className="inline-flex size-10 items-center justify-center rounded-xl border border-line text-muted transition hover:border-rose-200 hover:text-rose-600"
+                        onClick={() =>
+                          updateField(
+                            "randomizedOutcomes",
+                            draft.randomizedOutcomes.filter((_, itemIndex) => itemIndex !== index),
+                          )
+                        }
+                        type="button"
+                      >
+                        <Trash2 className="size-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <Button
+                  className="mt-3"
+                  disabled={draft.randomizedOutcomes.length >= 250}
+                  onClick={() =>
+                    updateField("randomizedOutcomes", [
+                      ...draft.randomizedOutcomes,
+                      { productId: "", probabilityPercent: "" },
+                    ])
+                  }
+                  type="button"
+                  variant="secondary"
+                >
+                  <Plus className="size-4" />
+                  Add possible card
+                </Button>
+              </div>
+            ) : null}
 
             <div className="mt-4 space-y-3">
               <TextAreaField

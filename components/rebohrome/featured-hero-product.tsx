@@ -4,7 +4,7 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import { ArrowUpRight, Sparkles } from "lucide-react";
 import { CardArtwork } from "@/components/rebohrome/card-artwork";
-import { type ProductRecord } from "@/lib/rebohrome-data";
+import { type ProductRecord, getPublicProductTitle } from "@/lib/rebohrome-data";
 
 type FeaturedHeroProductProps = {
   product: ProductRecord | null;
@@ -58,9 +58,11 @@ export function FeaturedHeroProduct({ product }: FeaturedHeroProductProps) {
     );
   }
 
+  const title = getPublicProductTitle(product.title);
+
   return (
     <Link
-      aria-label={`Open ${product.title}`}
+      aria-label={`Open ${title}`}
       className="group block"
       href={`/product/${product.id}`}
     >
@@ -107,7 +109,7 @@ export function FeaturedHeroProduct({ product }: FeaturedHeroProductProps) {
               {product.collection}
             </div>
             <div className="mt-2 text-[15px] font-semibold tracking-[-0.03em] text-foreground">
-              {product.title}
+              {title}
             </div>
             <div className="mt-3 flex items-center justify-center gap-2 text-[11px] uppercase tracking-[0.16em] text-muted">
               <span>{product.rarity}</span>

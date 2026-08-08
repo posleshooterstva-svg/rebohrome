@@ -3,6 +3,18 @@ export type CardShape = "spire" | "void" | "halo" | "crescent" | "shard";
 export type DeliveryType = "digital" | "physical";
 export type UserRole = "user" | "admin";
 export type UserStatus = "active" | "under_review" | "frozen" | "blocked" | "suspended";
+export type KycStatus =
+  | "not_started"
+  | "session_created"
+  | "submitted"
+  | "review"
+  | "approved"
+  | "declined"
+  | "expired"
+  | "abandoned"
+  | "manual_approved"
+  | "manual_declined"
+  | "manual_rejected";
 export type ProductStatus = "active" | "inactive";
 export type OrderStatus = "Completed" | "Processing" | "Pending" | "Declined";
 export type PaymentState = "completed" | "pending" | "failed";
@@ -15,22 +27,44 @@ export type PaymentMethodName =
 export type SupportedCurrency = "USD" | "EUR";
 export type PaymentProviderName =
   | "Internal Wallet"
-  | "TransVoucher";
-export type PaymentProviderSlug = "internal-wallet" | "transvoucher";
+  | "TransVoucher"
+  | "Cleffo"
+  | "Wert.io"
+  | "Coinflow";
+export type PaymentProviderSlug =
+  | "internal-wallet"
+  | "transvoucher"
+  | "cleffo"
+  | "wert"
+  | "coinflow";
+export type PaymentProviderKey = "transvoucher" | "cleffo" | "wert" | "coinflow";
 export type CryptoNetwork = "USDT" | "BTC" | "ETH";
 export type TransactionKind =
   | "deposit"
   | "purchase"
   | "withdrawal"
   | "refund"
-  | "admin_initial_balance";
+  | "admin_initial_balance"
+  | "chargeback"
+  | "manual_credit"
+  | "manual_debit"
+  | "product_grant"
+  | "product_remove"
+  | "product_quantity_adjustment"
+  | "provider_adjustment"
+  | "admin_correction";
 export type TransactionStatus =
   | "completed"
   | "pending"
   | "attempting"
   | "processing"
   | "failed"
-  | "expired";
+  | "expired"
+  | "canceled"
+  | "refunded"
+  | "chargeback"
+  | "reversed"
+  | "manually_adjusted";
 export type DepositStatus = "processing" | "completed" | "failed";
 export type CheckoutPaymentSessionStatus =
   | "pending"
@@ -64,6 +98,106 @@ export type WithdrawalActionSource =
   | "system"
   | "telegram-unauthorized";
 
+export type RequiredDocumentKey = "terms" | "privacy" | "refund" | "aml" | "legalConfirmation";
+
+export type DocumentAcceptanceItem = {
+  version: string;
+  accepted: boolean;
+  url: string;
+  acceptedAt: string | null;
+};
+
+export type DocumentAcceptanceStatusRecord = {
+  accepted: boolean;
+  acceptedAllAt: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  currentVersion: string;
+  required: Record<RequiredDocumentKey, DocumentAcceptanceItem>;
+};
+
+export const RANDOMIZED_ODDS_TOTAL_BPS = 10_000;
+
+export type RandomizedProductOutcomeWeight = {
+  productId: string;
+  probabilityBps: number;
+};
+
+export type RandomizedProductOutcomeDisclosure = {
+  product: ProductRecord;
+  probabilityBps: number;
+};
+
+export type RandomizedProductDisclosure = {
+  isRandomized: boolean;
+  isReady: boolean;
+  totalProbabilityBps: number;
+  outcomes: RandomizedProductOutcomeDisclosure[];
+};
+
+export function normalizeRandomizedProductOutcomes(
+  value: unknown,
+): RandomizedProductOutcomeWeight[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return [];
+    }
+
+    const productId = String(
+      (entry as Record<string, unknown>).productId ?? "",
+    ).trim();
+    const probabilityBps = Number(
+      (entry as Record<string, unknown>).probabilityBps,
+    );
+
+    if (
+      !productId ||
+      !Number.isInteger(probabilityBps) ||
+      probabilityBps <= 0 ||
+      probabilityBps > RANDOMIZED_ODDS_TOTAL_BPS
+    ) {
+      return [];
+    }
+
+    return [{ productId, probabilityBps }];
+  });
+}
+
+export function hasValidRandomizedProductOdds(
+  product: Pick<ProductRecord, "id" | "isRandomized" | "randomizedOutcomes">,
+) {
+  if (!product.isRandomized) {
+    return true;
+  }
+
+  if (product.randomizedOutcomes.length === 0) {
+    return false;
+  }
+
+  const productIds = new Set<string>();
+  let total = 0;
+
+  for (const outcome of product.randomizedOutcomes) {
+    if (
+      outcome.productId === product.id ||
+      productIds.has(outcome.productId) ||
+      !Number.isInteger(outcome.probabilityBps) ||
+      outcome.probabilityBps <= 0
+    ) {
+      return false;
+    }
+
+    productIds.add(outcome.productId);
+    total += outcome.probabilityBps;
+  }
+
+  return total === RANDOMIZED_ODDS_TOTAL_BPS;
+}
+
 export type ProductRecord = {
   id: string;
   title: string;
@@ -86,6 +220,8 @@ export type ProductRecord = {
   featured: boolean;
   homepageFeatured: boolean;
   featuredStartedAt: string | null;
+  isRandomized: boolean;
+  randomizedOutcomes: RandomizedProductOutcomeWeight[];
   status: ProductStatus;
   archived?: boolean;
   palette: {
@@ -110,6 +246,14 @@ export type ProductInput = Omit<
   imagePath?: string | null;
   imageUpdatedAt?: string | null;
 };
+
+export function getPublicProductTitle(title: string) {
+  return title
+    .replace(/\bgacha\s+pack\b/gi, "Collectible Pack")
+    .replace(/\bgacha\b/gi, "collectible")
+    .replace(/\bjackpot\b/gi, "featured pull")
+    .replace(/\bwinnings\b/gi, "pulls");
+}
 
 export type CollectionSummary = {
   id: string;
@@ -139,6 +283,11 @@ export type UserRecord = {
   telegramVerified: boolean;
   telegramVerifiedAt: string | null;
   withdrawalWallet: string | null;
+  paymentPhone: string | null;
+  gate2FirstName: string | null;
+  gate2LastName: string | null;
+  gate2Phone: string | null;
+  gate2DetailsUpdatedAt: string | null;
   verified: boolean;
   createdAt: string;
   updatedAt: string;
@@ -152,7 +301,62 @@ export type UserRecord = {
   vaultIntegrityUpdatedAt: string | null;
   archiveRulesAcceptedAt: string | null;
   latestTermsAcceptedAt: string | null;
+  kycStatus: KycStatus;
+  kycVerified: boolean;
+  kycProvider: string | null;
+  veriffSessionId: string | null;
+  veriffVerificationId: string | null;
+  veriffStatus: string | null;
+  veriffDecision: string | null;
+  veriffReason: string | null;
+  kycStartedAt: string | null;
+  kycSubmittedAt: string | null;
+  kycVerifiedAt: string | null;
+  kycDeclinedAt: string | null;
+  kycLastWebhookAt: string | null;
+  kycManualOverride: boolean;
+  kycManualOverrideBy: string | null;
+  kycManualOverrideAt: string | null;
+  kycManualOverrideReason: string | null;
+  withdrawAccessEnabled: boolean;
+  withdrawAccessDisabledAt: string | null;
+  withdrawAccessDisabledBy: string | null;
+  withdrawAccessDisabledReason: string | null;
+  withdrawAccessRestoredAt: string | null;
+  withdrawAccessRestoredBy: string | null;
 };
+
+export type UserKycProfileRecord = {
+  id: string;
+  userId: string;
+  firstName: string;
+  lastName: string;
+  dateOfBirth: string;
+  countryOfResidence: string;
+  documentCountry: string;
+  email: string;
+  phone: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  postalCode: string | null;
+  state: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function isKycVerified(
+  user: Pick<UserRecord, "kycStatus" | "kycVerified"> | null | undefined,
+) {
+  if (!user) {
+    return false;
+  }
+
+  return (
+    user.kycVerified === true &&
+    (user.kycStatus === "approved" || user.kycStatus === "manual_approved")
+  );
+}
 
 export type VaultIntegrityReport = {
   score: number;
@@ -255,6 +459,8 @@ export type BalanceRecord = {
   totalDeposited: number;
   totalSpent: number;
   totalWithdrawn: number;
+  payoutBonusOverrideEnabled: boolean;
+  payoutBonusPercent: number | null;
   updatedAt: string;
 };
 
@@ -427,6 +633,7 @@ export type MarketplaceFilters = {
   rarity?: string;
   collection?: string;
   sort?: string;
+  limit?: number;
 };
 
 export type DashboardStat = {
@@ -447,6 +654,24 @@ export type PaymentProviderOption = {
   secureLabel: string;
   speedLabel: string;
   supportedCurrencies: SupportedCurrency[];
+};
+
+export type PaymentGateAccessRecord = {
+  providerKey: PaymentProviderKey;
+  gateNumber: number;
+  providerName: Exclude<PaymentProviderName, "Internal Wallet">;
+  publicName: string;
+  adminName: string;
+  enabled: boolean;
+  accessEnabled: boolean;
+  defaultUserVisible: boolean;
+  supportsCurrencies: SupportedCurrency[];
+  minAmount: number;
+  maxAmount: number | null;
+  defaultAmount: number | null;
+  limitCurrency: SupportedCurrency;
+  reason: string | null;
+  updatedAt: string | null;
 };
 
 export type HeaderAccount = {
@@ -504,11 +729,9 @@ export type DepositPaymentSessionRecord = {
 export const SESSION_COOKIE_NAME = "rebohrome_session";
 
 export const publicNavItems = [
-  { href: "/marketplace", label: "Marketplace" },
-  { href: "/#collections", label: "Collections" },
-  { href: "/#drops", label: "Drops" },
-  { href: "/dashboard", label: "Vault" },
-  { href: "/#about", label: "About" },
+  { href: "/dashboard/marketplace", label: "Marketplace" },
+  { href: "/faq", label: "FAQ" },
+  { href: "/about", label: "About" },
 ];
 
 export const heroMetrics = [
@@ -545,12 +768,7 @@ export const dashboardQuickLinks = [
   {
     href: "/dashboard/deposit",
     title: "Fund Balance",
-    description: "Add funds to your archive balance for instant collectible purchases.",
-  },
-  {
-    href: "/withdraw",
-    title: "Withdraw",
-    description: "Submit a manual USDT BEP20 withdrawal request from your available balance.",
+    description: "Add funds securely.",
   },
   {
     href: "/dashboard/collection",
@@ -560,7 +778,7 @@ export const dashboardQuickLinks = [
   {
     href: "/dashboard/transactions",
     title: "Transactions",
-    description: "Follow deposits, purchases, withdrawals, and balance activity in one place.",
+    description: "Follow deposits, purchases, and balance activity in one place.",
   },
 ];
 
@@ -594,7 +812,7 @@ export const depositPaymentOptions: PaymentMethodOption[] = checkoutPaymentOptio
 export const paymentProviderOptions: PaymentProviderOption[] = [
   {
     id: "TransVoucher",
-    label: "TransVoucher",
+    label: "Gate #1",
     secureLabel: "Card / Apple Pay / Google Pay",
     speedLabel: "Secure hosted payment",
     supportedCurrencies: ["USD", "EUR"],
@@ -607,6 +825,9 @@ export const paymentProviderRouteMap: Record<
 > = {
   "Internal Wallet": "internal-wallet",
   TransVoucher: "transvoucher",
+  Cleffo: "cleffo",
+  "Wert.io": "wert",
+  Coinflow: "coinflow",
 };
 
 export const paymentProviderSlugMap: Record<
@@ -615,7 +836,54 @@ export const paymentProviderSlugMap: Record<
 > = {
   "internal-wallet": "Internal Wallet",
   transvoucher: "TransVoucher",
+  cleffo: "Cleffo",
+  wert: "Wert.io",
+  coinflow: "Coinflow",
 };
+
+export function getPublicPaymentProviderLabel(
+  provider?: PaymentProviderName | string | null,
+) {
+  if (provider === "TransVoucher") {
+    return "Gate #1";
+  }
+
+  if (provider === "Cleffo") {
+    return "Gate #2";
+  }
+
+  if (provider === "Wert.io") {
+    return "Gate #3";
+  }
+
+  if (provider === "Coinflow") {
+    return "Gate #4";
+  }
+
+  return provider ?? "Unknown";
+}
+
+export function getAdminPaymentProviderLabel(
+  provider?: PaymentProviderName | string | null,
+) {
+  if (provider === "TransVoucher") {
+    return "Gate #1 - TransVoucher";
+  }
+
+  if (provider === "Cleffo") {
+    return "Gate #2 - Cleffo";
+  }
+
+  if (provider === "Wert.io") {
+    return "Gate #3 - Wert.io";
+  }
+
+  if (provider === "Coinflow") {
+    return "Gate #4 - Coinflow";
+  }
+
+  return provider ?? "Unknown";
+}
 
 export const cryptoNetworkOptions: CryptoNetwork[] = ["USDT", "BTC", "ETH"];
 export const supportedCurrencies: SupportedCurrency[] = ["USD", "EUR"];
@@ -728,6 +996,18 @@ export function getPayoutBonusPercent(totalDepositedUsd: number) {
   return Math.max(0, Math.floor(Number(totalDepositedUsd || 0) / PAYOUT_TIER_STEP_USD));
 }
 
+export function getEffectivePayoutBonusPercent(input: {
+  totalDepositedUsd: number;
+  payoutBonusOverrideEnabled?: boolean;
+  payoutBonusPercent?: number | null;
+}) {
+  if (input.payoutBonusOverrideEnabled && input.payoutBonusPercent !== null && input.payoutBonusPercent !== undefined) {
+    return Math.max(0, Math.min(100, Math.floor(Number(input.payoutBonusPercent || 0))));
+  }
+
+  return getPayoutBonusPercent(input.totalDepositedUsd);
+}
+
 export function getPayoutTierProgress(totalDepositedUsd: number) {
   const normalized = Math.max(0, Number(totalDepositedUsd || 0));
   const currentBonus = getPayoutBonusPercent(normalized);
@@ -745,9 +1025,11 @@ export function getPayoutTierProgress(totalDepositedUsd: number) {
 export function calculateWithdrawalPayout(input: {
   requestedAmount: number;
   totalDepositedUsd: number;
+  payoutBonusOverrideEnabled?: boolean;
+  payoutBonusPercent?: number | null;
 }) {
   const requestedAmount = Number(input.requestedAmount || 0);
-  const bonusPayoutPercent = getPayoutBonusPercent(input.totalDepositedUsd);
+  const bonusPayoutPercent = getEffectivePayoutBonusPercent(input);
   const finalPayoutPercent = BASE_WITHDRAWAL_PAYOUT_PERCENT + bonusPayoutPercent;
 
   return {

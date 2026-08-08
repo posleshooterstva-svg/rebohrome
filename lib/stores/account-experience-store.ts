@@ -3,7 +3,6 @@
 import { create } from "zustand";
 import {
   formatCurrency,
-  formatUsd,
   type OrderRecord,
   type ProductRecord,
   type SupportedCurrency,
@@ -33,6 +32,8 @@ type AccountSnapshot = {
   totalDeposited: number;
   totalSpent: number;
   totalWithdrawn: number;
+  payoutBonusOverrideEnabled?: boolean;
+  payoutBonusPercent?: number | null;
 };
 
 type LiveAccountEntry = {
@@ -63,12 +64,6 @@ type PurchaseEventInput = {
   }>;
 };
 
-type WithdrawalEventInput = {
-  requestId: string;
-  amount: number;
-  summary: string;
-};
-
 type AccountExperienceState = {
   accounts: Record<string, LiveAccountEntry>;
   primeAccount: (
@@ -80,7 +75,6 @@ type AccountExperienceState = {
   primeOrders: (userId: string, orders: LiveOrderItem[]) => void;
   applyDeposit: (userId: string, input: DepositEventInput) => void;
   applyPurchase: (userId: string, input: PurchaseEventInput) => void;
-  applyWithdrawalRequest: (userId: string, input: WithdrawalEventInput) => void;
 };
 
 function ensureAccountEntry(
@@ -328,41 +322,6 @@ export const useAccountExperienceStore = create<AccountExperienceState>((set) =>
               title: "Purchase",
               meta: input.summary,
               amount: `-${formatCurrency(input.amount, input.currency)}`,
-              tone: "negative",
-            }),
-            seenEvents: {
-              ...current.seenEvents,
-              [eventKey]: true,
-            },
-          },
-        },
-      };
-    }),
-  applyWithdrawalRequest: (userId, input) =>
-    set((state) => {
-      const current = ensureAccountEntry(state.accounts, userId);
-      const eventKey = `withdrawal:${input.requestId}`;
-
-      if (current.seenEvents[eventKey]) {
-        return state;
-      }
-
-      return {
-        accounts: {
-          ...state.accounts,
-          [userId]: {
-            ...current,
-            balance: {
-              ...current.balance,
-              available: current.balance.available - input.amount,
-              pendingWithdrawal:
-                current.balance.pendingWithdrawal + input.amount,
-            },
-            activity: prependActivity(current.activity, {
-              id: eventKey,
-              title: "Withdrawal Request",
-              meta: input.summary,
-              amount: `-${formatUsd(input.amount)}`,
               tone: "negative",
             }),
             seenEvents: {

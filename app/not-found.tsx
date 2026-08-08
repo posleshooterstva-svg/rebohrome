@@ -16,7 +16,7 @@ export default function NotFound() {
           available.
         </p>
         <Button asChild className="mt-6">
-          <Link href="/marketplace">Return to marketplace</Link>
+          <Link href="/dashboard/marketplace">Return to marketplace</Link>
         </Button>
       </section>
     </main>

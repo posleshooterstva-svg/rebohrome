@@ -11,7 +11,7 @@ const broadcastTypes = [
   ["new_drop", "New drop"],
   ["maintenance", "Maintenance"],
   ["payment_notice", "Payment notice"],
-  ["withdrawal_notice", "Withdrawal notice"],
+  ["account_notice", "Account notice"],
   ["security_alert", "Security alert"],
   ["policy_update", "Policy update"],
   ["promotional", "Promotional"],
@@ -21,7 +21,7 @@ const broadcastTypes = [
 const targetTypes = [
   ["all_users", "All users"],
   ["telegram_verified_users", "Verified collectors"],
-  ["pending_withdrawals", "Pending withdrawals"],
+  ["account_review", "Account review"],
   ["pending_payments", "Pending payments"],
   ["successful_deposits", "Successful deposits"],
   ["zero_balance", "Zero balance"],
@@ -62,7 +62,7 @@ function createRussianFallbackTitle(title: string) {
   if (normalized.includes("payment")) {
     return "Обновление платежей";
   }
-  if (normalized.includes("withdrawal")) {
+  if (normalized.includes("account review")) {
     return "Обновление выводов";
   }
   if (normalized.includes("maintenance")) {
@@ -96,7 +96,7 @@ function getTelegramPreviewText(input: { title: string; body: string }) {
     "new archive drop is live": "Новый архивный дроп уже доступен",
     "scheduled maintenance": "Плановое техническое обслуживание",
     "payment verification update": "Обновление проверки платежей",
-    "withdrawal review update": "Обновление проверки выводов",
+    "account review update": "Обновление проверки выводов",
     "archive rules updated": "Правила архива обновлены",
     "security notice": "Уведомление безопасности",
   };
@@ -125,7 +125,7 @@ function getTelegramEnglishPreviewText(input: { title: string; body: string }) {
     "новый архивный дроп уже доступен": "New archive drop is live",
     "плановое техническое обслуживание": "Scheduled maintenance",
     "обновление проверки платежей": "Payment verification update",
-    "обновление проверки выводов": "Withdrawal review update",
+    "обновление проверки выводов": "Account review update",
     "правила архива обновлены": "Archive rules updated",
     "уведомление безопасности": "Security notice",
   };
@@ -160,10 +160,10 @@ export function BroadcastComposer() {
   const telegramEnPreview = getTelegramEnglishPreviewText({ title, body });
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(360px,0.95fr)]">
+    <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(360px,0.95fr)]">
       <form
         action={createBroadcastAction}
-        className="rounded-[22px] border border-line bg-panel p-6 shadow-panel"
+        className="min-w-0 rounded-[22px] border border-line bg-panel p-4 shadow-panel sm:p-6"
       >
         <div className="flex items-center gap-2 text-xl font-semibold text-foreground">
           <Megaphone className="size-5 text-[var(--accent)]" />
@@ -178,7 +178,7 @@ export function BroadcastComposer() {
           <label className="grid gap-2 text-sm text-foreground">
             Title
             <input
-              className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+              className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
               name="title"
               onChange={(event) => setTitle(event.target.value)}
               placeholder="Transvoucher stop"
@@ -189,7 +189,7 @@ export function BroadcastComposer() {
           <label className="grid gap-2 text-sm text-foreground">
             Message
             <textarea
-              className="min-h-32 rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+              className="min-h-32 w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
               name="body"
               onChange={(event) => setBody(event.target.value)}
               placeholder="We fix."
@@ -201,7 +201,7 @@ export function BroadcastComposer() {
             <label className="grid gap-2 text-sm text-foreground">
               Type
               <select
-                className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+                className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
                 name="type"
                 onChange={(event) => setType(event.target.value)}
                 value={type}
@@ -216,7 +216,7 @@ export function BroadcastComposer() {
             <label className="grid gap-2 text-sm text-foreground">
               Priority
               <select
-                className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+                className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
                 name="priority"
                 onChange={(event) => setPriority(event.target.value)}
                 value={priority}
@@ -232,7 +232,7 @@ export function BroadcastComposer() {
             <label className="grid gap-2 text-sm text-foreground">
               Target audience
               <select
-                className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+                className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
                 name="targetType"
                 onChange={(event) => setTargetType(event.target.value)}
                 value={targetType}
@@ -247,7 +247,7 @@ export function BroadcastComposer() {
             <label className="grid gap-2 text-sm text-foreground">
               Short preview
               <input
-                className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+                className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
                 name="previewText"
                 placeholder="Shown in inbox previews"
               />
@@ -257,7 +257,7 @@ export function BroadcastComposer() {
             <label className="grid gap-2 text-sm text-foreground">
               CTA label
               <input
-                className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+                className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
                 name="ctaLabel"
                 onChange={(event) => setCtaLabel(event.target.value)}
                 placeholder="Open details"
@@ -267,7 +267,7 @@ export function BroadcastComposer() {
             <label className="grid gap-2 text-sm text-foreground">
               CTA URL
               <input
-                className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+                className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
                 name="ctaUrl"
                 onChange={(event) => setCtaUrl(event.target.value)}
                 placeholder="/archive-rules"
@@ -279,7 +279,7 @@ export function BroadcastComposer() {
             <label className="grid gap-2 text-sm text-foreground">
               Scheduled time
               <input
-                className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+                className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
                 name="scheduledAt"
                 type="datetime-local"
               />
@@ -287,7 +287,7 @@ export function BroadcastComposer() {
             <label className="grid gap-2 text-sm text-foreground">
               Expires at
               <input
-                className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+                className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
                 name="expiresAt"
                 type="datetime-local"
               />
@@ -296,7 +296,7 @@ export function BroadcastComposer() {
           <label className="grid gap-2 text-sm text-foreground">
             Internal admin note
             <input
-              className="rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
+              className="w-full rounded-[14px] border border-line bg-panel-strong px-4 py-3 outline-none"
               name="internalNote"
               placeholder="Private admin context"
             />
@@ -344,7 +344,7 @@ export function BroadcastComposer() {
           </p>
         </div>
 
-        <div className="mt-6 flex flex-wrap gap-3">
+        <div className="mt-6 grid gap-3 sm:flex sm:flex-wrap">
           <Button name="action" type="submit" value="send">
             <Send className="size-4" />
             Send now
@@ -359,7 +359,7 @@ export function BroadcastComposer() {
         </div>
       </form>
 
-      <section className="rounded-[22px] border border-line bg-panel p-6 shadow-panel">
+      <section className="min-w-0 rounded-[22px] border border-line bg-panel p-4 shadow-panel sm:p-6">
         <div className="flex items-center gap-2 text-xl font-semibold text-foreground">
           <Bell className="size-5 text-[var(--accent)]" />
           Broadcast Preview
@@ -382,10 +382,10 @@ export function BroadcastComposer() {
           <div className="mt-4 text-[11px] uppercase tracking-[0.22em] text-violet-200">
             {showAsPopup ? "Persistent Archive Notice" : "Website Inbox Notice"}
           </div>
-          <h2 className="mt-3 text-2xl font-semibold text-foreground">
+          <h2 className="mobile-breakout-guard mt-3 text-2xl font-semibold text-foreground">
             {title.trim() || "Broadcast title"}
           </h2>
-          <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-muted">
+          <p className="mobile-breakout-guard mt-3 whitespace-pre-wrap text-sm leading-7 text-muted">
             {body.trim() || "Your message preview will appear here."}
           </p>
           <div className="mt-5 flex flex-wrap items-center gap-3">
@@ -413,13 +413,13 @@ export function BroadcastComposer() {
               <div className="text-sm font-semibold text-foreground">
                 🔔 ReboHrome Notification
               </div>
-              <div className="text-lg font-semibold text-foreground">
+              <div className="mobile-breakout-guard text-lg font-semibold text-foreground">
                 EN 🇺🇸 — {telegramEnPreview.title}
               </div>
               <blockquote className="rounded-[14px] border-l-4 border-violet-300/70 bg-white/[0.05] px-4 py-3 text-sm leading-7 text-muted">
                 {telegramEnPreview.body}
               </blockquote>
-              <div className="text-lg font-semibold text-foreground">
+              <div className="mobile-breakout-guard text-lg font-semibold text-foreground">
                 RU 🇷🇺 — {telegramRuPreview.title}
               </div>
               <blockquote className="rounded-[14px] border-l-4 border-violet-300/70 bg-white/[0.05] px-4 py-3 text-sm leading-7 text-muted">

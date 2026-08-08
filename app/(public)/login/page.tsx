@@ -1,6 +1,5 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
-import { loginAction } from "@/app/actions/auth";
+import { LoginFlowClient } from "@/components/auth/login-flow-client";
 import { getSessionState } from "@/lib/session";
 
 type LoginPageProps = {
@@ -9,17 +8,19 @@ type LoginPageProps = {
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
   const session = await getSessionState();
+  const params = await searchParams;
+  const redirectTo =
+    typeof params.next === "string" && params.next.startsWith("/")
+      ? params.next
+      : typeof params.redirectTo === "string" && params.redirectTo.startsWith("/")
+        ? params.redirectTo
+        : "/dashboard";
 
   if (session.isUserAuthenticated) {
-    redirect(session.isAdminAuthenticated ? "/admin" : "/dashboard");
+    redirect(session.isAdminAuthenticated ? "/admin" : redirectTo);
   }
 
-  const params = await searchParams;
   const error = typeof params.error === "string" ? params.error : null;
-  const redirectTo =
-    typeof params.redirectTo === "string" && params.redirectTo.startsWith("/")
-      ? params.redirectTo
-      : "/dashboard";
 
   return (
     <main className="mx-auto flex w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -33,7 +34,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </h1>
           <p className="mt-4 max-w-2xl text-sm leading-7 text-muted">
             Sign in with your username and password to access balances, transactions,
-            owned cards, withdrawals, and your private archive dashboard.
+            owned cards and your private archive dashboard.
           </p>
 
           <div className="mt-10 grid gap-4 sm:grid-cols-3">
@@ -65,51 +66,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
               Use your ReboHrome username to continue.
             </p>
 
-            {error ? (
-              <div className="mt-5 rounded-2xl border border-rose-200/70 bg-rose-50/90 px-4 py-3 text-sm text-rose-700">
-                {error}
-              </div>
-            ) : null}
-
-            <form action={loginAction} className="mt-6 space-y-4">
-              <input name="redirectTo" type="hidden" value={redirectTo} />
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-foreground">
-                  Username
-                </span>
-                <input
-                  className="w-full rounded-2xl border border-line bg-panel px-4 py-3 text-sm text-foreground outline-none transition focus:border-[var(--accent)]"
-                  name="username"
-                  placeholder="archive_user"
-                  required
-                />
-              </label>
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-foreground">
-                  Password
-                </span>
-                <input
-                  className="w-full rounded-2xl border border-line bg-panel px-4 py-3 text-sm text-foreground outline-none transition focus:border-[var(--accent)]"
-                  name="password"
-                  placeholder="Enter your password"
-                  required
-                  type="password"
-                />
-              </label>
-              <button
-                className="mt-2 inline-flex w-full items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#111827,#7266ff)] px-4 py-3 text-sm font-medium text-white transition hover:translate-y-[-1px]"
-                type="submit"
-              >
-                Sign in
-              </button>
-            </form>
-
-            <p className="mt-5 text-sm text-muted">
-              New here?{" "}
-              <Link className="font-medium text-[var(--accent)]" href="/register">
-                Create an account
-              </Link>
-            </p>
+            <LoginFlowClient initialError={error} redirectTo={redirectTo} />
           </div>
         </section>
       </div>

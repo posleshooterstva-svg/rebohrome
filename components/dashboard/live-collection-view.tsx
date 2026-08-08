@@ -7,7 +7,7 @@ import { CardArtwork } from "@/components/rebohrome/card-artwork";
 import { LiveRefreshControl } from "@/components/rebohrome/live-refresh-control";
 import { RarityBadge } from "@/components/rebohrome/rarity-badge";
 import type { DashboardStat } from "@/lib/rebohrome-data";
-import { formatDisplayDate, formatUsd } from "@/lib/rebohrome-data";
+import { formatDisplayDate, formatUsd, getPublicProductTitle } from "@/lib/rebohrome-data";
 import {
   useAccountExperienceStore,
   type LiveInventoryItem,
@@ -126,7 +126,7 @@ export function LiveCollectionView({
                 <div className="mt-4 flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-semibold text-foreground">
-                      {entry.product.title}
+                      {getPublicProductTitle(entry.product.title)}
                     </h2>
                     <p className="mt-1 text-sm text-muted">
                       {entry.product.collection}
