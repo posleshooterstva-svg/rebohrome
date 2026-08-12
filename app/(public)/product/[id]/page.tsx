@@ -159,8 +159,36 @@ export default async function ProductPage({ params }: ProductPageProps) {
                       One card is selected from the pool below. Probabilities are fixed at
                       checkout and are shown before purchase.
                     </p>
+                    <dl className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                      <div className="rounded-2xl border border-line bg-panel px-3 py-3">
+                        <dt className="text-[10px] uppercase tracking-[0.18em] text-muted">Version</dt>
+                        <dd className="mt-1 text-sm font-semibold text-foreground">
+                          #{randomization.version ?? "-"}
+                        </dd>
+                      </div>
+                      <div className="rounded-2xl border border-line bg-panel px-3 py-3">
+                        <dt className="text-[10px] uppercase tracking-[0.18em] text-muted">Published</dt>
+                        <dd className="mt-1 text-sm font-semibold text-foreground">
+                          {randomization.publishedAt
+                            ? formatDisplayDate(randomization.publishedAt)
+                            : "-"}
+                        </dd>
+                      </div>
+                      <div className="rounded-2xl border border-line bg-panel px-3 py-3">
+                        <dt className="text-[10px] uppercase tracking-[0.18em] text-muted">Expected value</dt>
+                        <dd className="mt-1 text-sm font-semibold text-foreground">
+                          {formatUsd(randomization.expectedValue ?? 0)}
+                        </dd>
+                      </div>
+                      <div className="rounded-2xl border border-line bg-panel px-3 py-3">
+                        <dt className="text-[10px] uppercase tracking-[0.18em] text-muted">Big Win chance</dt>
+                        <dd className="mt-1 text-sm font-semibold text-foreground">
+                          {((randomization.bigWinProbabilityBps ?? 0) / 100).toFixed(2)}%
+                        </dd>
+                      </div>
+                    </dl>
                     <div className="mt-4 max-h-[520px] space-y-2 overflow-y-auto pr-1">
-                      {randomization.outcomes.map(({ product, probabilityBps }) => (
+                      {randomization.outcomes.map(({ product, probabilityBps, priceSnapshot }) => (
                         <div
                           className="grid grid-cols-[56px_minmax(0,1fr)_auto] items-center gap-3 rounded-[18px] border border-line bg-panel p-2.5"
                           key={product.id}
@@ -175,7 +203,7 @@ export default async function ProductPage({ params }: ProductPageProps) {
                               {getPublicProductTitle(product.title)}
                             </div>
                             <div className="mt-1 text-xs text-muted">
-                              {product.rarity} В· Reference value {formatUsd(product.price)}
+                              {product.rarity} - Reference value {formatUsd(priceSnapshot)}
                             </div>
                           </div>
                           <div className="rounded-xl border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-right">

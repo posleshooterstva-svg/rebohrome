@@ -1,6 +1,6 @@
 # Compliance / AML Notice
 
-Last Updated: May 2026
+Last Updated: August 10, 2026
 
 ReboHrome maintains a collectibles marketplace environment built on transaction integrity, account security, fraud prevention, responsible platform operation, and compliance readiness. This Compliance Notice summarizes important controls that may apply to accounts, deposits, purchases, randomized pack activity, physical shipments, account restrictions, refunds, and payment disputes.
 
@@ -26,6 +26,10 @@ ReboHrome may offer randomized packs, mystery packs, case-style products, drop-s
 Randomized packs are designed as collector and entertainment products. A user may receive an item worth less than, equal to, or more than the purchase price. Users must not purchase or open randomized packs unless they accept the risk of receiving a lower-value or personally undesirable item.
 
 Opened, revealed, assigned, credited, or delivered randomized pack results are generally final and non-refundable except where required by applicable law or expressly approved under the Refund & Shipping Policy.
+
+Randomized Pack purchases are limited to users aged 18 or older, or the higher age of legal majority in the user's jurisdiction. ReboHrome publishes the complete card pool and individual probabilities before purchase, records the applicable immutable probability version, and uses a cryptographically secure random number generator for each independent result.
+
+Users must not purchase Randomized Packs from a jurisdiction where paid randomized digital mechanics are prohibited, require a licence that ReboHrome does not hold, or are otherwise restricted. ReboHrome may block a location, pause a pack, or refuse a transaction where local law, sanctions, payment-provider rules, or legal review require it. Availability on the website is not a representation that the product is lawful in every location.
 
 
 ## Restricted Jurisdictions

@@ -58,41 +58,6 @@ const productSchema = z
       .default([]),
     status: z.enum(["active", "inactive"]),
     shape: z.enum(["spire", "void", "halo", "crescent", "shard"]),
-  })
-  .superRefine((value, context) => {
-    if (!value.isRandomized) {
-      return;
-    }
-
-    const ids = new Set(value.randomizedOutcomes.map((outcome) => outcome.productId));
-    const total = value.randomizedOutcomes.reduce(
-      (sum, outcome) => sum + outcome.probabilityBps,
-      0,
-    );
-
-    if (value.randomizedOutcomes.length === 0) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Add at least one possible card to a randomized product.",
-        path: ["randomizedOutcomes"],
-      });
-    }
-
-    if (ids.size !== value.randomizedOutcomes.length) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Each possible card can appear only once.",
-        path: ["randomizedOutcomes"],
-      });
-    }
-
-    if (total !== 10_000) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Randomized product probabilities must total exactly 100%.",
-        path: ["randomizedOutcomes"],
-      });
-    }
   });
 
 const profileSchema = z.object({

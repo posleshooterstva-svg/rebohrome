@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Last Updated: May 2026
+Last Updated: August 10, 2026
 
 Welcome to ReboHrome. This Privacy Policy explains how ReboHrome collects, uses, stores, shares, and protects user information when users access the platform, create accounts, use marketplace services, purchase digital or physical collectibles, purchase or open randomized packs, make deposits, request refunds, contact support, or otherwise interact with ReboHrome.
 
@@ -29,9 +29,9 @@ ReboHrome may use collected information to provide marketplace functionality, cr
 
 ## 3. Randomized Pack and Delivery Records
 
-Where users purchase or open randomized packs, ReboHrome may record information related to the transaction and result, including purchase time, payment reference, pack type, reveal time, item assigned, displayed result, delivery status, account crediting, related device/IP/session data, and subsequent account actions.
+Where users purchase randomized packs, ReboHrome may record information related to the transaction and result, including purchase time, payment reference, pack type, immutable probability version, published probability table, cryptographic random roll, temporary reservation, reservation expiry or release reason, selected card, individual probability, result time, delivery status, account assignment, related device/IP/session data, and subsequent account actions.
 
-These records are used to operate the platform, verify delivery, respond to support requests, investigate technical issues, prevent manipulation or abuse, support payment dispute evidence, and comply with legal, fraud prevention, and payment provider requirements.
+These records are used to operate the platform, prove which published probabilities governed a purchase, prevent duplicate draws, verify delivery, respond to support requests, investigate technical issues, prevent manipulation or abuse, support payment dispute evidence, and comply with legal, fraud prevention, and payment provider requirements.
 
 ## 4. Telegram Integration
 

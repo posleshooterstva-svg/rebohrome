@@ -60,6 +60,8 @@ export default async function SuccessPage({ searchParams }: SuccessPageProps) {
       items={items.map((item) => ({
         product: item.product,
         quantity: item.quantity,
+        packProduct: item.packProduct,
+        randomizedDraw: item.randomizedDraw,
       }))}
       orderId={order.id}
       paymentMethod={order.paymentMethod}

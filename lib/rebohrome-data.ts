@@ -17,7 +17,7 @@ export type KycStatus =
   | "manual_rejected";
 export type ProductStatus = "active" | "inactive";
 export type OrderStatus = "Completed" | "Processing" | "Pending" | "Declined";
-export type PaymentState = "completed" | "pending" | "failed";
+export type PaymentState = "completed" | "pending" | "failed" | "paid_unfulfilled";
 export type PaymentMethodName =
   | "Archive Balance"
   | "Credit Card"
@@ -70,6 +70,7 @@ export type CheckoutPaymentSessionStatus =
   | "pending"
   | "attempting"
   | "processing"
+  | "paid_unfulfilled"
   | "completed"
   | "failed"
   | "expired";
@@ -126,6 +127,7 @@ export type RandomizedProductOutcomeWeight = {
 export type RandomizedProductOutcomeDisclosure = {
   product: ProductRecord;
   probabilityBps: number;
+  priceSnapshot: number;
 };
 
 export type RandomizedProductDisclosure = {
@@ -133,6 +135,11 @@ export type RandomizedProductDisclosure = {
   isReady: boolean;
   totalProbabilityBps: number;
   outcomes: RandomizedProductOutcomeDisclosure[];
+  versionId?: string | null;
+  version?: number | null;
+  publishedAt?: string | null;
+  expectedValue?: number | null;
+  bigWinProbabilityBps?: number;
 };
 
 export function normalizeRandomizedProductOutcomes(

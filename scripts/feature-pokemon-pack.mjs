@@ -1,5 +1,4 @@
-﻿// Replace the current homepage-featured product (Warcraft Random Pack) with
-// a PokГ©mon-themed gacha pack that uses real artwork from ReboHrome.
+// Replace the current homepage-featured product with a Pokemon gacha pack.
 
 import { createClient } from "@libsql/client";
 import { readFileSync } from "fs";
@@ -7,23 +6,31 @@ import path from "path";
 
 const env = Object.fromEntries(
   readFileSync(path.join(process.cwd(), ".env.local"), "utf8")
-    .split(/\r?\n/).filter((l) => l && !l.startsWith("#"))
-    .map((l) => { const i = l.indexOf("="); return [l.slice(0, i), l.slice(i + 1)]; }));
+    .split(/\r?\n/)
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => {
+      const index = line.indexOf("=");
+      return [line.slice(0, index), line.slice(index + 1)];
+    }),
+);
 
-const c = createClient({ url: env.DATABASE_URL, authToken: env.DATABASE_AUTH_TOKEN });
+const client = createClient({
+  url: env.DATABASE_URL,
+  authToken: env.DATABASE_AUTH_TOKEN,
+});
 
 const PACK = {
   id: "elite-pokemon-gacha-pack",
-  title: "Elite PokГ©mon Gacha Pack",
+  title: "Elite Pokemon Gacha Pack",
   rarity: "Legendary",
   price: 999,
   currency: "USD",
   stock: 25,
-  collection: "PokГ©mon",
+  collection: "Pokemon",
   category: "Gacha Pack",
   description:
-    "Premium sealed gacha pack containing one authenticated PokГ©mon card with an expected value north of $999. Every pull is graded (PSA, CGC, or BGS) and shipped from ReboHrome's fulfillment vault. ~20% chance of a Big Win pull worth multiples of the pack price.",
-  tagline: "1 graded card per pack В· 20% Big Win chance",
+    "One authenticated Pokemon card is selected from the complete published probability table after payment.",
+  tagline: "1 authenticated Pokemon card - probabilities published before purchase",
   defaultDeliveryType: "physical",
   deliveryDigital:
     "Digital twin of the pulled card is delivered to your Rebohrome vault immediately after the reveal.",
@@ -49,33 +56,30 @@ const PACK = {
 
 const apply = process.argv.includes("--apply");
 
-const exists = await c.execute({
+const exists = await client.execute({
   sql: "select id from products where id = ?",
   args: [PACK.id],
 });
 console.log("Pack already exists?", exists.rows.length > 0);
 
-// Show what's currently featured.
-const cur = await c.execute(
+const current = await client.execute(
   "select id, title, homepage_featured, featured from products where homepage_featured=1",
 );
 console.log("Currently homepage-featured:");
-for (const r of cur.rows) console.log(" ", JSON.stringify(r));
+for (const row of current.rows) console.log(" ", JSON.stringify(row));
 
 if (!apply) {
   console.log("\nDRY RUN. Re-run with --apply.");
   process.exit(0);
 }
 
-const ts = new Date().toISOString();
-
-// Clear any existing homepage_featured.
-await c.execute(
+const timestamp = new Date().toISOString();
+await client.execute(
   "update products set homepage_featured = 0, featured_started_at = null where homepage_featured = 1",
 );
 
 if (exists.rows.length === 0) {
-  await c.execute({
+  await client.execute({
     sql: `insert into products (
       id, title, rarity, price, currency, stock, collection, category, description,
       tagline, default_delivery_type, delivery_digital, delivery_physical, edition,
@@ -84,18 +88,42 @@ if (exists.rows.length === 0) {
       palette_glow, palette_glow_soft, palette_core, palette_ring, created_at, updated_at
     ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
-      PACK.id, PACK.title, PACK.rarity, PACK.price, PACK.currency, PACK.stock,
-      PACK.collection, PACK.category, PACK.description, PACK.tagline,
-      PACK.defaultDeliveryType, PACK.deliveryDigital, PACK.deliveryPhysical,
-      PACK.edition, PACK.shape, PACK.imageUrl, PACK.imagePath, PACK.imageUpdatedAt,
-      PACK.featured, PACK.homepageFeatured, ts, PACK.showcaseFloat,
-      PACK.showcaseRotationSeconds, PACK.status, PACK.archived, PACK.paletteGlow,
-      PACK.paletteGlowSoft, PACK.paletteCore, PACK.paletteRing, ts, ts,
+      PACK.id,
+      PACK.title,
+      PACK.rarity,
+      PACK.price,
+      PACK.currency,
+      PACK.stock,
+      PACK.collection,
+      PACK.category,
+      PACK.description,
+      PACK.tagline,
+      PACK.defaultDeliveryType,
+      PACK.deliveryDigital,
+      PACK.deliveryPhysical,
+      PACK.edition,
+      PACK.shape,
+      PACK.imageUrl,
+      PACK.imagePath,
+      PACK.imageUpdatedAt,
+      PACK.featured,
+      PACK.homepageFeatured,
+      timestamp,
+      PACK.showcaseFloat,
+      PACK.showcaseRotationSeconds,
+      PACK.status,
+      PACK.archived,
+      PACK.paletteGlow,
+      PACK.paletteGlowSoft,
+      PACK.paletteCore,
+      PACK.paletteRing,
+      timestamp,
+      timestamp,
     ],
   });
   console.log("Inserted new pack:", PACK.id);
 } else {
-  await c.execute({
+  await client.execute({
     sql: `update products set
       title = ?, rarity = ?, price = ?, stock = ?, collection = ?, category = ?,
       description = ?, tagline = ?, image_url = ?, image_path = ?, image_updated_at = ?,
@@ -104,17 +132,34 @@ if (exists.rows.length === 0) {
       palette_ring = ?, shape = ?, updated_at = ?
       where id = ?`,
     args: [
-      PACK.title, PACK.rarity, PACK.price, PACK.stock, PACK.collection, PACK.category,
-      PACK.description, PACK.tagline, PACK.imageUrl, PACK.imagePath, PACK.imageUpdatedAt,
-      ts, PACK.paletteGlow, PACK.paletteGlowSoft, PACK.paletteCore, PACK.paletteRing,
-      PACK.shape, ts, PACK.id,
+      PACK.title,
+      PACK.rarity,
+      PACK.price,
+      PACK.stock,
+      PACK.collection,
+      PACK.category,
+      PACK.description,
+      PACK.tagline,
+      PACK.imageUrl,
+      PACK.imagePath,
+      PACK.imageUpdatedAt,
+      timestamp,
+      PACK.paletteGlow,
+      PACK.paletteGlowSoft,
+      PACK.paletteCore,
+      PACK.paletteRing,
+      PACK.shape,
+      timestamp,
+      PACK.id,
     ],
   });
   console.log("Updated existing pack:", PACK.id);
 }
 
-const check = await c.execute(
+const check = await client.execute(
   "select id, title, homepage_featured, image_url from products where homepage_featured=1",
 );
 console.log("Now homepage-featured:");
-for (const r of check.rows) console.log(" ", JSON.stringify(r));
+for (const row of check.rows) console.log(" ", JSON.stringify(row));
+
+client.close();

@@ -1,6 +1,6 @@
 # Terms of Service
 
-Last Updated: May 2026
+Last Updated: August 10, 2026
 
 Welcome to ReboHrome. These Terms of Service govern your access to and use of ReboHrome, including the website, marketplace, account features, digital collectible services, physical collectible sales, randomized pack features, vault balance functionality, account restrictions, support services, and any related products or services offered through ReboHrome.
 
@@ -72,6 +72,12 @@ By purchasing, opening, revealing, or otherwise participating in a Randomized Pa
 * any displayed prices, reference values, estimated values, rarity references, market comparisons, or historical sale references are informational only and may change at any time;
 * opening, revealing, claiming, delivering, assigning, or otherwise making the result available to your account is irreversible once completed;
 * once a Randomized Pack has been opened, revealed, delivered, assigned, credited, or otherwise made available, the transaction is final except where a refund is required by applicable law or approved under the Refund & Shipping Policy.
+
+Before purchase, each active Randomized Pack displays its complete eligible card pool, the individual probability of each card, the total probability of 100%, and the publication date of the applicable probability version. Probabilities are recorded in basis points, where 1 basis point equals 0.01%.
+
+When checkout is created, ReboHrome uses a cryptographically secure random number generator to select and temporarily reserve one card according to the published probability version. The reserved card remains hidden until successful payment. After payment confirmation, the same reserved card is atomically assigned to the account and recorded in an immutable draw log. Payment retries and duplicate payment notifications do not create a second draw. Each purchase is an independent event; previous results do not change future probabilities.
+
+If a payment is cancelled, fails, or expires, the temporary reservation is released and no result is delivered. If payment is confirmed after a reservation expires, ReboHrome may perform a new draw from the then-current published pool. If no eligible card can be delivered, the order is recorded as paid but unfulfilled and is reviewed as a technical delivery failure under the Refund & Shipping Policy. ReboHrome does not substitute a fictitious pack or silently create a second result.
 
 Randomized Packs are intended for adults and for entertainment and collecting purposes only. You must not purchase Randomized Packs if you are unwilling or unable to accept the risk of receiving items worth less than the price paid or items that do not meet your personal expectations.
 

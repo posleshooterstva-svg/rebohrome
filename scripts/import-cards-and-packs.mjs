@@ -59,20 +59,20 @@ const PACKS = [
     stock: 50,
     description:
       "Entry-level sealed gacha pack with one authenticated PokГ©mon card worth between $13 and $125+. Perfect for new collectors who want a guaranteed graded pull.",
-    tagline: "1 graded card В· ~$56 expected value В· 85% buyback",
+    tagline: "1 graded card · probabilities published before purchase",
     image: "tKE_lt-wwdVjOcYQ3UHZYfY9eQI9QJBby7GZewiUzrE", // Pikachu Grey Felt
     palette: "rare",
     shape: "shard",
   },
   {
     id: "anime-pop-culture-gacha-pack",
-    title: "Anime Pop Culture Gacha Pack",
+    title: "Pokemon Discovery Gacha Pack",
     rarity: "Epic",
     price: 119,
     stock: 40,
     description:
-      "Mixed anime sealed pack featuring PokГ©mon, One Piece and pop culture cards worth $40вЂ“$375+. 20% Big Win chance on every pull, 85% buyback offer.",
-    tagline: "1 graded card В· Anime В· 20% Big Win",
+      "Pokemon Discovery pack with one card selected from the complete published pool after payment.",
+    tagline: "1 graded card · probabilities published before purchase",
     image: "fMxdXgVEc0rT2gs_-WH2JyI55ITh0i28LIBr-3qeNd4", // Salamence
     palette: "epic",
     shape: "crescent",
@@ -84,8 +84,8 @@ const PACKS = [
     price: 159,
     stock: 30,
     description:
-      "Mystery sealed trove with one graded card worth $40вЂ“$400+. Higher rarity skew (90% buyback offer) and a 20% Big Win chance.",
-    tagline: "1 graded card В· 90% buyback В· 20% Big Win",
+      "Sealed trove with one graded Pokemon card selected from the complete published pool after payment.",
+    tagline: "1 graded card · probabilities published before purchase",
     image: "5dAC2g6fi0UZ80RvMXS4329YPZJyw3ArX-gBqJ7JDGk", // Squirtle Reverse Foil
     palette: "epic",
     shape: "void",
@@ -97,34 +97,34 @@ const PACKS = [
     price: 199,
     stock: 30,
     description:
-      "Water-type themed sealed pack with one graded card worth $50вЂ“$500+. 25% Big Win chance, 90% instant buyback offer.",
-    tagline: "1 graded Water card В· 25% Big Win",
+      "Water-type pack with one graded card selected from the complete published pool after payment.",
+    tagline: "1 graded Water card · probabilities published before purchase",
     image: "OIfHpxQfCTVHKJJxFous9M2iPGHDBNJLWQOsOO54aH0", // Tortank Holo 1st Ed
     palette: "epic",
     shape: "halo",
   },
   {
     id: "sports-gacha-pack",
-    title: "Sports Gacha Pack",
+    title: "Pokemon Premium Gacha Pack",
     rarity: "Epic",
     price: 219,
     stock: 25,
     description:
-      "Authenticated sports card sealed pack worth $50вЂ“$500+. 25% Big Win chance, 90% buyback. Multi-sport draw pool.",
-    tagline: "1 graded sports card В· 25% Big Win",
+      "Pokemon Premium pack with one graded card selected from the complete published pool after payment.",
+    tagline: "1 graded card · probabilities published before purchase",
     image: "yxKzwvqr-cG-ORl935AkQLH9ANHr48aThNt7sxBMU24", // Lucky Stadium NY
     palette: "epic",
     shape: "spire",
   },
   {
     id: "one-piece-gacha-pack",
-    title: "One Piece Gacha Pack",
+    title: "Pokemon Master Gacha Pack",
     rarity: "Legendary",
     price: 349,
     stock: 20,
     description:
-      "Sealed One Piece TCG pack with one graded card worth $150вЂ“$2000+. 25% Big Win chance and 90% buyback offer from the ReboHrome vault.",
-    tagline: "1 graded One Piece card В· 25% Big Win",
+      "Pokemon Master pack with one graded card selected from the complete published pool after payment.",
+    tagline: "1 graded card · probabilities published before purchase",
     image: "GeoRojDTUT2Deu0Q-NWyJ1WgXZCG6vWvNNDxkwWuGrc", // 25th Anniversary Golden
     palette: "legendary",
     shape: "shard",
@@ -136,8 +136,8 @@ const PACKS = [
     price: 499,
     stock: 15,
     description:
-      "Heavy-hitter sealed pack with one graded Legendary-tier PokГ©mon card worth $150вЂ“$2000+. 25% Big Win chance and 90% instant buyback.",
-    tagline: "1 graded Legendary pull В· 90% buyback",
+      "Legendary Pokemon pack with one graded card selected from the complete published pool after payment.",
+    tagline: "1 graded Legendary card · probabilities published before purchase",
     image: "l-9UoajDC9LigmGgA5posu9byzBauMDhYUDEDsQiJQ4", // Lugia
     palette: "legendary",
     shape: "halo",
@@ -149,13 +149,31 @@ const PACKS = [
     price: 1499,
     stock: 8,
     description:
-      "Top-tier sealed pack with one graded Grail-tier PokГ©mon card worth $600вЂ“$8000+. 25% Big Win chance and 93% buyback offer вЂ” only for serious collectors.",
-    tagline: "1 graded Grail pull В· 93% buyback",
+      "Grail Pokemon pack with one graded card selected from the complete published pool after payment.",
+    tagline: "1 graded Grail card · probabilities published before purchase",
     image: "cspQGf1oUPcWoas5H4gZ7NXxabdsrcm5kRUQiSQJMaL", // Full Art Charizard GX
     palette: "legendary",
     shape: "spire",
   },
 ];
+
+const PACK_TITLE_OVERRIDES = new Map([
+  ["starter-pokemon-gacha-pack", "Starter Pokemon Gacha Pack"],
+  ["anime-pop-culture-gacha-pack", "Pokemon Discovery Gacha Pack"],
+  ["sealed-trove-gacha-pack", "Sealed Trove Pokemon Gacha Pack"],
+  ["water-pokemon-gacha-pack", "Water Pokemon Gacha Pack"],
+  ["sports-gacha-pack", "Pokemon Premium Gacha Pack"],
+  ["one-piece-gacha-pack", "Pokemon Master Gacha Pack"],
+  ["legendary-pokemon-gacha-pack", "Legendary Pokemon Gacha Pack"],
+  ["grail-pokemon-gacha-pack", "Grail Pokemon Gacha Pack"],
+]);
+
+for (const pack of PACKS) {
+  pack.title = PACK_TITLE_OVERRIDES.get(pack.id) ?? pack.title;
+  pack.description =
+    "One authenticated Pokemon card is selected from the complete published probability table after payment.";
+  pack.tagline = "1 authenticated Pokemon card - probabilities published before purchase";
+}
 
 const SHAPES_BY_RARITY = {
   Legendary: ["spire", "halo"],

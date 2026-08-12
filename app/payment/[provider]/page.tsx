@@ -53,6 +53,7 @@ export default async function PaymentProviderPage({
   }
 
   if (paymentBundle.session.status !== "completed") {
+    const paidUnfulfilled = paymentBundle.session.status === "paid_unfulfilled";
     return (
       <main className="min-h-screen bg-[#f3f4f8] px-4 py-10 sm:px-6 lg:px-8">
         <section className="mx-auto w-full max-w-3xl rounded-[20px] border border-line bg-white px-6 py-10 shadow-panel sm:px-8">
@@ -60,17 +61,26 @@ export default async function PaymentProviderPage({
             Secure payment session
           </div>
           <h1 className="mt-4 text-3xl font-semibold tracking-[-0.05em] text-foreground">
-            This payment session is no longer active.
+            {paidUnfulfilled
+              ? "Payment received. Delivery is under review."
+              : "This payment session is no longer active."}
           </h1>
           <p className="mt-4 text-sm leading-7 text-muted">
-            Return to checkout to create a new secure provider session, or open the
-            matching receipt if this order already completed.
+            {paidUnfulfilled
+              ? "Your payment is confirmed, but the reserved card could not be assigned safely. Support has been notified. Do not pay for this order again."
+              : "Return to checkout to create a new secure provider session, or open the matching receipt if this order already completed."}
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-            <Button asChild>
-              <Link href="/checkout">Return to checkout</Link>
-            </Button>
-            {paymentBundle.session.orderId ? (
+            {paidUnfulfilled ? (
+              <Button asChild>
+                <Link href="/contact">Contact support</Link>
+              </Button>
+            ) : (
+              <Button asChild>
+                <Link href="/checkout">Return to checkout</Link>
+              </Button>
+            )}
+            {paymentBundle.session.orderId && !paidUnfulfilled ? (
               <Button asChild variant="secondary">
                 <Link
                   href={

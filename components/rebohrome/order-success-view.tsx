@@ -2,6 +2,7 @@
 
 import { PaymentSuccessModal, type PaymentSuccessRow } from "@/components/rebohrome/payment-success-modal";
 import { SuccessStateSync } from "@/components/rebohrome/success-state-sync";
+import { CardArtwork } from "@/components/rebohrome/card-artwork";
 import { formatCurrency, formatDisplayDateTime, formatUsd, getPublicProductTitle, type ProductRecord, type SupportedCurrency } from "@/lib/rebohrome-data";
 
 type OrderSuccessViewProps = {
@@ -20,6 +21,13 @@ type OrderSuccessViewProps = {
   items: Array<{
     quantity: number;
     product: ProductRecord;
+    packProduct?: ProductRecord | null;
+    randomizedDraw?: {
+      versionId: string;
+      probabilityBps: number;
+      priceSnapshot: number;
+      drawnAt: string;
+    } | null;
   }>;
 };
 
@@ -143,6 +151,42 @@ export function OrderSuccessView({
         continueHref="/dashboard"
         continueLabel="Continue to Dashboard"
         downloadLabel="Download Receipt"
+        featuredContent={
+          items.some((item) => item.packProduct) ? (
+            <div className="rounded-[24px] border border-[rgba(182,172,255,0.34)] bg-[linear-gradient(145deg,rgba(248,246,255,0.98),rgba(255,255,255,0.96))] p-4 shadow-[0_18px_44px_rgba(139,124,255,0.12)]">
+              <p className="text-center text-[11px] font-semibold uppercase tracking-[0.22em] text-[var(--accent)]">
+                Your pull
+              </p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {items.filter((item) => item.packProduct).map((item, index) => (
+                  <div
+                    className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-3 rounded-[18px] border border-white/90 bg-white/82 p-3 text-left"
+                    key={`${item.product.id}:${index}`}
+                  >
+                    <CardArtwork
+                      card={item.product}
+                      className="aspect-square w-[72px] rounded-[16px]"
+                      compact
+                    />
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold text-[#1f2937]">
+                        {getPublicProductTitle(item.product.title)}
+                      </div>
+                      <div className="mt-1 text-xs leading-5 text-[#7b8193]">
+                        From {getPublicProductTitle(item.packProduct?.title ?? "randomized pack")}
+                      </div>
+                      {item.randomizedDraw ? (
+                        <div className="mt-1 text-xs font-medium text-[var(--accent)]">
+                          Chance {(item.randomizedDraw.probabilityBps / 100).toFixed(2)}%
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null
+        }
         onDownload={downloadReceipt}
         overlay
         rows={rows}

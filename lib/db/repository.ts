@@ -1,6 +1,7 @@
 ﻿import { readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 import { createHash, randomBytes, randomInt, randomUUID } from "crypto";
+import type { Transaction as LibsqlTransaction } from "@libsql/client";
 import { revalidatePath } from "next/cache";
 import {
   ADMIN_SEED_PASSWORD,
@@ -155,6 +156,27 @@ import {
 } from "./client";
 import { withPerf } from "@/lib/server/perf";
 import {
+  RANDOMIZED_PACK_FORMULA_VERSION,
+  RANDOMIZED_PACK_POLICIES,
+  buildRandomizedPackCopy,
+  drawRandomizedOutcome,
+  generateRandomizedPackDistribution,
+  getRandomizedPackAvailableUnits,
+  getRandomizedPackPolicy,
+  hasSameRandomizedPackSnapshot,
+  selectEligiblePackCandidates,
+  type RandomizedPackCandidate,
+} from "@/lib/randomized-packs";
+import {
+  RANDOMIZED_PACK_CREATE_STATEMENTS,
+  RANDOMIZED_PACK_ORDER_ITEM_COLUMNS,
+} from "@/lib/randomized-pack-schema";
+import {
+  consumeRandomizedPackReservation,
+  expireRandomizedPackReservations,
+  releaseRandomizedPackReservations,
+} from "@/lib/randomized-pack-fulfillment";
+import {
   isSupabaseManagedImageUrl,
   isSupabaseStorageAvailable,
   removeImageFromSupabaseStorage,
@@ -240,6 +262,11 @@ const REQUIRED_TABLES = [
   "user_kyc_profiles",
   "payment_providers",
   "user_payment_gate_access",
+  "randomized_pack_policies",
+  "randomized_pack_versions",
+  "randomized_pack_outcomes",
+  "randomized_pack_reservations",
+  "randomized_pack_draws",
 ] as const;
 
 type SecurityAuditEventType =
@@ -1206,6 +1233,15 @@ async function ensureColumn(table: string, definition: string) {
   }
 }
 
+async function ensureRandomizedPackTables() {
+  for (const statement of RANDOMIZED_PACK_CREATE_STATEMENTS) {
+    await execute(statement);
+  }
+  for (const definition of RANDOMIZED_PACK_ORDER_ITEM_COLUMNS) {
+    await ensureColumn("order_items", definition);
+  }
+}
+
 async function ensureSystemSettingsTable() {
   await execute(
     `create table if not exists system_settings (
@@ -1796,6 +1832,7 @@ async function ensureApplicationColumns() {
   await ensureColumn("notifications", "expires_at text");
   await ensureColumn("notifications", "show_as_popup integer not null default 0");
   await ensureColumn("notifications", "dismissed_at text");
+  await ensureRandomizedPackTables();
   await ensurePaymentReconciliationRunsTable();
   await ensureArchiveTrustTables();
   await ensureAdminUserManagementTables();
@@ -4845,6 +4882,527 @@ function calculateCheckoutTotals(
     shipping,
     total: subtotal + shipping,
   };
+}
+
+type CreatedCheckoutOrderItem = {
+  id: string;
+  product: ProductRecord;
+  quantity: number;
+  deliveryType: DeliveryType;
+};
+
+async function insertCheckoutOrderItems(input: {
+  orderId: string;
+  items: CheckoutSessionLine[];
+  productMap: Map<string, ProductRecord>;
+}) {
+  const created: CreatedCheckoutOrderItem[] = [];
+  for (const item of input.items) {
+    const product = input.productMap.get(item.productId)!;
+    const rowsToCreate = product.isRandomized ? item.quantity : 1;
+    for (let index = 0; index < rowsToCreate; index += 1) {
+      const id = randomUUID();
+      const quantity = product.isRandomized ? 1 : item.quantity;
+      await execute(
+        `insert into order_items (
+          id, order_id, product_id, quantity, unit_price, delivery_type
+        ) values (?, ?, ?, ?, ?, ?)`,
+        [id, input.orderId, product.id, quantity, product.price, item.deliveryType],
+      );
+      created.push({ id, product, quantity, deliveryType: item.deliveryType });
+    }
+  }
+  return created;
+}
+
+class RandomizedPackPoolChangedError extends Error {
+  constructor() {
+    super("Randomized pack availability changed. Its probabilities are being refreshed.");
+    this.name = "RandomizedPackPoolChangedError";
+  }
+}
+
+async function reserveRandomizedOrderItemInTransaction(
+  transaction: LibsqlTransaction,
+  input: {
+    orderId: string;
+    orderItemId: string;
+    userId: string;
+    packProductId: string;
+    expiresAt: string;
+  },
+) {
+  const timestamp = nowIso();
+  const existing = await transactionOne(
+    transaction,
+    "select * from randomized_pack_reservations where order_item_id = ? limit 1",
+    [input.orderItemId],
+  );
+  if (
+    existing &&
+    String(existing.status) === "active" &&
+    String(existing.expires_at) > timestamp
+  ) {
+    return String(existing.id);
+  }
+
+  const version = await transactionOne(
+    transaction,
+    `select * from randomized_pack_versions
+       where pack_product_id = ? and status = 'published'
+       order by version desc limit 1`,
+    [input.packProductId],
+  );
+  if (!version) {
+    throw new RandomizedPackPoolChangedError();
+  }
+  const rows = await transactionMany(
+    transaction,
+    `select randomized_pack_outcomes.*
+       from randomized_pack_outcomes
+       inner join products on products.id = randomized_pack_outcomes.outcome_product_id
+       where randomized_pack_outcomes.version_id = ?
+         and products.archived = 0
+         and products.status = 'active'
+         and products.stock > (
+           select count(*) from randomized_pack_reservations
+           where randomized_pack_reservations.outcome_product_id = products.id
+             and randomized_pack_reservations.status = 'active'
+             and randomized_pack_reservations.expires_at > ?
+         )
+       order by randomized_pack_outcomes.ordinal asc`,
+    [String(version.id), timestamp],
+  );
+  const outcomes = rows.map((row) => ({
+    productId: String(row.outcome_product_id),
+    probabilityBps: Number(row.probability_bps),
+  }));
+  if (
+    outcomes.length < 2 ||
+    outcomes.reduce((sum, outcome) => sum + outcome.probabilityBps, 0) !== 10_000
+  ) {
+    throw new RandomizedPackPoolChangedError();
+  }
+
+  const roll = randomInt(10_000);
+  const selected = drawRandomizedOutcome(outcomes, roll);
+  const reservationId = existing ? String(existing.id) : randomUUID();
+  if (existing) {
+    await transaction.execute({
+      sql: `update randomized_pack_reservations set version_id = ?,
+          outcome_product_id = ?, roll = ?, status = 'active', expires_at = ?,
+          updated_at = ?, consumed_at = null, released_at = null, release_reason = null
+          where id = ?`,
+      args: [
+        String(version.id),
+        selected.productId,
+        roll,
+        input.expiresAt,
+        timestamp,
+        reservationId,
+      ],
+    });
+  } else {
+    await transaction.execute({
+      sql: `insert into randomized_pack_reservations (
+          id, order_id, order_item_id, user_id, pack_product_id, version_id,
+          outcome_product_id, roll, status, expires_at, created_at, updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+      args: [
+        reservationId,
+        input.orderId,
+        input.orderItemId,
+        input.userId,
+        input.packProductId,
+        String(version.id),
+        selected.productId,
+        roll,
+        input.expiresAt,
+        timestamp,
+        timestamp,
+      ],
+    });
+  }
+  await transaction.execute({
+    sql: `update order_items set randomized_pack_version_id = ?,
+        reserved_outcome_product_id = ? where id = ?`,
+    args: [String(version.id), selected.productId, input.orderItemId],
+  });
+  return reservationId;
+}
+
+async function reserveRandomizedOrderItem(input: {
+  orderId: string;
+  orderItemId: string;
+  userId: string;
+  packProductId: string;
+  expiresAt: string;
+}) {
+  const transaction = await getDbClient().transaction("write");
+  try {
+    const reservationId = await reserveRandomizedOrderItemInTransaction(transaction, input);
+    await transaction.commit();
+    return reservationId;
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
+}
+
+async function reserveRandomizedOrderItemsInTransaction(
+  transaction: LibsqlTransaction,
+  input: { orderId: string; userId: string; expiresAt: string },
+) {
+  if (!randomizedPackEngineEnabled()) return;
+  const rows = await transactionMany(
+    transaction,
+    `select order_items.id, order_items.product_id
+     from order_items
+     inner join products on products.id = order_items.product_id
+     where order_items.order_id = ? and products.is_randomized = 1
+     order by order_items.id asc`,
+    [input.orderId],
+  );
+  for (const row of rows) {
+    await reserveRandomizedOrderItemInTransaction(transaction, {
+      orderId: input.orderId,
+      orderItemId: String(row.id),
+      userId: input.userId,
+      packProductId: String(row.product_id),
+      expiresAt: input.expiresAt,
+    });
+  }
+}
+
+async function releaseRandomizedOrderReservations(orderId: string, reason: string) {
+  if (!randomizedPackEngineEnabled()) return;
+  const timestamp = nowIso();
+  const transaction = await getDbClient().transaction("write");
+  let released = 0;
+  try {
+    released = await releaseRandomizedPackReservations(transaction, {
+      orderId,
+      reason,
+      releasedAt: timestamp,
+    });
+    await transaction.commit();
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
+  if (released > 0) {
+    await rebuildAllRandomizedPackVersions();
+  }
+}
+
+async function reserveRandomizedOrderItems(input: {
+  orderId: string;
+  userId: string;
+  expiresAt: string;
+}) {
+  if (!randomizedPackEngineEnabled()) return;
+  const timestamp = nowIso();
+  const rows = await queryMany(
+    `select order_items.id, order_items.product_id
+     from order_items
+     inner join products on products.id = order_items.product_id
+     left join randomized_pack_reservations
+       on randomized_pack_reservations.order_item_id = order_items.id
+     where order_items.order_id = ?
+       and products.is_randomized = 1
+       and (
+         randomized_pack_reservations.id is null
+         or randomized_pack_reservations.status <> 'active'
+         or randomized_pack_reservations.expires_at <= ?
+       )
+     order by order_items.id asc`,
+    [input.orderId, timestamp],
+  );
+  const reserved: string[] = [];
+  try {
+    for (const row of rows) {
+      let reservationId: string;
+      try {
+        reservationId = await reserveRandomizedOrderItem({
+          orderId: input.orderId,
+          orderItemId: String(row.id),
+          userId: input.userId,
+          packProductId: String(row.product_id),
+          expiresAt: input.expiresAt,
+        });
+      } catch (error) {
+        if (!(error instanceof RandomizedPackPoolChangedError)) throw error;
+        await rebuildAllRandomizedPackVersions();
+        reservationId = await reserveRandomizedOrderItem({
+          orderId: input.orderId,
+          orderItemId: String(row.id),
+          userId: input.userId,
+          packProductId: String(row.product_id),
+          expiresAt: input.expiresAt,
+        });
+      }
+      reserved.push(reservationId);
+      await rebuildAllRandomizedPackVersions();
+    }
+  } catch (error) {
+    await releaseRandomizedOrderReservations(input.orderId, "reservation_batch_failed");
+    throw error;
+  }
+}
+
+async function fulfillOrderInventoryInTransaction(
+  transaction: LibsqlTransaction,
+  input: {
+    orderId: string;
+    userId: string;
+    acquiredAt: string;
+  },
+) {
+  let randomizedInventoryChanged = false;
+  const items = await transactionMany(
+    transaction,
+    `select order_items.id as order_item_id, order_items.product_id,
+      order_items.quantity, order_items.delivery_type,
+      order_items.randomized_draw_id, products.title, products.is_randomized
+     from order_items
+     inner join products on products.id = order_items.product_id
+     where order_items.order_id = ?
+     order by order_items.id asc`,
+    [input.orderId],
+  );
+  const delivered: Array<{ productId: string; title: string; quantity: number }> = [];
+
+  for (const item of items) {
+    const orderItemId = String(item.order_item_id);
+    const isRandomized = randomizedPackEngineEnabled() && asBoolean(item.is_randomized);
+    if (isRandomized) {
+      const draw = await consumeRandomizedPackReservation(transaction, {
+        orderId: input.orderId,
+        orderItemId,
+        userId: input.userId,
+        acquiredAt: input.acquiredAt,
+      });
+      randomizedInventoryChanged ||= draw.created;
+      delivered.push({
+        productId: draw.productId,
+        title: draw.title,
+        quantity: 1,
+      });
+      continue;
+    }
+
+    const quantity = Number(item.quantity);
+    const stockResult = await transaction.execute({
+      sql: "update products set stock = stock - ?, updated_at = ? where id = ? and stock >= ?",
+      args: [quantity, input.acquiredAt, String(item.product_id), quantity],
+    });
+    if (stockResult.rowsAffected !== 1) {
+      throw new Error(`${String(item.title)} no longer has enough stock to fulfill this payment.`);
+    }
+    await transaction.execute({
+      sql: `insert into owned_cards (
+        id, user_id, product_id, order_id, quantity, acquired_at
+      ) values (?, ?, ?, ?, ?, ?)`,
+      args: [randomUUID(), input.userId, String(item.product_id), input.orderId, quantity, input.acquiredAt],
+    });
+    delivered.push({
+      productId: String(item.product_id),
+      title: String(item.title),
+      quantity,
+    });
+  }
+
+  return { delivered, randomizedInventoryChanged };
+}
+
+async function completeArchiveBalanceOrderAtomically(input: {
+  orderId: string;
+  transactionId: string;
+  userId: string;
+  total: number;
+  status: OrderStatus;
+  completedAt: string;
+}) {
+  const transaction = await getDbClient().transaction("write");
+  try {
+    const order = await transactionOne(
+      transaction,
+      "select payment_state from orders where id = ? and user_id = ? limit 1",
+      [input.orderId, input.userId],
+    );
+    if (!order) throw new Error("Order not found.");
+    if (String(order.payment_state) === "completed") {
+      await transaction.commit();
+      return { completedNow: false, delivered: [], remainingBalance: null };
+    }
+
+    const balance = await transactionOne(
+      transaction,
+      "select available from balances where user_id = ? limit 1",
+      [input.userId],
+    );
+    if (!balance || Number(balance.available) < input.total) {
+      throw new Error("Insufficient archive balance");
+    }
+
+    await reserveRandomizedOrderItemsInTransaction(transaction, {
+      orderId: input.orderId,
+      userId: input.userId,
+      expiresAt: new Date(Date.parse(input.completedAt) + 5 * 60_000).toISOString(),
+    });
+    const fulfillment = await fulfillOrderInventoryInTransaction(transaction, {
+      orderId: input.orderId,
+      userId: input.userId,
+      acquiredAt: input.completedAt,
+    });
+    const balanceResult = await transaction.execute({
+      sql: `update balances set available = available - ?,
+        total_spent = total_spent + ?, updated_at = ?
+        where user_id = ? and available >= ?`,
+      args: [input.total, input.total, input.completedAt, input.userId, input.total],
+    });
+    if (balanceResult.rowsAffected !== 1) {
+      throw new Error("Insufficient archive balance");
+    }
+    const nextBalance = await transactionOne(
+      transaction,
+      "select available from balances where user_id = ? limit 1",
+      [input.userId],
+    );
+    const remainingBalance = Number(nextBalance?.available ?? 0);
+
+    await transaction.execute({
+      sql: `update orders set status = ?, payment_state = 'completed',
+        failure_reason = null, remaining_balance = ?, paid_at = ?, updated_at = ?
+        where id = ? and payment_state <> 'completed'`,
+      args: [input.status, remainingBalance, input.completedAt, input.completedAt, input.orderId],
+    });
+    await transaction.execute({
+      sql: `update transactions set status = 'completed', summary = 'Card purchase completed',
+        paid_at = ?, processed_at = coalesce(processed_at, ?), updated_at = ?
+        where id = ? and status <> 'completed'`,
+      args: [input.completedAt, input.completedAt, input.completedAt, input.transactionId],
+    });
+    await transaction.commit();
+    if (fulfillment.randomizedInventoryChanged) {
+      await rebuildAllRandomizedPackVersions();
+    }
+    return {
+      completedNow: true,
+      delivered: fulfillment.delivered,
+      remainingBalance,
+    };
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
+}
+
+async function completeTransVoucherOrderAtomically(input: {
+  order: OrderRecord;
+  transaction: TransactionRecord;
+  session: CheckoutPaymentSessionRecord | null;
+  providerStatus: string;
+  providerTransactionId: string | null;
+  providerReferenceId: string | null;
+  paymentUrl: string | null;
+  rawProviderResponse: string;
+  metaJson: string;
+  paidAt: string;
+}) {
+  const transaction = await getDbClient().transaction("write");
+  try {
+    const currentOrder = await transactionOne(
+      transaction,
+      "select payment_state, remaining_balance from orders where id = ? limit 1",
+      [input.order.id],
+    );
+    if (!currentOrder) throw new Error("Order not found.");
+    if (String(currentOrder.payment_state) === "completed") {
+      await transaction.commit();
+      return {
+        completedNow: false,
+        delivered: [],
+        remainingBalance: Number(currentOrder.remaining_balance ?? 0),
+      };
+    }
+
+    const fulfillment = await fulfillOrderInventoryInTransaction(transaction, {
+      orderId: input.order.id,
+      userId: input.order.userId,
+      acquiredAt: input.paidAt,
+    });
+    await transaction.execute({
+      sql: `update balances set total_spent = total_spent + ?, updated_at = ?
+        where user_id = ?`,
+      args: [input.order.total, input.paidAt, input.order.userId],
+    });
+    const balance = await transactionOne(
+      transaction,
+      "select available from balances where user_id = ? limit 1",
+      [input.order.userId],
+    );
+    const remainingBalance = Number(balance?.available ?? 0);
+    await transaction.execute({
+      sql: `update orders set status = ?, payment_state = 'completed', failure_reason = null,
+        remaining_balance = ?, transvoucher_transaction_id = ?,
+        transvoucher_reference_id = ?, provider_status = ?, paid_at = ?, updated_at = ?
+        where id = ? and payment_state <> 'completed'`,
+      args: [
+        input.order.shipping > 0 ? "Processing" : "Completed",
+        remainingBalance,
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.providerStatus,
+        input.paidAt,
+        input.paidAt,
+        input.order.id,
+      ],
+    });
+    await transaction.execute({
+      sql: `update transactions set payment_provider = 'TransVoucher',
+        transvoucher_transaction_id = ?, transvoucher_reference_id = ?, payment_url = ?,
+        provider_status = ?, raw_provider_response = ?, status = 'completed',
+        summary = 'Card purchase completed', meta_json = ?, paid_at = ?,
+        processed_at = coalesce(processed_at, ?), updated_at = ? where id = ?`,
+      args: [
+        input.providerTransactionId,
+        input.providerReferenceId,
+        input.paymentUrl,
+        input.providerStatus,
+        input.rawProviderResponse,
+        input.metaJson,
+        input.paidAt,
+        input.paidAt,
+        input.paidAt,
+        input.transaction.id,
+      ],
+    });
+    if (input.session) {
+      await transaction.execute({
+        sql: `update payment_sessions set status = 'completed',
+          transvoucher_transaction_id = ?, transvoucher_reference_id = ?, payment_url = ?,
+          provider_status = ?, raw_provider_response = ?, updated_at = ? where id = ?`,
+        args: [
+          input.providerTransactionId,
+          input.providerReferenceId,
+          input.paymentUrl,
+          input.providerStatus,
+          input.rawProviderResponse,
+          input.paidAt,
+          input.session.id,
+        ],
+      });
+    }
+    await transaction.commit();
+    if (fulfillment.randomizedInventoryChanged) {
+      await rebuildAllRandomizedPackVersions();
+    }
+    return { completedNow: true, delivered: fulfillment.delivered, remainingBalance };
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
 }
 
 function parseCheckoutSessionItems(itemsJson: string) {
@@ -7947,6 +8505,264 @@ export async function getProductById(id: string) {
   return row ? normalizeProduct(row) : null;
 }
 
+function randomizedPackEngineEnabled() {
+  return process.env.RANDOMIZED_PACK_ENGINE_V2 === "true";
+}
+
+async function transactionMany(
+  transaction: LibsqlTransaction,
+  sql: string,
+  args: SqlValue[] = [],
+) {
+  const result = await transaction.execute({ sql, args });
+  return result.rows as DbRow[];
+}
+
+async function transactionOne(
+  transaction: LibsqlTransaction,
+  sql: string,
+  args: SqlValue[] = [],
+) {
+  const rows = await transactionMany(transaction, sql, args);
+  return rows[0] ?? null;
+}
+
+async function publishRandomizedPackVersion(
+  policy: (typeof RANDOMIZED_PACK_POLICIES)[number],
+) {
+  const transaction = await getDbClient().transaction("write");
+  const timestamp = nowIso();
+  try {
+    const pack = await transactionOne(
+      transaction,
+      "select id, price from products where id = ? and archived = 0 limit 1",
+      [policy.productId],
+    );
+    if (!pack) {
+      await transaction.rollback();
+      return null;
+    }
+
+    const rows = await transactionMany(
+      transaction,
+      `select products.id, products.title, products.price,
+        products.stock - (
+          select count(*) from randomized_pack_reservations
+          where randomized_pack_reservations.outcome_product_id = products.id
+            and randomized_pack_reservations.status = 'active'
+            and randomized_pack_reservations.expires_at > ?
+        ) as available_units
+       from products
+       where products.category = 'Trading Card'
+         and products.archived = 0
+         and products.status = 'active'
+         and products.stock > (
+           select count(*) from randomized_pack_reservations
+           where randomized_pack_reservations.outcome_product_id = products.id
+             and randomized_pack_reservations.status = 'active'
+             and randomized_pack_reservations.expires_at > ?
+         )
+       order by products.price asc, products.id asc`,
+      [timestamp, timestamp],
+    );
+    const candidates: RandomizedPackCandidate[] = rows.map((row) => ({
+      id: String(row.id),
+      title: String(row.title),
+      price: Number(row.price),
+      availableUnits: Number(row.available_units),
+    }));
+    const eligible = selectEligiblePackCandidates(candidates, policy);
+
+    await transaction.execute({
+      sql: `insert into randomized_pack_policies (
+        pack_product_id, minimum_value, maximum_value, title_pattern,
+        formula_version, enabled, created_at, updated_at
+      ) values (?, ?, ?, ?, ?, 1, ?, ?)
+      on conflict(pack_product_id) do update set
+        minimum_value = excluded.minimum_value,
+        maximum_value = excluded.maximum_value,
+        title_pattern = excluded.title_pattern,
+        formula_version = excluded.formula_version,
+        enabled = 1,
+        updated_at = excluded.updated_at`,
+      args: [
+        policy.productId,
+        policy.minimumValue,
+        policy.maximumValue,
+        policy.titlePattern?.source ?? null,
+        RANDOMIZED_PACK_FORMULA_VERSION,
+        timestamp,
+        timestamp,
+      ],
+    });
+
+    if (eligible.length < 2) {
+      await transaction.execute({
+        sql: "update randomized_pack_versions set status = 'retired' where pack_product_id = ? and status = 'published'",
+        args: [policy.productId],
+      });
+      await transaction.execute({
+        sql: `update products set status = 'inactive', stock = 0,
+          randomized_outcomes_json = '[]', updated_at = ? where id = ?`,
+        args: [timestamp, policy.productId],
+      });
+      await transaction.commit();
+      return null;
+    }
+
+    const currentPublishedVersion = await transactionOne(
+      transaction,
+      `select * from randomized_pack_versions
+       where pack_product_id = ? and status = 'published'
+       order by version desc limit 1`,
+      [policy.productId],
+    );
+    if (currentPublishedVersion) {
+      const currentOutcomeRows = await transactionMany(
+        transaction,
+        `select outcome_product_id, price_snapshot, title_snapshot
+         from randomized_pack_outcomes where version_id = ? order by outcome_product_id asc`,
+        [String(currentPublishedVersion.id)],
+      );
+      const unchanged = hasSameRandomizedPackSnapshot({
+        currentFormulaVersion: String(currentPublishedVersion.formula_version),
+        currentOutcomes: currentOutcomeRows.map((row) => ({
+          productId: String(row.outcome_product_id),
+          priceSnapshot: Number(row.price_snapshot),
+          titleSnapshot: String(row.title_snapshot),
+        })),
+        candidates: eligible,
+      });
+      if (unchanged) {
+        await transaction.execute({
+          sql: `update products set title = ?, is_randomized = 1, stock = ?,
+            status = 'active', updated_at = ? where id = ?`,
+          args: [
+            policy.publicTitle,
+            getRandomizedPackAvailableUnits(eligible),
+            timestamp,
+            policy.productId,
+          ],
+        });
+        await transaction.commit();
+        return String(currentPublishedVersion.id);
+      }
+    }
+
+    const seed = randomBytes(32).toString("hex");
+    const distribution = generateRandomizedPackDistribution({
+      packPrice: Number(pack.price),
+      candidates: eligible,
+      seed,
+    });
+    const currentVersion = await transactionOne(
+      transaction,
+      "select coalesce(max(version), 0) as version from randomized_pack_versions where pack_product_id = ?",
+      [policy.productId],
+    );
+    const version = Number(currentVersion?.version ?? 0) + 1;
+    const versionId = randomUUID();
+    const copy = buildRandomizedPackCopy({
+      policy,
+      outcomeCount: distribution.outcomes.length,
+      bigWinProbabilityBps: distribution.bigWinProbabilityBps,
+      minimumOutcomeValue: Math.min(...distribution.outcomes.map((outcome) => outcome.priceSnapshot)),
+      maximumOutcomeValue: Math.max(...distribution.outcomes.map((outcome) => outcome.priceSnapshot)),
+    });
+
+    await transaction.execute({
+      sql: `insert into randomized_pack_versions (
+        id, pack_product_id, version, status, seed, formula_version,
+        total_probability_bps, expected_value, big_win_probability_bps,
+        created_at, published_at
+      ) values (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, null)`,
+      args: [
+        versionId,
+        policy.productId,
+        version,
+        seed,
+        RANDOMIZED_PACK_FORMULA_VERSION,
+        distribution.totalProbabilityBps,
+        distribution.expectedValue,
+        distribution.bigWinProbabilityBps,
+        timestamp,
+      ],
+    });
+    for (const [index, outcome] of distribution.outcomes.entries()) {
+      await transaction.execute({
+        sql: `insert into randomized_pack_outcomes (
+          id, version_id, outcome_product_id, probability_bps,
+          price_snapshot, title_snapshot, ordinal
+        ) values (?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          randomUUID(),
+          versionId,
+          outcome.productId,
+          outcome.probabilityBps,
+          outcome.priceSnapshot,
+          outcome.titleSnapshot,
+          index,
+        ],
+      });
+    }
+    await transaction.execute({
+      sql: "update randomized_pack_versions set status = 'retired' where pack_product_id = ? and status = 'published'",
+      args: [policy.productId],
+    });
+    await transaction.execute({
+      sql: "update randomized_pack_versions set status = 'published', published_at = ? where id = ?",
+      args: [timestamp, versionId],
+    });
+    await transaction.execute({
+      sql: `update products set title = ?, description = ?, tagline = ?,
+        is_randomized = 1, randomized_outcomes_json = ?, stock = ?,
+        status = 'active', updated_at = ? where id = ?`,
+      args: [
+        policy.publicTitle,
+        copy.description,
+        copy.tagline,
+        toJson(
+          distribution.outcomes.map((outcome) => ({
+            productId: outcome.productId,
+            probabilityBps: outcome.probabilityBps,
+          })),
+        ),
+        getRandomizedPackAvailableUnits(eligible),
+        timestamp,
+        policy.productId,
+      ],
+    });
+    await transaction.commit();
+    return versionId;
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
+}
+
+export async function rebuildAllRandomizedPackVersions() {
+  if (!randomizedPackEngineEnabled()) return;
+  for (const policy of RANDOMIZED_PACK_POLICIES) {
+    await publishRandomizedPackVersion(policy);
+  }
+  revalidateStorefront();
+  revalidateAdmin();
+}
+
+async function releaseExpiredRandomizedPackReservations() {
+  if (!randomizedPackEngineEnabled()) return false;
+  const timestamp = nowIso();
+  const transaction = await getDbClient().transaction("write");
+  try {
+    const expired = await expireRandomizedPackReservations(transaction, { expiredAt: timestamp });
+    await transaction.commit();
+    return expired > 0;
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
+}
+
 async function resolveRandomizedProductDisclosure(
   product: ProductRecord,
 ): Promise<RandomizedProductDisclosure> {
@@ -7957,6 +8773,51 @@ async function resolveRandomizedProductDisclosure(
       totalProbabilityBps: 0,
       outcomes: [],
     };
+  }
+
+  if (randomizedPackEngineEnabled()) {
+    const releasedExpiredReservations = await releaseExpiredRandomizedPackReservations();
+    if (releasedExpiredReservations) {
+      await rebuildAllRandomizedPackVersions();
+    }
+    const versionRow = await queryOne(
+      `select * from randomized_pack_versions
+       where pack_product_id = ? and status = 'published'
+       order by version desc limit 1`,
+      [product.id],
+    );
+    if (versionRow) {
+      const rows = await queryMany(
+        `select randomized_pack_outcomes.*, products.*
+         from randomized_pack_outcomes
+         inner join products on products.id = randomized_pack_outcomes.outcome_product_id
+         where randomized_pack_outcomes.version_id = ?
+           and products.archived = 0
+           and products.status = 'active'
+         order by randomized_pack_outcomes.ordinal asc`,
+        [String(versionRow.id)],
+      );
+      const outcomes = rows.map((row) => ({
+        product: normalizeProduct(row),
+        probabilityBps: Number(row.probability_bps),
+        priceSnapshot: Number(row.price_snapshot),
+      }));
+      const totalProbabilityBps = outcomes.reduce(
+        (sum, outcome) => sum + outcome.probabilityBps,
+        0,
+      );
+      return {
+        isRandomized: true,
+        isReady: outcomes.length >= 2 && totalProbabilityBps === 10_000,
+        totalProbabilityBps,
+        outcomes,
+        versionId: String(versionRow.id),
+        version: Number(versionRow.version),
+        publishedAt: versionRow.published_at ? String(versionRow.published_at) : null,
+        expectedValue: Number(versionRow.expected_value),
+        bigWinProbabilityBps: Number(versionRow.big_win_probability_bps),
+      };
+    }
   }
 
   const totalProbabilityBps = product.randomizedOutcomes.reduce(
@@ -7992,7 +8853,11 @@ async function resolveRandomizedProductDisclosure(
   const outcomes = product.randomizedOutcomes.flatMap((outcome) => {
     const outcomeProduct = productsById.get(outcome.productId);
     return outcomeProduct
-      ? [{ product: outcomeProduct, probabilityBps: outcome.probabilityBps }]
+      ? [{
+          product: outcomeProduct,
+          probabilityBps: outcome.probabilityBps,
+          priceSnapshot: outcomeProduct.price,
+        }]
       : [];
   });
 
@@ -10154,41 +11019,6 @@ export async function createCheckoutPaymentSession(input: {
   const shippingPostalCode = "00000";
   const { successUrl, cancelUrl, redirectUrl } =
     buildTransVoucherReturnUrls(transactionId);
-  const payment = await createTransVoucherPayment({
-    amount: pricing.total,
-    currency: input.currency,
-    title: "ReboHrome Digital Collectible Purchase",
-    description: "Digital collectible card purchase",
-    successUrl,
-    cancelUrl,
-    redirectUrl,
-    customerDetails: {
-      email: account.user.email,
-    },
-    metadata: {
-      type: "purchase",
-      user_id: account.user.id,
-      username: account.user.username,
-      telegram_username: account.user.telegramUsername,
-      internal_order_id: orderId,
-      internal_transaction_id: transactionId,
-      cart_id: sessionId,
-    },
-    defaultPaymentMethod: mapTransVoucherMethod(input.paymentMethod),
-    paymentMethodForced: true,
-  });
-  const providerStatus = normalizeProviderStatus(payment.status);
-  const mappedSessionStatus = mapProviderStatusToCheckoutSessionStatus(providerStatus);
-  const mappedTransactionStatus = mapProviderStatusToTransactionStatus(providerStatus);
-  const initialSessionStatus =
-    mappedSessionStatus === "completed" ? "processing" : mappedSessionStatus;
-  const initialTransactionStatus =
-    mappedTransactionStatus === "completed" ? "processing" : mappedTransactionStatus;
-  const paymentReference = buildTransVoucherPaymentReference({
-    referenceId: payment.referenceId,
-    transactionId: payment.transactionId,
-  });
-
   await execute(
     `insert into orders (
       id, user_id, status, payment_state, subtotal, shipping, total, currency,
@@ -10201,7 +11031,7 @@ export async function createCheckoutPaymentSession(input: {
       orderId,
       input.userId,
       "Pending",
-      ["failed", "expired"].includes(initialTransactionStatus) ? "failed" : "pending",
+      "pending",
       pricing.subtotal,
       pricing.shipping,
       pricing.total,
@@ -10213,36 +11043,17 @@ export async function createCheckoutPaymentSession(input: {
       shippingPostalCode,
       input.paymentMethod,
       "TransVoucher",
-      payment.transactionId,
-      payment.referenceId,
-      providerStatus || null,
-      ["failed", "expired"].includes(initialTransactionStatus)
-        ? "Unable to initialize TransVoucher payment."
-        : null,
+      null,
+      null,
+      "initializing",
+      null,
       account.balance.available,
       timestamp,
       timestamp,
       null,
     ],
   );
-
-  for (const item of input.items) {
-    const product = productMap.get(item.productId)!;
-    await execute(
-      `insert into order_items (
-        id, order_id, product_id, quantity, unit_price, delivery_type
-      ) values (?, ?, ?, ?, ?, ?)`,
-      [
-        randomUUID(),
-        orderId,
-        product.id,
-        item.quantity,
-        product.price,
-        item.deliveryType,
-      ],
-    );
-  }
-
+  await insertCheckoutOrderItems({ orderId, items: input.items, productMap });
   await createTransactionRecord({
     id: transactionId,
     userId: input.userId,
@@ -10253,25 +11064,19 @@ export async function createCheckoutPaymentSession(input: {
     displayCurrency: input.currency,
     paymentMethod: input.paymentMethod,
     paymentProvider: "TransVoucher",
-    transvoucherTransactionId: payment.transactionId,
-    transvoucherReferenceId: payment.referenceId,
-    paymentUrl: payment.paymentUrl,
-    providerStatus: providerStatus || null,
-    rawProviderResponse: toJson(payment.raw),
-    status: initialTransactionStatus,
+    providerStatus: "initializing",
+    status: "attempting",
     referenceId: orderId,
-    summary: "Awaiting TransVoucher payment confirmation",
+    summary: "Preparing secure payment session",
     meta: {
       currency: input.currency,
       paymentMethod: input.paymentMethod,
       provider: "TransVoucher",
-      paymentReference,
       paymentSessionId: sessionId,
       telegramUsername: account.user.telegramUsername,
       items: input.items,
     },
   });
-
   await execute(
     `insert into payment_sessions (
       id, user_id, payment_method, payment_provider, currency, subtotal,
@@ -10288,7 +11093,7 @@ export async function createCheckoutPaymentSession(input: {
       pricing.subtotal,
       pricing.shipping,
       pricing.total,
-      initialSessionStatus,
+      "attempting",
       toJson(input.items),
       toJson({
         internalOrderId: orderId,
@@ -10299,16 +11104,162 @@ export async function createCheckoutPaymentSession(input: {
       }),
       orderId,
       transactionId,
+      null,
+      null,
+      null,
+      "initializing",
+      null,
+      timestamp,
+      timestamp,
+      expiresAt,
+    ],
+  );
+
+  try {
+    await reserveRandomizedOrderItems({
+      orderId,
+      userId: input.userId,
+      expiresAt,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Unable to reserve a card.";
+    const failedAt = nowIso();
+    await execute(
+      "update orders set status = 'Declined', payment_state = 'failed', failure_reason = ?, updated_at = ? where id = ?",
+      [reason, failedAt, orderId],
+    );
+    await execute(
+      "update payment_sessions set status = 'failed', provider_status = 'reservation_failed', updated_at = ? where id = ?",
+      [failedAt, sessionId],
+    );
+    await execute(
+      "update transactions set status = 'failed', summary = 'Card reservation failed', last_error = ?, updated_at = ? where id = ?",
+      [reason, failedAt, transactionId],
+    );
+    throw error;
+  }
+
+  let payment: Awaited<ReturnType<typeof createTransVoucherPayment>>;
+  try {
+    payment = await createTransVoucherPayment({
+      amount: pricing.total,
+      currency: input.currency,
+      title: "ReboHrome Digital Collectible Purchase",
+      description: "Digital collectible card purchase",
+      successUrl,
+      cancelUrl,
+      redirectUrl,
+      customerDetails: {
+        email: account.user.email,
+      },
+      metadata: {
+        type: "purchase",
+        user_id: account.user.id,
+        username: account.user.username,
+        telegram_username: account.user.telegramUsername,
+        internal_order_id: orderId,
+        internal_transaction_id: transactionId,
+        cart_id: sessionId,
+      },
+      defaultPaymentMethod: mapTransVoucherMethod(input.paymentMethod),
+      paymentMethodForced: true,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Payment provider did not respond.";
+    const failedAt = nowIso();
+    await execute(
+      `update orders set failure_reason = ?, provider_status = 'initialization_unknown',
+        updated_at = ? where id = ? and payment_state = 'pending'`,
+      [reason, failedAt, orderId],
+    );
+    await execute(
+      `update payment_sessions set status = 'processing', provider_status = 'initialization_unknown',
+        updated_at = ? where id = ? and status <> 'completed'`,
+      [failedAt, sessionId],
+    );
+    await execute(
+      `update transactions set status = 'processing', summary = 'Payment initialization requires reconciliation',
+        last_error = ?, provider_status = 'initialization_unknown', updated_at = ?
+        where id = ? and status <> 'completed'`,
+      [reason, failedAt, transactionId],
+    );
+    throw error;
+  }
+  const providerStatus = normalizeProviderStatus(payment.status);
+  const mappedSessionStatus = mapProviderStatusToCheckoutSessionStatus(providerStatus);
+  const mappedTransactionStatus = mapProviderStatusToTransactionStatus(providerStatus);
+  const initialSessionStatus =
+    mappedSessionStatus === "completed" ? "processing" : mappedSessionStatus;
+  const initialTransactionStatus =
+    mappedTransactionStatus === "completed" ? "processing" : mappedTransactionStatus;
+  const paymentReference = buildTransVoucherPaymentReference({
+    referenceId: payment.referenceId,
+    transactionId: payment.transactionId,
+  });
+
+  await execute(
+    `update orders set payment_state = ?, transvoucher_transaction_id = ?,
+      transvoucher_reference_id = ?, provider_status = ?, failure_reason = ?,
+      updated_at = ? where id = ? and payment_state <> 'completed'`,
+    [
+      ["failed", "expired"].includes(initialTransactionStatus) ? "failed" : "pending",
+      payment.transactionId,
+      payment.referenceId,
+      providerStatus || null,
+      ["failed", "expired"].includes(initialTransactionStatus)
+        ? "Unable to initialize TransVoucher payment."
+        : null,
+      timestamp,
+      orderId,
+    ],
+  );
+
+  await execute(
+    `update transactions set transvoucher_transaction_id = ?,
+      transvoucher_reference_id = ?, payment_url = ?, provider_status = ?,
+      raw_provider_response = ?, status = ?, summary = ?, meta_json = ?, updated_at = ?
+      where id = ? and status <> 'completed'`,
+    [
+      payment.transactionId,
+      payment.referenceId,
+      payment.paymentUrl,
+      providerStatus || null,
+      toJson(payment.raw),
+      initialTransactionStatus,
+      "Awaiting TransVoucher payment confirmation",
+      toJson({
+        currency: input.currency,
+        paymentMethod: input.paymentMethod,
+        provider: "TransVoucher",
+        paymentReference,
+        paymentSessionId: sessionId,
+        telegramUsername: account.user.telegramUsername,
+        items: input.items,
+      }),
+      timestamp,
+      transactionId,
+    ],
+  );
+
+  await execute(
+    `update payment_sessions set status = ?, transvoucher_transaction_id = ?,
+      transvoucher_reference_id = ?, payment_url = ?, provider_status = ?,
+      raw_provider_response = ?, updated_at = ? where id = ? and status <> 'completed'`,
+    [
+      initialSessionStatus,
       payment.transactionId,
       payment.referenceId,
       payment.paymentUrl,
       providerStatus || null,
       toJson(payment.raw),
       timestamp,
-      timestamp,
-      expiresAt,
+      sessionId,
     ],
   );
+
+  if (["failed", "expired"].includes(initialTransactionStatus)) {
+    await releaseRandomizedOrderReservations(orderId, "payment_initialization_failed");
+  }
 
   return {
     sessionId,
@@ -10902,6 +11853,12 @@ export async function cancelActivePaymentSession(input: {
         updated_at = ?
        where id = ? and user_id = ? and status in ('pending', 'attempting', 'processing')`,
       [timestamp, timestamp, transactionId, input.userId],
+    );
+  }
+  if (input.type === "purchase" && row.order_id) {
+    await releaseRandomizedOrderReservations(
+      String(row.order_id),
+      "payment_session_canceled",
     );
   }
   revalidatePrivate(input.userId);
@@ -11959,72 +12916,72 @@ async function reconcileTransVoucherPurchase(input: {
   };
 
   if (isProviderCompletedStatus(input.providerStatus)) {
-    let remainingBalance = input.order.remainingBalance ?? 0;
+    const account = await getUserAndBalance(input.order.userId);
+    if (!account) {
+      throw new Error("Unable to load collector account for TransVoucher reconciliation.");
+    }
 
-    if (input.order.paymentState !== "completed") {
-      const account = await getUserAndBalance(input.order.userId);
-
-      if (!account) {
-        throw new Error("Unable to load collector account for TransVoucher reconciliation.");
+    let completion: Awaited<ReturnType<typeof completeTransVoucherOrderAtomically>>;
+    try {
+      if (input.order.paymentState !== "completed") {
+        await releaseExpiredRandomizedPackReservations();
+        await reserveRandomizedOrderItems({
+          orderId: input.order.id,
+          userId: input.order.userId,
+          expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        });
       }
-
-      const itemRows = await queryMany(
-        `select
-          order_items.product_id,
-          order_items.quantity,
-          order_items.delivery_type,
-          products.*
-         from order_items
-         inner join products on products.id = order_items.product_id
-         where order_items.order_id = ?`,
-        [input.order.id],
-      );
-
-      const items = itemRows.map((row) => ({
-        productId: String(row.product_id),
-        quantity: Number(row.quantity),
-        deliveryType: row.delivery_type as DeliveryType,
-        product: normalizeProduct(row),
-      }));
-
-      for (const item of items) {
-        if (item.product.stock < item.quantity) {
-          throw new Error(`${item.product.title} no longer has enough stock to fulfill this payment.`);
-        }
-      }
-
-      for (const item of items) {
-        await execute(
-          "update products set stock = stock - ?, updated_at = ? where id = ?",
-          [item.quantity, timestamp, item.product.id],
-        );
-
-        await execute(
-          `insert into owned_cards (
-            id, user_id, product_id, order_id, quantity, acquired_at
-          ) values (?, ?, ?, ?, ?, ?)`,
-          [
-            randomUUID(),
-            input.order.userId,
-            item.product.id,
-            input.order.id,
-            item.quantity,
-            input.paidAt ?? timestamp,
-          ],
-        );
-      }
-
+      completion = await completeTransVoucherOrderAtomically({
+        order: input.order,
+        transaction: input.transaction,
+        session: input.session,
+        providerStatus: input.providerStatus,
+        providerTransactionId: input.providerTransactionId,
+        providerReferenceId: input.providerReferenceId,
+        paymentUrl: input.paymentUrl,
+        rawProviderResponse,
+        metaJson: toJson(mergedMeta),
+        paidAt: input.paidAt ?? timestamp,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Paid order fulfillment failed.";
       await execute(
-        `update balances set
-          total_spent = total_spent + ?,
-          updated_at = ?
-         where user_id = ?`,
-        [input.order.total, timestamp, input.order.userId],
+        `update orders set status = 'Pending', payment_state = 'paid_unfulfilled',
+          failure_reason = ?, provider_status = ?, paid_at = coalesce(paid_at, ?), updated_at = ?
+          where id = ? and payment_state <> 'completed'`,
+        [reason, input.providerStatus, input.paidAt ?? timestamp, timestamp, input.order.id],
       );
+      await execute(
+        `update transactions set status = 'processing', summary = 'Paid order requires fulfillment',
+          last_error = ?, provider_status = ?, raw_provider_response = ?, updated_at = ?
+          where id = ? and status <> 'completed'`,
+        [reason, input.providerStatus, rawProviderResponse, timestamp, input.transaction.id],
+      );
+      if (input.session) {
+        await execute(
+          `update payment_sessions set status = 'paid_unfulfilled', provider_status = ?,
+            raw_provider_response = ?, updated_at = ? where id = ? and status <> 'completed'`,
+          [input.providerStatus, rawProviderResponse, timestamp, input.session.id],
+        );
+      }
+      await notifySafely(() =>
+        sendTelegramAdminMessage(
+          [
+            "<b>Paid randomized order requires fulfillment</b>",
+            "",
+            `Order: ${escapeTelegramHtml(input.order.id)}`,
+            `User: ${escapeTelegramHtml(account.user.telegramUsername)}`,
+            `Reason: ${escapeTelegramHtml(reason)}`,
+          ].join("\n"),
+        ),
+      );
+      revalidatePrivate(input.order.userId);
+      revalidateAdmin();
+      return;
+    }
 
-      remainingBalance = account.balance.available;
+    if (completion.completedNow) {
       await clearUserCartItems(input.order.userId);
-
       await notifySafely(() =>
         sendPurchaseNotification({
           username: account.user.username,
@@ -12036,91 +12993,9 @@ async function reconcileTransVoucherPurchase(input: {
           provider: "TransVoucher",
           transactionId: input.providerTransactionId,
           referenceId: input.providerReferenceId,
-          items: items.map((item) => ({
-            title: item.product.title,
-            quantity: item.quantity,
-          })),
+          items: completion.delivered,
           timestamp: input.paidAt ?? timestamp,
         }),
-      );
-    }
-
-    await execute(
-      `update orders set
-        status = ?,
-        payment_state = ?,
-        failure_reason = null,
-        remaining_balance = ?,
-        transvoucher_transaction_id = ?,
-        transvoucher_reference_id = ?,
-        provider_status = ?,
-        paid_at = ?,
-        updated_at = ?
-       where id = ?`,
-      [
-        input.order.shipping > 0 ? "Processing" : "Completed",
-        "completed",
-        remainingBalance,
-        input.providerTransactionId,
-        input.providerReferenceId,
-        input.providerStatus,
-        input.paidAt ?? timestamp,
-        timestamp,
-        input.order.id,
-      ],
-    );
-
-    await execute(
-      `update transactions set
-        payment_provider = ?,
-        transvoucher_transaction_id = ?,
-        transvoucher_reference_id = ?,
-        payment_url = ?,
-        provider_status = ?,
-        raw_provider_response = ?,
-        status = ?,
-        summary = ?,
-        meta_json = ?,
-        paid_at = ?,
-        updated_at = ?
-       where id = ?`,
-      [
-        "TransVoucher",
-        input.providerTransactionId,
-        input.providerReferenceId,
-        input.paymentUrl,
-        input.providerStatus,
-        rawProviderResponse,
-        "completed",
-        "Card purchase completed",
-        toJson(mergedMeta),
-        input.paidAt ?? timestamp,
-        timestamp,
-        input.transaction.id,
-      ],
-    );
-
-    if (input.session) {
-      await execute(
-        `update payment_sessions set
-          status = ?,
-          transvoucher_transaction_id = ?,
-          transvoucher_reference_id = ?,
-          payment_url = ?,
-          provider_status = ?,
-          raw_provider_response = ?,
-          updated_at = ?
-         where id = ?`,
-        [
-          "completed",
-          input.providerTransactionId,
-          input.providerReferenceId,
-          input.paymentUrl,
-          input.providerStatus,
-          rawProviderResponse,
-          timestamp,
-          input.session.id,
-        ],
       );
     }
 
@@ -12158,6 +13033,7 @@ async function reconcileTransVoucherPurchase(input: {
     }
 
     if (input.order.paymentState !== "completed") {
+      await releaseRandomizedOrderReservations(input.order.id, "payment_failed");
       await execute(
         `update orders set
           status = ?,
@@ -14289,22 +15165,7 @@ export async function createCheckoutOrder(input: {
     ],
   );
 
-  for (const item of input.items) {
-    const product = productMap.get(item.productId)!;
-    await execute(
-      `insert into order_items (
-        id, order_id, product_id, quantity, unit_price, delivery_type
-      ) values (?, ?, ?, ?, ?, ?)`,
-      [
-        randomUUID(),
-        orderId,
-        product.id,
-        item.quantity,
-        product.price,
-        item.deliveryType,
-      ],
-    );
-  }
+  await insertCheckoutOrderItems({ orderId, items: input.items, productMap });
 
   const digits = input.cardNumber?.replace(/\D+/g, "") ?? "";
   let failureReason: string | null = null;
@@ -14383,57 +15244,7 @@ export async function createCheckoutOrder(input: {
     };
   }
 
-  for (const item of input.items) {
-    const product = productMap.get(item.productId)!;
-
-    await execute(
-      "update products set stock = stock - ?, updated_at = ? where id = ?",
-      [item.quantity, timestamp, product.id],
-    );
-
-    await execute(
-      `insert into owned_cards (
-        id, user_id, product_id, order_id, quantity, acquired_at
-      ) values (?, ?, ?, ?, ?, ?)`,
-      [randomUUID(), input.userId, product.id, orderId, item.quantity, timestamp],
-    );
-  }
-
   const status: OrderStatus = shipping > 0 ? "Processing" : "Completed";
-  const remainingBalance =
-    input.paymentMethod === "Archive Balance"
-      ? account.balance.available - total
-      : account.balance.available;
-
-  if (input.paymentMethod === "Archive Balance") {
-    await execute(
-      `update balances set
-        available = ?,
-        total_spent = total_spent + ?,
-        updated_at = ?
-       where user_id = ?`,
-      [remainingBalance, total, timestamp, input.userId],
-    );
-  } else {
-    await execute(
-      `update balances set
-        total_spent = total_spent + ?,
-        updated_at = ?
-       where user_id = ?`,
-      [total, timestamp, input.userId],
-    );
-  }
-
-  await execute(
-    `update orders set
-      status = ?,
-      payment_state = ?,
-      remaining_balance = ?,
-      updated_at = ?
-     where id = ?`,
-    [status, "completed", remainingBalance, timestamp, orderId],
-  );
-
   const transactionId = await createTransactionRecord({
     userId: input.userId,
     kind: "purchase",
@@ -14443,9 +15254,9 @@ export async function createCheckoutOrder(input: {
     displayCurrency: checkoutCurrency,
     paymentMethod: input.paymentMethod,
     paymentProvider,
-    status: "completed",
+    status: "processing",
     referenceId: orderId,
-    summary: "Card purchase completed",
+    summary: "Finalizing card purchase",
     meta: {
       currency: checkoutCurrency,
       paymentMethod: input.paymentMethod,
@@ -14460,6 +15271,58 @@ export async function createCheckoutOrder(input: {
     },
   });
 
+  let completion: Awaited<ReturnType<typeof completeArchiveBalanceOrderAtomically>>;
+  try {
+    completion = await completeArchiveBalanceOrderAtomically({
+      orderId,
+      transactionId,
+      userId: input.userId,
+      total,
+      status,
+      completedAt: timestamp,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Unable to complete card delivery.";
+    await releaseRandomizedOrderReservations(orderId, "archive_balance_fulfillment_failed");
+    await execute(
+      `update orders set status = 'Declined', payment_state = 'failed',
+        failure_reason = ?, updated_at = ? where id = ?`,
+      [reason, nowIso(), orderId],
+    );
+    await execute(
+      `update transactions set status = 'failed', summary = 'Card purchase failed',
+        last_error = ?, updated_at = ? where id = ?`,
+      [reason, nowIso(), transactionId],
+    );
+    await notifySafely(() =>
+      sendPurchaseFailureNotification({
+        username: account.user.username,
+        telegramUsername: account.user.telegramUsername,
+        orderId,
+        amount: total,
+        currency: checkoutCurrency,
+        paymentMethod: `${input.paymentMethod} ${paymentReference}`,
+        provider: paymentProvider,
+        reason,
+        timestamp,
+      }),
+    );
+    return {
+      ok: false as const,
+      orderId,
+      transactionId,
+      reason,
+      paymentMethod: input.paymentMethod,
+      provider: paymentProvider,
+      currency: checkoutCurrency,
+      paymentReference,
+      remainingBalance: account.balance.available,
+      timestamp,
+      telegramUsername: account.user.telegramUsername,
+    };
+  }
+  const remainingBalance = completion.remainingBalance ?? account.balance.available;
+
   await clearUserCartItems(input.userId);
   await notifySafely(() =>
     sendPurchaseNotification({
@@ -14470,10 +15333,7 @@ export async function createCheckoutOrder(input: {
       currency: checkoutCurrency,
       paymentMethod: input.paymentMethod,
       provider: paymentProvider,
-      items: input.items.map((item) => ({
-        title: productMap.get(item.productId)?.title ?? item.productId,
-        quantity: item.quantity,
-      })),
+      items: completion.delivered,
       timestamp,
     }),
   );
@@ -14515,7 +15375,7 @@ export async function getOrderById(orderId: string, userId?: string) {
 
   const itemRows = await queryMany(
     `select
-      order_items.id,
+      order_items.id as order_item_id,
       order_items.quantity,
       order_items.unit_price,
       order_items.delivery_type,
@@ -14524,6 +15384,24 @@ export async function getOrderById(orderId: string, userId?: string) {
      inner join products on products.id = order_items.product_id
      where order_items.order_id = ?`,
     [orderId],
+  );
+
+  const drawRows = randomizedPackEngineEnabled()
+    ? await queryMany(
+        `select randomized_pack_draws.order_item_id,
+          randomized_pack_draws.version_id,
+          randomized_pack_draws.probability_bps,
+          randomized_pack_draws.price_snapshot,
+          randomized_pack_draws.created_at as drawn_at,
+          products.*
+         from randomized_pack_draws
+         inner join products on products.id = randomized_pack_draws.outcome_product_id
+         where randomized_pack_draws.order_id = ?`,
+        [orderId],
+      )
+    : [];
+  const drawMap = new Map(
+    drawRows.map((row) => [String(row.order_item_id), row] as const),
   );
 
   const transactionRow = await queryOne(
@@ -14536,13 +15414,28 @@ export async function getOrderById(orderId: string, userId?: string) {
 
   return {
     order: normalizeOrder(orderRow),
-    items: itemRows.map((row) => ({
-      id: String(row.id),
-      quantity: Number(row.quantity),
-      unitPrice: Number(row.unit_price),
-      deliveryType: row.delivery_type as DeliveryType,
-      product: normalizeProduct(row),
-    })),
+    items: itemRows.map((row) => {
+      const orderItemId = String(row.order_item_id);
+      const sourceProduct = normalizeProduct(row);
+      const draw = drawMap.get(orderItemId);
+      const drawnProduct = draw ? normalizeProduct(draw) : null;
+      return {
+        id: orderItemId,
+        quantity: Number(row.quantity),
+        unitPrice: Number(row.unit_price),
+        deliveryType: row.delivery_type as DeliveryType,
+        product: drawnProduct ?? sourceProduct,
+        packProduct: drawnProduct ? sourceProduct : null,
+        randomizedDraw: draw
+          ? {
+              versionId: String(draw.version_id),
+              probabilityBps: Number(draw.probability_bps),
+              priceSnapshot: Number(draw.price_snapshot),
+              drawnAt: String(draw.drawn_at),
+            }
+          : null,
+      };
+    }),
     transaction: transactionRow ? normalizeTransaction(transactionRow) : null,
     transactionMeta: transactionRow
       ? fromJson<Record<string, unknown>>(transactionRow.meta_json)
@@ -14615,6 +15508,92 @@ export async function getAdminProducts() {
      order by homepage_featured desc, featured desc, updated_at desc, title asc`,
   );
   return rows.map((row) => normalizeProduct(row));
+}
+
+export async function getAdminRandomizedPackVersions() {
+  await ensureDatabase();
+  return Promise.all(
+    RANDOMIZED_PACK_POLICIES.map(async (policy) => {
+      const packRow = await queryOne(
+        "select id, title, status from products where id = ? and archived = 0 limit 1",
+        [policy.productId],
+      );
+      const versionRows = await queryMany(
+        `select randomized_pack_versions.*,
+          (select count(*) from randomized_pack_outcomes
+           where randomized_pack_outcomes.version_id = randomized_pack_versions.id) as outcome_count
+         from randomized_pack_versions
+         where pack_product_id = ?
+         order by version desc limit 5`,
+        [policy.productId],
+      );
+      const current = versionRows.find((row) => String(row.status) === "published") ?? null;
+      const outcomeRows = current
+        ? await queryMany(
+            `select randomized_pack_outcomes.probability_bps,
+              randomized_pack_outcomes.price_snapshot, products.id, products.title,
+              products.stock, products.status, products.archived
+             from randomized_pack_outcomes
+             inner join products on products.id = randomized_pack_outcomes.outcome_product_id
+             where randomized_pack_outcomes.version_id = ?
+             order by randomized_pack_outcomes.ordinal asc`,
+            [String(current.id)],
+          )
+        : [];
+      const errors: string[] = [];
+      if (!packRow) errors.push("Pack product is missing.");
+      if (packRow && String(packRow.status) !== "active") {
+        errors.push("Pack sales are paused.");
+      }
+      if (!current) errors.push("No valid published probability version.");
+      if (
+        current &&
+        (Number(current.total_probability_bps) !== 10_000 ||
+          outcomeRows.reduce((total, row) => total + Number(row.probability_bps), 0) !== 10_000)
+      ) {
+        errors.push("Published probabilities do not total 100%.");
+      }
+      const availableOutcomeCount = outcomeRows.filter(
+        (row) =>
+          Number(row.stock) > 0 &&
+          Number(row.archived) === 0 &&
+          String(row.status) === "active",
+      ).length;
+      if (current && availableOutcomeCount < 2) {
+        errors.push("The published pool has fewer than two available cards.");
+      }
+      return {
+        productId: policy.productId,
+        title: packRow ? String(packRow.title) : policy.publicTitle,
+        productStatus: packRow ? String(packRow.status) : "missing",
+        current: current
+          ? {
+              id: String(current.id),
+              version: Number(current.version),
+              expectedValue: Number(current.expected_value),
+              bigWinProbabilityBps: Number(current.big_win_probability_bps),
+              totalProbabilityBps: Number(current.total_probability_bps),
+              publishedAt: current.published_at ? String(current.published_at) : null,
+              outcomes: outcomeRows.map((row) => ({
+                productId: String(row.id),
+                title: String(row.title),
+                stock: Number(row.stock),
+                priceSnapshot: Number(row.price_snapshot),
+                probabilityBps: Number(row.probability_bps),
+              })),
+            }
+          : null,
+        history: versionRows.map((row) => ({
+          id: String(row.id),
+          version: Number(row.version),
+          status: String(row.status),
+          outcomeCount: Number(row.outcome_count),
+          publishedAt: row.published_at ? String(row.published_at) : null,
+        })),
+        errors,
+      };
+    }),
+  );
 }
 
 type AdminAuditInput = {
@@ -15190,6 +16169,9 @@ export async function adminAddProductToUser(input: {
       grantedTimestamp,
       productId,
     ]);
+    if (randomizedPackEngineEnabled()) {
+      await rebuildAllRandomizedPackVersions();
+    }
     await execute(
       `insert into product_inventory_movements (
         id, product_id, movement_type, quantity_delta, stock_before, stock_after,
@@ -15445,6 +16427,9 @@ export async function adminChangeUserInventoryQuantity(input: {
       timestamp,
       productId,
     ]);
+    if (randomizedPackEngineEnabled()) {
+      await rebuildAllRandomizedPackVersions();
+    }
     await execute(
       `insert into product_inventory_movements (
         id, product_id, movement_type, quantity_delta, stock_before, stock_after,
@@ -17342,6 +18327,15 @@ async function validateRandomizedProductConfiguration(input: {
     return;
   }
 
+  const automaticPolicy = getRandomizedPackPolicy(input.productId);
+  if (automaticPolicy) {
+    return;
+  }
+
+  if (randomizedPackEngineEnabled()) {
+    throw new Error("This randomized product does not have an automatic pack policy.");
+  }
+
   if (
     !hasValidRandomizedProductOdds({
       id: input.productId,
@@ -17442,6 +18436,10 @@ export async function createProduct(
       timestamp,
     ],
   );
+
+  if (randomizedPackEngineEnabled()) {
+    await rebuildAllRandomizedPackVersions();
+  }
 
   if (input.adminUserId) {
     await logAdminAction(
@@ -17555,6 +18553,10 @@ export async function updateProduct(
     ],
   );
 
+  if (randomizedPackEngineEnabled()) {
+    await rebuildAllRandomizedPackVersions();
+  }
+
   if (
     (current.imageUrl && current.imageUrl !== next.imageUrl) ||
     (current.imagePath && current.imagePath !== next.imagePath)
@@ -17654,6 +18656,9 @@ export async function deleteProduct(id: string, adminUserId?: string) {
      where id = ?`,
     [nowIso(), id],
   );
+  if (randomizedPackEngineEnabled()) {
+    await rebuildAllRandomizedPackVersions();
+  }
 
   if (product.imageUrl || product.imagePath) {
     await removeManagedProductImage({

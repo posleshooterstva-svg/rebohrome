@@ -1,6 +1,6 @@
 # Refund & Shipping Policy
 
-Last Updated: May 2026
+Last Updated: August 10, 2026
 
 This Refund & Shipping Policy explains how ReboHrome handles refunds, cancellations, returns, payment disputes, digital delivery, randomized pack purchases, and physical shipments. This Policy forms part of the ReboHrome Terms of Service. By purchasing any product, making a deposit, opening or revealing any randomized pack, receiving any digital item, or requesting shipment, you agree to this Policy.
 
@@ -45,9 +45,9 @@ Refunds will not be issued because the user received an item with a lower value 
 
 ## 4. Unopened Randomized Packs
 
-If a randomized pack has been purchased but not opened, revealed, assigned, credited, or otherwise used, ReboHrome may, at its discretion, review a cancellation request. Approval is not guaranteed and may depend on payment status, fraud review, technical status, promotion rules, account status, and applicable law.
+Randomized Pack results are selected and delivered automatically after confirmed payment; there is no separate user-controlled opening step. A hidden temporary reservation made before payment is not delivery and is released if payment is cancelled, fails, or expires.
 
-ReboHrome may refuse cancellation of an unopened pack where the purchase has already triggered inventory allocation, promotional benefits, account credit, compliance review, fraud review, marketplace effects, or other irreversible platform activity.
+If confirmed payment is received but the selected card cannot be atomically assigned to the user account, the order is marked as paid but unfulfilled. ReboHrome will review the payment and inventory audit trail and will complete delivery, provide an equivalent remedy accepted by the user, restore eligible platform balance, or issue a refund where required by applicable law. A technically incomplete draw is handled separately from dissatisfaction with the value or rarity of a successfully delivered card.
 
 ## 5. Physical Collectibles
 

@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import {
@@ -59,6 +60,7 @@ type PaymentSuccessModalProps = {
   onClose?: () => void;
   helpHref?: string;
   helpLabel?: string;
+  featuredContent?: ReactNode;
 };
 
 const iconClassName = "size-[18px] text-[var(--accent)]/76";
@@ -150,6 +152,7 @@ export function PaymentSuccessModal({
   onClose,
   helpHref = "/contact",
   helpLabel = "Contact Support",
+  featuredContent,
 }: PaymentSuccessModalProps) {
   if (!open) {
     return null;
@@ -220,6 +223,8 @@ export function PaymentSuccessModal({
               {subtitle}
             </p>
           </div>
+
+          {featuredContent ? <div className="mt-5">{featuredContent}</div> : null}
 
           <div className="mt-6 min-h-0 rounded-[24px] border border-[rgba(232,235,244,0.92)] bg-[rgba(255,255,255,0.9)] px-4 py-3 shadow-[0_18px_44px_rgba(188,195,222,0.12)] sm:px-5 sm:py-4 lg:mt-7 lg:px-6 lg:py-4">
             <div className="max-h-[28dvh] overflow-y-auto pr-1 sm:max-h-[30dvh] lg:max-h-[34dvh]">
