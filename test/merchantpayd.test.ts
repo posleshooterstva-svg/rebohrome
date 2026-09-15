@@ -21,8 +21,9 @@ async function fixture(){
  `create table orders(id text primary key,user_id text,payment_state text,paid_at text,updated_at text)`,
  `create table test_inventory(order_id text primary key,quantity integer)`,
  `insert into balances values('user',50,0,0,null)`], 'write');
+ let statusMethod:MerchantMethodCode|undefined;
  let current=payment(),creates=0,failCreate=false,failFulfill=false,rejectCreate=false;
- const gateway:PaymentGateway={async create(input){creates++;if(rejectCreate)throw new MerchantApiError('Bank Transfer is not enabled for this project by RebohromePayment.',422);if(failCreate)throw new MerchantApiError('timeout',502,true);return payment({status:'pending',transaction_id:null,payment_method:{type:input.paymentMethod||'cash-app-v4'}});},async status(){return current;}};
+ const gateway:PaymentGateway={async create(input){creates++;if(rejectCreate)throw new MerchantApiError('Bank Transfer is not enabled for this project by RebohromePayment.',422);if(failCreate)throw new MerchantApiError('timeout',502,true);return payment({status:'pending',transaction_id:null,payment_method:{type:input.paymentMethod||'cash-app-v4'}});},async status(_id,method){statusMethod=method;return current;}};
  const adapters:PaymentAdapters={async initialize(tx,i){
   await tx.execute({sql:'insert into transactions(id,status) values(?,?)',args:[i.transaction_id,'pending']});
   await tx.execute({sql:`insert into ${i.kind==='deposit'?'deposit_payment_sessions':'payment_sessions'}(id,status) values(?,'pending')`,args:[i.id]});
@@ -30,7 +31,7 @@ async function fixture(){
  },async fulfill(tx,i){await tx.execute({sql:'insert into test_inventory values(?,1)',args:[i.reference_id]});if(failFulfill)throw new Error('Out of stock');await tx.execute({sql:"update orders set payment_state='completed' where id=?",args:[i.reference_id]});}};
  const engine=paymentEngine(db,gateway,adapters);
  async function create(kind:'purchase'|'deposit'='deposit',key=randomUUID(),fingerprint='same',paymentMethod:MerchantMethodCode='cash-app-v4') {return engine.create({userId:'user',kind,key,fingerprint,amountMinor:10000,snapshot:{},paymentMethod},{email:'buyer@example.test',title:'Test',description:'Test payment'});}
- return {db,engine,create,get creates(){return creates;},setPayment(p:MerchantPayment){current=p;},failCreate(){failCreate=true;},rejectCreate(){rejectCreate=true;},enableCreate(){rejectCreate=false;},failFulfill(){failFulfill=true;},recover(){failFulfill=false;},async close(){db.close();await rm(dir,{recursive:true,force:true,maxRetries:0}).catch(error=>{if(error.code!=='EBUSY')throw error;});}};
+ return {db,engine,create,get creates(){return creates;},get statusMethod(){return statusMethod;},setPayment(p:MerchantPayment){current=p;},failCreate(){failCreate=true;},rejectCreate(){rejectCreate=true;},enableCreate(){rejectCreate=false;},failFulfill(){failFulfill=true;},recover(){failFulfill=false;},async close(){db.close();await rm(dir,{recursive:true,force:true,maxRetries:0}).catch(error=>{if(error.code!=='EBUSY')throw error;});}};
 }
 async function scalar(db:Client,sql:string){return Object.values((await db.execute(sql)).rows[0])[0];}
 test('webhook HMAC uses exact raw bytes and requires configured secret',()=>{
@@ -45,7 +46,7 @@ test('public method names map to exact provider codes; retired methods reject',(
 });
 test('Bank Transfer sends banking and accepts nullable classic-payment fields',async()=>{
  let sent:Record<string,unknown>={};
- const client=merchantClient({baseUrl:'https://api.example',apiKey:'test',apiSecret:'test',webhookSecret:'test',method:'cash-app-v4',enabled:true},async(_url,init)=>{
+ const client=merchantClient({baseUrl:'https://api.example',apiKey:'test',apiSecret:'test',webhookSecret:'test',method:'cash-app-v4',enabled:true,banking:{apiKey:'bank-key-test',apiSecret:'bank-secret-test'}},async(_url,init)=>{
   sent=JSON.parse(String(init?.body));
   return Response.json({success:true,data:payment({status:'pending',transaction_id:null,payment_method:{type:'banking',brand:null,card_last_four:null},blockchain_tx_hash:null,commodity:null,network:null})});
  });
@@ -54,7 +55,7 @@ test('Bank Transfer sends banking and accepts nullable classic-payment fields',a
 });
 
 test('provider validation is actionable without exposing upstream diagnostics or retrying POST',async()=>{
- const config:MerchantConfig={baseUrl:'https://api.example',apiKey:'test',apiSecret:'test',webhookSecret:'test',method:'cash-app-v4',enabled:true};
+ const config:MerchantConfig={baseUrl:'https://api.example',apiKey:'test',apiSecret:'test',webhookSecret:'test',method:'cash-app-v4',enabled:true,banking:{apiKey:'bank-key-test',apiSecret:'bank-secret-test'}};
  for (const message of ["payment_method 'banking' is not enabled for this project",'secret-test buyer@example.test <html>']) {
   let calls=0;
   const client=merchantClient(config,async()=>{calls++;return Response.json({error:true,message},{status:422});});
@@ -66,6 +67,24 @@ test('provider validation is actionable without exposing upstream diagnostics or
   });
   assert.equal(calls,1);
  }
+});
+
+test('each method uses its own credentials for creation and status; missing banking configuration fails closed',async()=>{
+ const config:MerchantConfig={baseUrl:'https://api.example',apiKey:'cash-key',apiSecret:'cash-secret',webhookSecret:'sign',method:'cash-app-v4',enabled:true,banking:{apiKey:'bank-key',apiSecret:'bank-secret'}};
+ const calls:Array<{key:string|null;secret:string|null;method:string;url:string}>=[];
+ const client=merchantClient(config,async(url,init)=>{
+  const headers=new Headers(init?.headers);calls.push({key:headers.get('X-API-Key'),secret:headers.get('X-API-Secret'),method:String(init?.method),url:String(url)});
+  const method=headers.get('X-API-Key')==='bank-key'?'banking':'cash-app-v4';
+  return Response.json({success:true,data:payment({status:'pending',transaction_id:null,payment_method:{type:method}})});
+ });
+ for(const method of ['cash-app-v4','banking'] as const){
+  await client.create({amountMinor:10000,email:'buyer@example.test',title:'Test',description:'Test',intentId:'test',paymentMethod:method});
+  await client.status(link,method);
+ }
+ assert.deepEqual(calls.map(c=>[c.method,c.key,c.secret]),[['POST','cash-key','cash-secret'],['GET','cash-key','cash-secret'],['POST','bank-key','bank-secret'],['GET','bank-key','bank-secret']]);
+ const missing=merchantClient({...config,banking:undefined},async()=>{assert.fail('Must never fall back to Cash App credentials');});
+ await assert.rejects(missing.create({amountMinor:1000,email:'buyer@example.test',title:'Test',description:'Test',intentId:'test',paymentMethod:'banking'}),/Bank Transfer is not configured/);
+ await assert.rejects(missing.status(link,'banking'),/Bank Transfer is not configured/);
 });
 
 test('rejected creation retains its explanation; only a new request can retry after enablement',async()=>{const f=await fixture();try{
@@ -86,12 +105,12 @@ test('saved Bank Transfer method controls reconciliation and idempotency',async(
  await f.engine.apply(String(intent.id),payment());
  assert.equal(await scalar(f.db,'select available from balances'),50);
  const banking=payment({payment_method:{type:'banking',brand:null,card_last_four:null},blockchain_tx_hash:null});
- await f.engine.apply(String(intent.id),banking);await f.engine.apply(String(intent.id),banking);
+ f.setPayment(banking);await f.engine.reconcile(String(intent.id));assert.equal(f.statusMethod,'banking');await f.engine.apply(String(intent.id),banking);
  assert.equal(await scalar(f.db,'select available from balances'),150);
  assert.equal(await scalar(f.db,'select count(*) from financial_entries'),1);
 }finally{await f.close();}});
 test('client sends both headers, USD fixed price and retains converted fields',async()=>{
- const config:MerchantConfig={baseUrl:'https://api.example',apiKey:'key-test',apiSecret:'secret-test',webhookSecret:'sign',method:'cash-app-v4',enabled:true};
+ const config:MerchantConfig={baseUrl:'https://api.example',apiKey:'key-test',apiSecret:'secret-test',webhookSecret:'sign',method:'cash-app-v4',enabled:true,banking:{apiKey:'bank-key-test',apiSecret:'bank-secret-test'}};
  const calls:Array<{url:string;init:RequestInit}>=[];
  const transport:typeof fetch=async(url,init)=>{calls.push({url:String(url),init:init!});return Response.json({success:true,data:payment({status:'pending',transaction_id:null})});};
  const client=merchantClient(config,transport);await client.create({amountMinor:10000,email:'buyer@example.test',title:'Order',description:'Description',intentId:'local'});await client.status(link);

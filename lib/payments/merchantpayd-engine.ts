@@ -5,7 +5,7 @@ import { merchantMethodCode, savedMerchantMethod, type MerchantMethodCode } from
 
 export class PaymentConflict extends Error { httpStatus=409; }
 export type IntentInput = {userId:string;kind:"deposit"|"purchase";key:string;fingerprint:string;amountMinor:number;snapshot:unknown;paymentMethod?:MerchantMethodCode};
-export type PaymentGateway = {create(input:{amountMinor:number;email:string;title:string;description:string;intentId:string;paymentMethod?:MerchantMethodCode}):Promise<MerchantPayment>;status(id:string):Promise<MerchantPayment>};
+export type PaymentGateway = {create(input:{amountMinor:number;email:string;title:string;description:string;intentId:string;paymentMethod?:MerchantMethodCode}):Promise<MerchantPayment>;status(id:string,method:MerchantMethodCode):Promise<MerchantPayment>};
 export type PaymentAdapters = {
   initialize:(tx:Transaction,intent:Row)=>Promise<void>;
   fulfill:(tx:Transaction,intent:Row)=>Promise<void>;
@@ -146,7 +146,7 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
     if (!lease.rowsAffected) return false;
     try {
       const intent=await get(id); if (!intent?.payment_link_id) return false;
-      const result=await gateway.status(String(intent.payment_link_id));
+      const result=await gateway.status(String(intent.payment_link_id),savedMerchantMethod(JSON.parse(String(intent.snapshot_json))));
       await apply(id,result,eventTransactionId);
       return true;
     } catch {await db.execute({sql:"update payment_intents set last_error='Provider status check failed; will retry.',next_check_at=?,updated_at=? where id=?",args:[later(300_000),now(),id]});return false;}

@@ -16,7 +16,7 @@ const paymentSchema = z.object({
   payment_method: z.object({type:z.string(),brand:z.string().nullish(),card_last_four:z.string().nullish()}).passthrough().nullish(),
 }).passthrough();
 export type MerchantPayment = z.infer<typeof paymentSchema>;
-export type MerchantConfig = {baseUrl:string;apiKey:string;apiSecret:string;webhookSecret:string;method:string;enabled:boolean};
+export type MerchantConfig = {baseUrl:string;apiKey:string;apiSecret:string;webhookSecret:string;method:string;enabled:boolean;banking?:{apiKey:string;apiSecret:string};bankingWebhookSecret?:string};
 
 export function merchantConfig(): MerchantConfig {
   return {
@@ -26,6 +26,11 @@ export function merchantConfig(): MerchantConfig {
     webhookSecret: process.env.MERCHANTPAYD_WEBHOOK_SECRET?.trim() || "",
     method: process.env.MERCHANTPAYD_PAYMENT_METHOD?.trim() || "cash-app-v4",
     enabled: process.env.MERCHANTPAYD_ENABLED === "true",
+    banking: {
+      apiKey: process.env.MERCHANTPAYD_BANKING_API_KEY?.trim() || "",
+      apiSecret: process.env.MERCHANTPAYD_BANKING_API_SECRET?.trim() || "",
+    },
+    bankingWebhookSecret: process.env.MERCHANTPAYD_BANKING_WEBHOOK_SECRET?.trim() || "",
   };
 }
 export class MerchantApiError extends Error {
@@ -59,13 +64,14 @@ export function verifyPaymentAmount(payment: MerchantPayment, expectedMinor: num
 }
 
 export function merchantClient(config: MerchantConfig, transport: typeof fetch = fetch) {
-  async function request(path: string, body?: unknown) {
-    if (!config.apiKey || !config.apiSecret || new URL(config.baseUrl).protocol !== "https:") throw new MerchantApiError("RebohromePayment is not configured.",503);
+  async function request(path: string, method: MerchantMethodCode, body?: unknown) {
+    const credentials = method === 'banking' ? config.banking : config;
+    if (!credentials?.apiKey || !credentials.apiSecret || new URL(config.baseUrl).protocol !== "https:") throw new MerchantApiError(`${MERCHANTPAYD_METHODS[method]} is not configured in RebohromePayment.`,503);
     let response: Response;
     try {
       response = await transport(`${config.baseUrl}${path}`, {
         method: body ? "POST" : "GET", redirect:"error", cache:"no-store",
-        headers:{"X-API-Key":config.apiKey,"X-API-Secret":config.apiSecret,"Content-Type":"application/json"},
+        headers:{"X-API-Key":credentials.apiKey,"X-API-Secret":credentials.apiSecret,"Content-Type":"application/json"},
         body:body ? JSON.stringify(body) : undefined, signal:AbortSignal.timeout(15_000),
       });
     } catch { throw new MerchantApiError("Payment provider did not return a confirmed result.",502,Boolean(body)); }
@@ -95,7 +101,7 @@ export function merchantClient(config: MerchantConfig, transport: typeof fetch =
   return {
     async create(input:{amountMinor:number;email:string;title:string;description:string;intentId:string;paymentMethod?:MerchantMethodCode}) {
       const method=merchantMethodCode(input.paymentMethod ?? config.method);
-      const result = await request("/api/v1/payment/create",{
+      const result = await request("/api/v1/payment/create",method,{
         title:input.title,description:input.description,amount:input.amountMinor / 100,currency:"USD",
         payment_method:method,customer_details:{email:input.email},is_price_dynamic:false,
         metadata:{intent_id:input.intentId},
@@ -105,6 +111,6 @@ export function merchantClient(config: MerchantConfig, transport: typeof fetch =
       catch { throw new MerchantApiError("Payment link does not match the requested payment.",502,true); }
       return result;
     },
-    status(id:string) { if (!z.string().uuid().safeParse(id).success) throw new Error("Invalid payment link id."); return request(`/api/v1/payment/status/${encodeURIComponent(id)}`); },
+    status(id:string,method:MerchantMethodCode=merchantMethodCode(config.method)) { if (!z.string().uuid().safeParse(id).success) throw new Error("Invalid payment link id."); return request(`/api/v1/payment/status/${encodeURIComponent(id)}`,method); },
   };
 }
