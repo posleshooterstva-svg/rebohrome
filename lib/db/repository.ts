@@ -252,6 +252,10 @@ export async function initializeMerchantRecords(tx:LibsqlTransaction,intent:impo
     args:[intent.transaction_id,intent.user_id,intent.kind,intent.kind==='deposit'?amount:-amount,originalAmount,terms.currency,methodLabel,intent.reference_id,JSON.stringify({provider:'RebohromePayment',paymentIntentId:intent.id,paymentTerms:terms}),timestamp,timestamp]});
 }
 
+export async function closeMerchantRecords(tx:LibsqlTransaction,intent:import('@libsql/client').Row) {
+  if(intent.kind==='purchase')await releaseRandomizedPackReservations(tx,{orderId:String(intent.reference_id),reason:'payment_session_closed',releasedAt:nowIso()});
+}
+
 export async function fulfillMerchantOrder(tx:LibsqlTransaction,intent:import("@libsql/client").Row) {
   const timestamp=nowIso();
   const order=(await tx.execute({sql:"select * from orders where id=? and user_id=?",args:[intent.reference_id,intent.user_id]})).rows[0];
@@ -10935,11 +10939,20 @@ export async function getActivePaymentSession(
   const now = nowIso();
   const activeStatuses = ["created", "pending", "attempting", "processing"];
   const results: ActivePaymentSessionRecord[] = [];
+  const intent=await queryOne(`select * from payment_intents where user_id=? and closed_at is null
+    and status in ('initializing','creation_unknown','pending','attempting','processing','paid_unfulfilled','manual_review')
+    ${type?'and kind=?':''} order by created_at desc limit 1`,type?[userId,type]:[userId]);
+  if(intent){
+    const terms=savedPaymentTerms(JSON.parse(String(intent.snapshot_json)),Number(intent.amount_minor));
+    results.push({id:String(intent.id),type:intent.kind as 'deposit'|'purchase',provider:'RebohromePayment',transactionId:String(intent.transaction_id),providerTransactionId:intent.provider_transaction_id?String(intent.provider_transaction_id):null,paymentUrl:`/payment/merchantpayd?session=${encodeURIComponent(String(intent.id))}`,amount:terms.amountMinor/100,currency:terms.currency,status:String(intent.status),createdAt:String(intent.created_at),updatedAt:String(intent.updated_at),expiresAt:''});
+  }
+
 
   if (!type || type === "purchase") {
     const row = await queryOne(
       `select * from payment_sessions
        where user_id = ?
+         and coalesce(provider_key,'') <> 'merchantpayd'
          and status in (${activeStatuses.map(() => "?").join(", ")})
          and expires_at > ?
        order by created_at desc
@@ -10955,6 +10968,7 @@ export async function getActivePaymentSession(
     const row = await queryOne(
       `select * from deposit_payment_sessions
        where user_id = ?
+         and coalesce(provider_key,'') <> 'merchantpayd'
          and status in (${activeStatuses.map(() => "?").join(", ")})
          and expires_at > ?
        order by created_at desc
@@ -11499,6 +11513,12 @@ export async function checkActivePaymentSessionStatus(input: {
   sessionId?: string;
 }) {
   const current = await getPaymentSessionTransaction(input);
+  if(current.session?.provider==='RebohromePayment'||current.session?.provider==='MerchantPayd'){
+    const {merchantStatus}=await import('@/lib/server/payments/merchantpayd-service');
+    const payment=await merchantStatus(current.session.id,input.userId);
+    if(payment)return {ok:true,sessionId:payment.id,status:payment.status,transactionStatus:payment.status,depositStatus:payment.kind==='deposit'?payment.status:null,kind:payment.kind,amount:payment.amount,currency:payment.currency,provider:'RebohromePayment',lastCheckedAt:nowIso(),balanceCredited:payment.kind==='deposit'&&payment.status==='completed',availableBalance:(await getBalanceByUserId(input.userId))?.available??null,message:payment.closedAt?'Payment session closed. Any late payment will still be checked.':payment.message||'Payment status refreshed.',final:Boolean(payment.closedAt)||payment.status==='completed'};
+  }
+
   const transaction = await maybeRefreshTransVoucherTransactionStatus({
     transaction: current.transaction,
     userId: input.userId,
@@ -11529,6 +11549,12 @@ export async function cancelActivePaymentSession(input: {
   );
   if (!row) {
     throw new Error("Payment session not found.");
+  }
+  if(row.provider_key==='merchantpayd'){
+    const {closeMerchantPayment}=await import('@/lib/server/payments/merchantpayd-service');
+    const result=await closeMerchantPayment(input.userId,input.sessionId,input.type);
+    revalidatePrivate(input.userId);
+    return result;
   }
   const status = String(row.status);
   if (!["created", "pending", "attempting", "processing"].includes(status)) {

@@ -2,7 +2,7 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { getDbClient } from "@/lib/db/client";
 import { getUserById, getUserPaymentGateAccess, requireDocumentAcceptanceForUser, userHasKycAccess,
-  getMaintenanceModeConfig, prepareMerchantOrder, initializeMerchantRecords, fulfillMerchantOrder } from "@/lib/db/repository";
+  getMaintenanceModeConfig, prepareMerchantOrder, initializeMerchantRecords, fulfillMerchantOrder, closeMerchantRecords } from "@/lib/db/repository";
 import { merchantClient, merchantConfig } from "@/lib/payments/merchantpayd-client";
 import { paymentEngine } from "@/lib/payments/merchantpayd-engine";
 import { minorUnits } from "@/lib/payments/money";
@@ -13,8 +13,17 @@ import { MERCHANTPAYD_METHODS, savedMerchantMethod, type MerchantMethodCode } fr
 
 export function getMerchantEngine() {
   return paymentEngine(getDbClient(),merchantClient(merchantConfig()),{
-    initialize:initializeMerchantRecords,fulfill:fulfillMerchantOrder,
+    initialize:initializeMerchantRecords,fulfill:fulfillMerchantOrder,close:closeMerchantRecords,
   });
+}
+
+export async function closeMerchantPayment(userId:string,id:string,kind:'deposit'|'purchase') {
+  const engine=getMerchantEngine();const intent=await engine.get(id,userId);
+  if(!intent||intent.kind!==kind)throw new Error('Payment session not found.');
+  if(!intent.closed_at&&intent.payment_link_id){
+    if(!await engine.reconcile(id))throw new Error('Unable to verify payment status. Please try closing the session again shortly.');
+  }
+  return engine.close(id,userId,kind);
 }
 export async function createMerchantPayment(input:{userId:string;kind:"purchase"|"deposit";key:string;amount?:number;paymentMethod?:MerchantMethodCode;currency?:'USD'|'EUR';eurUsdRate?:number;items?:Array<{productId:string;quantity:number;deliveryType:DeliveryType}>}) {
   if (!merchantConfig().enabled) throw new Error("Payments are temporarily unavailable.");
@@ -53,7 +62,7 @@ export async function merchantStatus(id:string,userId:string,refresh=true) {
   const method=savedMerchantMethod(JSON.parse(String(intent.snapshot_json)));
   const terms=savedPaymentTerms(JSON.parse(String(intent.snapshot_json)),Number(intent.amount_minor));
   return {id:String(intent.id),requestKey:String(intent.idempotency_key),paymentMethod:MERCHANTPAYD_METHODS[method],kind:String(intent.kind),status:String(intent.status),amount:terms.amountMinor/100,currency:terms.currency,usdAmount:terms.usdAmountMinor/100,eurUsdRate:terms.eurUsdRate,
-    paymentUrl:intent.payment_url?String(intent.payment_url):null,reviewRequired:Boolean(intent.review_required),
+    paymentUrl:intent.payment_url?String(intent.payment_url):null,closedAt:intent.closed_at?String(intent.closed_at):null,canClose:!intent.closed_at&&!intent.provider_transaction_id&&!intent.review_required&&['pending','failed','expired'].includes(String(intent.status)),reviewRequired:Boolean(intent.review_required),
     message:intent.last_error?String(intent.last_error):null,
     resultUrl:intent.status==='completed'?(intent.kind==='deposit'?`/dashboard/deposit?receipt=${encodeURIComponent(String(intent.reference_id))}`:`/success?order=${encodeURIComponent(String(intent.reference_id))}`):null};
 }

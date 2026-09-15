@@ -17,7 +17,7 @@ async function fixture(){
  await db.batch([...PAYMENT_SCHEMA,
  `create table balances(user_id text primary key,available real,total_deposited real,total_spent real,updated_at text)`,
  `create table deposits(id text primary key,status text,balance_after real,completed_at text,paid_at text,updated_at text,provider_payment_link_id text,provider_transaction_id text)`,
- ...['payment_sessions','deposit_payment_sessions'].map(t=>`create table ${t}(id text primary key,status text,payment_url text,provider_status text,provider_payment_link_id text,provider_transaction_id text,updated_at text,balance_credited_at text)`),
+ ...['payment_sessions','deposit_payment_sessions'].map(t=>`create table ${t}(id text primary key,user_id text,status text,payment_url text,provider_status text,provider_payment_link_id text,provider_transaction_id text,updated_at text,balance_credited_at text)`),
  `create table transactions(id text primary key,status text,provider_status text,provider_payment_link_id text,provider_transaction_id text,paid_at text,processed_at text,credited_at text,summary text,updated_at text)`,
  `create table orders(id text primary key,user_id text,payment_state text,paid_at text,updated_at text)`,
  `create table test_inventory(order_id text primary key,quantity integer)`,
@@ -27,7 +27,7 @@ async function fixture(){
  const gateway:PaymentGateway={async create(input){creates++;if(rejectCreate)throw new MerchantApiError('Bank Transfer is not enabled for this project by RebohromePayment.',422);if(failCreate)throw new MerchantApiError('timeout',502,true);return payment({status:'pending',transaction_id:null,payment_method:{type:input.paymentMethod||'cash-app-v4'}});},async status(_id,method){statusMethod=method;return current;}};
  const adapters:PaymentAdapters={async initialize(tx,i){
   await tx.execute({sql:'insert into transactions(id,status) values(?,?)',args:[i.transaction_id,'pending']});
-  await tx.execute({sql:`insert into ${i.kind==='deposit'?'deposit_payment_sessions':'payment_sessions'}(id,status) values(?,'pending')`,args:[i.id]});
+  await tx.execute({sql:`insert into ${i.kind==='deposit'?'deposit_payment_sessions':'payment_sessions'}(id,user_id,status) values(?,?,'pending')`,args:[i.id,i.user_id]});
   await tx.execute({sql:i.kind==='deposit'?'insert into deposits(id,status) values(?,?)':'insert into orders(id,payment_state) values(?,?)',args:[i.reference_id,'pending']});
  },async fulfill(tx,i){await tx.execute({sql:'insert into test_inventory values(?,1)',args:[i.reference_id]});if(failFulfill)throw new Error('Out of stock');await tx.execute({sql:"update orders set payment_state='completed' where id=?",args:[i.reference_id]});}};
  const engine=paymentEngine(db,gateway,adapters);
@@ -158,6 +158,47 @@ test('parallel duplicate settlement and later failed events credit exactly once'
 test('different keys cannot create parallel active payments; same key with changed request conflicts',async()=>{const f=await fixture();try{
  const key=randomUUID();await f.create('deposit',key);await f.create('deposit',key);assert.equal(f.creates,1);
  await assert.rejects(f.create('deposit',key,'different'),PaymentConflict);await assert.rejects(f.create(),PaymentConflict);
+}finally{await f.close();}});
+
+test('closing is owned, persistent, and preserves late settlement without reopening the old session',async()=>{const f=await fixture();try{
+ const key=randomUUID();const {intent}=await f.create('deposit',key);
+ await assert.rejects(f.engine.close(String(intent.id),'other-user','deposit'),/not found/);
+ await assert.rejects(f.engine.close(String(intent.id),'user','purchase'),/not found/);
+ assert.equal((await f.engine.get(String(intent.id)))?.closed_at,null);
+ const result=await f.engine.close(String(intent.id),'user','deposit');assert.equal(result.requestKey,key);
+ await f.engine.close(String(intent.id),'user','deposit');
+ assert((await f.engine.get(String(intent.id)))?.closed_at);
+ assert.equal(await scalar(f.db,'select status from deposit_payment_sessions'),'expired');
+ await assert.rejects(f.create('deposit',key),/session was closed/);
+ await f.engine.apply(String(intent.id),payment({status:'pending',transaction_id:null}));
+ assert.equal(await scalar(f.db,'select status from deposit_payment_sessions'),'expired');
+ // A new request is allowed; use a distinct provider link as a real create does.
+ const second=paymentEngine(f.db,{create:async()=>payment({payment_link_id:randomUUID(),status:'pending',transaction_id:null}),status:async()=>payment()},{initialize:async()=>{},fulfill:async()=>{}});
+ const next=await second.create({userId:'user',kind:'deposit',key:randomUUID(),fingerprint:'new',amountMinor:10000,snapshot:{}},{email:'buyer@example.test',title:'Test',description:'Test'});
+ assert.equal(next.intent.status,'pending');
+ await f.engine.apply(String(intent.id),payment());await f.engine.apply(String(intent.id),payment());
+ assert.equal(await scalar(f.db,'select available from balances'),150);
+ assert.equal(await scalar(f.db,'select count(*) from financial_entries'),1);
+ assert.equal((await f.engine.get(String(next.intent.id)))?.status,'pending');
+}finally{await f.close();}});
+
+test('processing, paid-unfulfilled and creation-unknown payments cannot be closed to bypass the payment lock',async()=>{
+ for(const state of ['processing','paid_unfulfilled','creation_unknown']){const f=await fixture();try{
+  const {intent}=await f.create();await f.db.execute({sql:'update payment_intents set status=? where id=?',args:[state,intent.id]});
+  await assert.rejects(f.engine.close(String(intent.id),'user','deposit'),PaymentConflict);
+  assert.equal((await f.engine.get(String(intent.id)))?.closed_at,null);await assert.rejects(f.create(),PaymentConflict);
+ }finally{await f.close();}}
+});
+
+test('expired provider responses parse, stop blocking a new payment and remain eligible for late settlement',async()=>{const f=await fixture();try{
+ const client=merchantClient({baseUrl:'https://api.example',apiKey:'test',apiSecret:'test',webhookSecret:'test',method:'cash-app-v4',enabled:true},async()=>Response.json({success:true,data:payment({status:'expired',transaction_id:null})}));
+ const expired=await client.status(link);assert.equal(expired.status,'expired');
+ const {intent}=await f.create();await f.engine.apply(String(intent.id),expired);
+ assert.equal((await f.engine.get(String(intent.id)))?.status,'expired');
+ assert.equal(await scalar(f.db,'select available from balances'),50);
+ await f.engine.close(String(intent.id),'user','deposit');
+ f.setPayment(payment());await f.db.execute({sql:'update payment_intents set next_check_at=null where id=?',args:[intent.id]});await f.engine.sweep();
+ assert.equal(await scalar(f.db,'select available from balances'),150);
 }finally{await f.close();}});
 test('ambiguous creation is persisted and never automatically repeated',async()=>{const f=await fixture();try{
  f.failCreate();const key=randomUUID();const first=await f.create('deposit',key);assert.equal(first.intent.status,'creation_unknown');await f.create('deposit',key);assert.equal(f.creates,1);await assert.rejects(f.create(),PaymentConflict);

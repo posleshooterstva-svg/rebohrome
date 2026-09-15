@@ -10,6 +10,7 @@ export type PaymentGateway = {create(input:{amountMinor:number;email:string;titl
 export type PaymentAdapters = {
   initialize:(tx:Transaction,intent:Row)=>Promise<void>;
   fulfill:(tx:Transaction,intent:Row)=>Promise<void>;
+  close?:(tx:Transaction,intent:Row)=>Promise<void>;
 };
 const now=()=>new Date().toISOString();
 const later=(ms:number)=>new Date(Date.now()+ms).toISOString();
@@ -50,6 +51,7 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
       const old=(await tx.execute({sql:"select * from payment_intents where user_id=? and idempotency_key=?",args:[input.userId,input.key]})).rows[0];
       if (old) {
         if (old.request_hash!==input.fingerprint || old.kind!==input.kind || savedMerchantMethod(JSON.parse(String(old.snapshot_json)))!==method) throw new PaymentConflict("This request key belongs to a different payment.");
+        if (old.closed_at) throw new MerchantApiError('This payment session was closed. Please try again to create a new payment.',422);
         if (old.status==='failed' && !old.payment_link_id) throw new MerchantApiError(String(old.last_error || 'RebohromePayment rejected payment creation.'),422);
         await tx.commit(); return {intent:old,reused:true};
       }
@@ -76,6 +78,24 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
       if (definitive) throw e;
     }
     return {intent:(await get(String(intent.id)))!,reused:false};
+  }
+
+  async function close(id:string,userId:string,kind:'deposit'|'purchase') {
+    const tx=await db.transaction('write');
+    try {
+      const intent=(await tx.execute({sql:'select * from payment_intents where id=? and user_id=? and kind=?',args:[id,userId,kind]})).rows[0];
+      if(!intent)throw new Error('Payment session not found.');
+      if(!intent.closed_at){
+        if(intent.provider_transaction_id||intent.review_required||!['pending','failed','expired'].includes(String(intent.status)))throw new PaymentConflict('Payment is being processed or requires review. Check its status before starting another payment.');
+        const timestamp=now();
+        await tx.execute({sql:'update payment_intents set closed_at=?,updated_at=? where id=?',args:[timestamp,timestamp,id]});
+        const table=kind==='deposit'?'deposit_payment_sessions':'payment_sessions';
+        await tx.execute({sql:`update ${table} set status='expired',updated_at=? where id=? and user_id=?`,args:[timestamp,id,userId]});
+        await adapters.close?.(tx,intent);
+      }
+      await tx.commit();
+      return {ok:true,requestKey:String(intent.idempotency_key),message:'Payment session closed. Do not pay the old link. Any late payment will still be checked.'};
+    }catch(error){await tx.rollback();throw error;}finally{tx.close();}
   }
 
   async function complete(id:string) {
@@ -135,7 +155,7 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
       await tx.execute({sql:`update payment_intents set status=?,provider_transaction_id=case when ?=1 then ? else provider_transaction_id end,
         provider_json=?,checked_at=?,next_check_at=?,review_required=case when ?=1 then 1 else review_required end,updated_at=? where id=?`,args:[status,paid?1:0,providerId??null,JSON.stringify(payment),now(),later(age>86400_000?86400_000:300_000),!paid&&age>86400_000?1:0,now(),id]});
       const table=intent.kind==='deposit'?'deposit_payment_sessions':'payment_sessions';
-      await tx.execute({sql:`update ${table} set status=?,provider_status=?,updated_at=? where id=? and status<>'completed'`,args:[status,payment.status,now(),intent.session_id]});
+      await tx.execute({sql:`update ${table} set status=?,provider_status=?,updated_at=? where id=? and status<>'completed'`,args:[intent.closed_at&&!paid?'expired':status,payment.status,now(),intent.session_id]});
       if (paid && intent.kind==='purchase') await tx.execute({sql:"update orders set payment_state='paid_unfulfilled',paid_at=coalesce(paid_at,?),updated_at=? where id=? and payment_state<>'completed'",args:[payment.paid_at||now(),now(),intent.reference_id]});
       await tx.commit();
     } catch(e) {await tx.rollback();await review(id,e instanceof Error?e.message:'Payment conflict.');return;} finally {tx.close();}
@@ -193,5 +213,5 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
     for (const row of rows) await reconcile(String(row.id));
     return {checked:rows.length};
   }
-  return {create:localOperation(db,create),get,apply:localOperation(db,apply),reconcile:localOperation(db,reconcile),receive:localOperation(db,receive),drain:localOperation(db,drain),sweep:localOperation(db,sweep)};
+  return {create:localOperation(db,create),close:localOperation(db,close),get,apply:localOperation(db,apply),reconcile:localOperation(db,reconcile),receive:localOperation(db,receive),drain:localOperation(db,drain),sweep:localOperation(db,sweep)};
 }

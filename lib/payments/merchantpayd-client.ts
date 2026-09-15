@@ -9,7 +9,7 @@ const optionalAmount = amount.nullish();
 const paymentSchema = z.object({
   id: z.string().uuid().optional(), payment_link_id: z.string().uuid(),
   transaction_id: z.string().min(1).nullish(),
-  status: z.enum(["pending", "attempting", "processing", "completed", "failed"]),
+  status: z.enum(["pending", "attempting", "processing", "completed", "failed", "expired"]),
   fiat_base_amount: amount, fiat_total_amount: amount, fiat_currency: z.string().min(3),
   original_amount: optionalAmount, original_currency: z.string().nullish(), exchange_rate: optionalAmount,
   settled_amount: optionalAmount, paid_at: z.string().nullish(),

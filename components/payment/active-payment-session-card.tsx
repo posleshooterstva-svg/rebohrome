@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { completePaymentRequest } from "@/lib/payments/request-key";
 import { useRouter } from "next/navigation";
 import { AlertCircle, ExternalLink, RefreshCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -138,7 +139,9 @@ export function ActivePaymentSessionCard({
       if (!response.ok) {
         throw new Error(payload.error || "Unable to cancel payment session.");
       }
-      setMessage("Payment session canceled. You can create a new payment now.");
+      if(payload.requestKey)completePaymentRequest(payload.requestKey);
+      setIsFinal(true);
+      setMessage(payload.message || "Payment session canceled. You can create a new payment now.");
       router.refresh();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to cancel payment session.");
@@ -224,14 +227,14 @@ export function ActivePaymentSessionCard({
             {busyAction === "check" ? "Checking..." : "Check status"}
           </Button>
           <Button
-            disabled={busyAction !== null}
+            disabled={busyAction !== null || isFinal || (session.provider === 'RebohromePayment' && !['pending','failed','expired'].includes(liveStatus))}
             onClick={cancelSession}
             size="sm"
             type="button"
             variant="destructive"
           >
             <XCircle className="size-4" />
-            {busyAction === "cancel" ? "Canceling..." : "Cancel session"}
+            {busyAction === "cancel" ? "Closing..." : "Close session"}
           </Button>
         </div>
       </div>
