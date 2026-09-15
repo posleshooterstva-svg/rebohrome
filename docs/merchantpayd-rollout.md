@@ -22,7 +22,7 @@ Production migrations `merchantpayd-v1` and `legacy-columns-v1` were applied on 
 
 ## Release gate and rollback
 
-The production flag stays **false** until the outstanding acceptance work in the diagnostic register is complete. Deploying this code does not enable external payments. Disable creation with the same flag during rollback; preserve webhook and reconciliation processing for existing links. Never roll back by removing financial entries or replaying historical credits.
+On 2026-09-15, the owner explicitly authorized production activation of Cash App and Bank Transfer. `MERCHANTPAYD_ENABLED=true` is configured in Vercel production. Credit Card, Apple Pay and Google Pay remain disabled. This activation does not declare the outstanding audit/acceptance work complete. Disable creation with the same flag during rollback; preserve webhook and reconciliation processing for existing links. Never roll back by removing financial entries or replaying historical credits.
 
 Verification commands: `npm run test:payments`, `npm run test:randomized-packs`, `npm run test:coinflow-country`, `npm run typecheck`, `npm run build`. All application checks must use an isolated database and empty external service credentials. No smart-contract work or real payment creation is part of these tests.
 
