@@ -579,8 +579,7 @@ export function DepositPageClient({
             ))}
           </div>
           <p className="mt-4 text-sm text-muted">
-            Gate #2 supports USD payments only. EUR remains available only for
-            gates that explicitly support it.
+            New payments are processed in USD.
           </p>
         </div>
 
