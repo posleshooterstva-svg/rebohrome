@@ -1,3 +1,4 @@
+import { savedPaymentTerms, convertMinor } from "@/lib/payments/payment-terms";
 import { MERCHANTPAYD_METHODS, savedMerchantMethod } from "@/lib/payments/merchantpayd-methods";
 import { currentTransaction, withDbTransaction, deferUntilCommit } from "@/lib/db/unit-of-work";
 import { minorUnits } from "@/lib/payments/money";
@@ -211,17 +212,20 @@ export async function initializeMerchantRecords(tx:LibsqlTransaction,intent:impo
   const snapshot=JSON.parse(String(intent.snapshot_json)) as MerchantSnapshot;
   const amount=Number(intent.amount_minor)/100,timestamp=String(intent.created_at);
   const methodLabel=MERCHANTPAYD_METHODS[savedMerchantMethod(snapshot)];
+  const terms=savedPaymentTerms(snapshot,Number(intent.amount_minor));
+  const originalAmount=terms.amountMinor/100;
+  const exchangeRate=terms.currency==='EUR'?terms.eurUsdRate:1;
   const balance=(await tx.execute({sql:"select available from balances where user_id=?",args:[intent.user_id]})).rows[0];
   if (!balance) throw new Error("Balance account not found.");
   if (intent.kind==='deposit') {
     await tx.execute({sql:`insert into deposits(id,user_id,amount,original_amount,original_currency,credited_amount_usd,
       exchange_rate,payment_method,payment_provider,cardholder_name,card_masked,status,balance_before,balance_after,created_at,updated_at)
-      values(?,?,?,?,'USD',?,1,?,'RebohromePayment',?,'','processing',?,?,?,?)`,
-      args:[intent.reference_id,intent.user_id,amount,amount,amount,methodLabel,snapshot.user.name,balance.available,balance.available,timestamp,timestamp]});
+      values(?,?,?,?,?,?,?,?,'RebohromePayment',?,'','processing',?,?,?,?)`,
+      args:[intent.reference_id,intent.user_id,amount,originalAmount,terms.currency,amount,exchangeRate,methodLabel,snapshot.user.name,balance.available,balance.available,timestamp,timestamp]});
     await tx.execute({sql:`insert into deposit_payment_sessions(id,user_id,payment_method,payment_provider,currency,original_amount,
       credited_amount_usd,exchange_rate,status,deposit_id,transaction_id,provider_key,created_at,updated_at,expires_at)
-      values(?,?,?,'RebohromePayment','USD',?,?,1,'attempting',?,?,'merchantpayd',?,?,?)`,
-      args:[intent.id,intent.user_id,methodLabel,amount,amount,intent.reference_id,intent.transaction_id,timestamp,timestamp,new Date(Date.now()+86400_000).toISOString()]});
+      values(?,?,?,'RebohromePayment',?,?,?,?,'attempting',?,?,'merchantpayd',?,?,?)`,
+      args:[intent.id,intent.user_id,methodLabel,terms.currency,originalAmount,amount,exchangeRate,intent.reference_id,intent.transaction_id,timestamp,timestamp,new Date(Date.now()+86400_000).toISOString()]});
   } else {
     if (!snapshot.order) throw new Error("Order snapshot missing.");
     await tx.execute({sql:`insert into orders(id,user_id,status,payment_state,subtotal,shipping,total,currency,shipping_name,shipping_email,
@@ -239,13 +243,13 @@ export async function initializeMerchantRecords(tx:LibsqlTransaction,intent:impo
     await reserveRandomizedOrderItemsInTransaction(tx,{orderId:String(intent.reference_id),userId:String(intent.user_id),expiresAt:new Date(Date.now()+30*60_000).toISOString()});
     await tx.execute({sql:`insert into payment_sessions(id,user_id,payment_method,payment_provider,currency,subtotal,shipping,total,status,
       items_json,order_id,transaction_id,provider_key,created_at,updated_at,expires_at)
-      values(?,?,?,'RebohromePayment','USD',?,?,?,'attempting',?,?,?,'merchantpayd',?,?,?)`,
-      args:[intent.id,intent.user_id,methodLabel,snapshot.order.subtotal,snapshot.order.shipping,amount,JSON.stringify(snapshot.order.items.map(({product: _product,...line})=>line)),intent.reference_id,intent.transaction_id,timestamp,timestamp,new Date(Date.now()+86400_000).toISOString()]});
+      values(?,?,?,'RebohromePayment',?,?,?,?,'attempting',?,?,?,'merchantpayd',?,?,?)`,
+      args:[intent.id,intent.user_id,methodLabel,terms.currency,terms.currency==='EUR'?convertMinor(minorUnits(snapshot.order.subtotal),exchangeRate,'toEur')/100:snapshot.order.subtotal,terms.currency==='EUR'?(terms.amountMinor-convertMinor(minorUnits(snapshot.order.subtotal),exchangeRate,'toEur'))/100:snapshot.order.shipping,originalAmount,JSON.stringify(snapshot.order.items.map(({product: _product,...line})=>line)),intent.reference_id,intent.transaction_id,timestamp,timestamp,new Date(Date.now()+86400_000).toISOString()]});
   }
   await tx.execute({sql:`insert into transactions(id,user_id,kind,amount,original_amount,original_currency,display_currency,
     payment_method,payment_provider,status,reference_id,summary,meta_json,created_at,updated_at)
-    values(?,?,?,?,?,'USD','USD',?,'RebohromePayment','attempting',?,'Awaiting payment',?,?,?)`,
-    args:[intent.transaction_id,intent.user_id,intent.kind,intent.kind==='deposit'?amount:-amount,amount,methodLabel,intent.reference_id,JSON.stringify({provider:'RebohromePayment',paymentIntentId:intent.id}),timestamp,timestamp]});
+    values(?,?,?,?,?,?,'USD',?,'RebohromePayment','attempting',?,'Awaiting payment',?,?,?)`,
+    args:[intent.transaction_id,intent.user_id,intent.kind,intent.kind==='deposit'?amount:-amount,originalAmount,terms.currency,methodLabel,intent.reference_id,JSON.stringify({provider:'RebohromePayment',paymentIntentId:intent.id,paymentTerms:terms}),timestamp,timestamp]});
 }
 
 export async function fulfillMerchantOrder(tx:LibsqlTransaction,intent:import("@libsql/client").Row) {
@@ -2144,7 +2148,7 @@ function normalizePaymentGateAccess(row: DbRow): PaymentGateAccessRecord {
   }
   if (
     !["cleffo", "wert", "coinflow"].includes(String(row.provider_key)) &&
-    Number(row.supports_eur ?? 0) === 1
+    (Number(row.supports_eur ?? 0) === 1 || row.provider_key === "merchantpayd")
   ) {
     supportsCurrencies.push("EUR");
   }

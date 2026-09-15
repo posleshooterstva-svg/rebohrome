@@ -1,3 +1,4 @@
+import { paymentTerms, savedPaymentTerms, convertMinor } from '../lib/payments/payment-terms.ts';
 import test from 'node:test';
 import {merchantMethodCode,MERCHANTPAYD_METHODS,type MerchantMethodCode} from '../lib/payments/merchantpayd-methods.ts';
 import assert from 'node:assert/strict';
@@ -30,7 +31,7 @@ async function fixture(){
   await tx.execute({sql:i.kind==='deposit'?'insert into deposits(id,status) values(?,?)':'insert into orders(id,payment_state) values(?,?)',args:[i.reference_id,'pending']});
  },async fulfill(tx,i){await tx.execute({sql:'insert into test_inventory values(?,1)',args:[i.reference_id]});if(failFulfill)throw new Error('Out of stock');await tx.execute({sql:"update orders set payment_state='completed' where id=?",args:[i.reference_id]});}};
  const engine=paymentEngine(db,gateway,adapters);
- async function create(kind:'purchase'|'deposit'='deposit',key=randomUUID(),fingerprint='same',paymentMethod:MerchantMethodCode='cash-app-v4') {return engine.create({userId:'user',kind,key,fingerprint,amountMinor:10000,snapshot:{},paymentMethod},{email:'buyer@example.test',title:'Test',description:'Test payment'});}
+ async function create(kind:'purchase'|'deposit'='deposit',key=randomUUID(),fingerprint='same',paymentMethod:MerchantMethodCode='cash-app-v4') {return engine.create({userId:'user',kind,key,fingerprint,amountMinor:10000,snapshot:{paymentTerms:paymentTerms(paymentMethod,kind,10000,1)},paymentMethod},{email:'buyer@example.test',title:'Test',description:'Test payment'});}
  return {db,engine,create,get creates(){return creates;},get statusMethod(){return statusMethod;},setPayment(p:MerchantPayment){current=p;},failCreate(){failCreate=true;},rejectCreate(){rejectCreate=true;},enableCreate(){rejectCreate=false;},failFulfill(){failFulfill=true;},recover(){failFulfill=false;},async close(){db.close();await rm(dir,{recursive:true,force:true,maxRetries:0}).catch(error=>{if(error.code!=='EBUSY')throw error;});}};
 }
 async function scalar(db:Client,sql:string){return Object.values((await db.execute(sql)).rows[0])[0];}
@@ -38,6 +39,35 @@ test('webhook HMAC uses exact raw bytes and requires configured secret',()=>{
  const raw=Buffer.from('{"event":"payment.settled"}');const signature='sha256='+createHmac('sha256','test').update(raw).digest('hex');
  assert(verifyMerchantSignature(raw,signature,'test'));assert(!verifyMerchantSignature(Buffer.concat([raw,Buffer.from(' ')]),signature,'test'));assert(!verifyMerchantSignature(raw,signature,''));assert(!verifyMerchantSignature(raw,'sha256=00','test'));
 });
+
+test('EUR terms preserve USD accounting with exact cent rounding and legacy USD links',()=>{
+ assert.deepEqual(paymentTerms('banking','deposit',25000,1.08),{currency:'EUR',amountMinor:25000,usdAmountMinor:27000,eurUsdRate:1.08});
+ assert.deepEqual(paymentTerms('banking','purchase',27000,1.08),{currency:'EUR',amountMinor:25000,usdAmountMinor:27000,eurUsdRate:1.08});
+ assert.equal(convertMinor(1,1.5,'toUsd'),2);
+ assert.throws(()=>convertMinor(100,0,'toUsd'));
+ assert.equal(savedPaymentTerms({paymentMethod:'banking'},10000).currency,'USD');
+ assert.throws(()=>verifyPaymentAmount(payment({fiat_currency:'USD',payment_method:{type:'banking'}}),10000,'banking','EUR'));
+ assert.doesNotThrow(()=>verifyPaymentAmount(payment({fiat_currency:'EUR',payment_method:{type:'banking'}}),10000,'banking','EUR'));
+ assert.throws(()=>verifyPaymentAmount(payment({fiat_currency:'EUR',fiat_base_amount:1,original_currency:'EUR',original_amount:100,exchange_rate:1,payment_method:{type:'banking'}}),10000,'banking','EUR'));
+});
+
+test('banking links created before EUR restriction still reconcile their saved USD amount',async()=>{const f=await fixture();try{
+ const {intent}=await f.create('deposit',randomUUID(),'legacy','banking');
+ await f.db.execute({sql:'update payment_intents set snapshot_json=? where id=?',args:[JSON.stringify({paymentMethod:'banking'}),intent.id]});
+ await f.engine.apply(String(intent.id),payment({payment_method:{type:'banking'}}));
+ assert.equal((await f.engine.get(String(intent.id)))?.status,'completed');
+ assert.equal(await scalar(f.db,'select available from balances'),150);
+}finally{await f.close();}});
+
+test('EUR deposit verifies paid euros but credits the saved USD amount exactly once',async()=>{const f=await fixture();try{
+ const terms=paymentTerms('banking','deposit',25000,1.08);
+ const {intent}=await f.engine.create({userId:'user',kind:'deposit',key:randomUUID(),fingerprint:'eur-deposit',amountMinor:terms.usdAmountMinor,snapshot:{paymentTerms:terms},paymentMethod:'banking'},{email:'buyer@example.test',title:'Test',description:'Test'});
+ const settled=payment({fiat_currency:'EUR',fiat_base_amount:250,fiat_total_amount:255,payment_method:{type:'banking'}});
+ await f.engine.apply(String(intent.id),settled);await f.engine.apply(String(intent.id),settled);
+ assert.equal(await scalar(f.db,'select available from balances'),320);
+ assert.equal(await scalar(f.db,'select amount_minor from financial_entries'),27000);
+ assert.equal(await scalar(f.db,'select count(*) from financial_entries'),1);
+}finally{await f.close();}});
 test('public method names map to exact provider codes; retired methods reject',()=>{
  assert.equal(merchantMethodCode('Cash App'),'cash-app-v4');
  assert.equal(merchantMethodCode('Bank Transfer'),'banking');
@@ -48,10 +78,10 @@ test('Bank Transfer sends banking and accepts nullable classic-payment fields',a
  let sent:Record<string,unknown>={};
  const client=merchantClient({baseUrl:'https://api.example',apiKey:'test',apiSecret:'test',webhookSecret:'test',method:'cash-app-v4',enabled:true,banking:{apiKey:'bank-key-test',apiSecret:'bank-secret-test'}},async(_url,init)=>{
   sent=JSON.parse(String(init?.body));
-  return Response.json({success:true,data:payment({status:'pending',transaction_id:null,payment_method:{type:'banking',brand:null,card_last_four:null},blockchain_tx_hash:null,commodity:null,network:null})});
+  return Response.json({success:true,data:payment({status:'pending',transaction_id:null,fiat_currency:'EUR',payment_method:{type:'banking',brand:null,card_last_four:null},blockchain_tx_hash:null,commodity:null,network:null})});
  });
  await client.create({amountMinor:10000,email:'buyer@example.test',title:'Test',description:'Test',intentId:'local',paymentMethod:'banking'});
- assert.equal(sent.payment_method,'banking');assert.equal(sent.currency,'USD');
+ assert.equal(sent.payment_method,'banking');assert.equal(sent.currency,'EUR');
 });
 
 test('provider validation is actionable without exposing upstream diagnostics or retrying POST',async()=>{
@@ -75,7 +105,7 @@ test('each method uses its own credentials for creation and status; missing bank
  const client=merchantClient(config,async(url,init)=>{
   const headers=new Headers(init?.headers);calls.push({key:headers.get('X-API-Key'),secret:headers.get('X-API-Secret'),method:String(init?.method),url:String(url)});
   const method=headers.get('X-API-Key')==='bank-key'?'banking':'cash-app-v4';
-  return Response.json({success:true,data:payment({status:'pending',transaction_id:null,payment_method:{type:method}})});
+  return Response.json({success:true,data:payment({status:'pending',transaction_id:null,fiat_currency:method==='banking'?'EUR':'USD',payment_method:{type:method}})});
  });
  for(const method of ['cash-app-v4','banking'] as const){
   await client.create({amountMinor:10000,email:'buyer@example.test',title:'Test',description:'Test',intentId:'test',paymentMethod:method});
@@ -104,7 +134,7 @@ test('saved Bank Transfer method controls reconciliation and idempotency',async(
  await assert.rejects(f.create('deposit',key,'same','cash-app-v4'),PaymentConflict);
  await f.engine.apply(String(intent.id),payment());
  assert.equal(await scalar(f.db,'select available from balances'),50);
- const banking=payment({payment_method:{type:'banking',brand:null,card_last_four:null},blockchain_tx_hash:null});
+ const banking=payment({fiat_currency:'EUR',payment_method:{type:'banking',brand:null,card_last_four:null},blockchain_tx_hash:null});
  f.setPayment(banking);await f.engine.reconcile(String(intent.id));assert.equal(f.statusMethod,'banking');await f.engine.apply(String(intent.id),banking);
  assert.equal(await scalar(f.db,'select available from balances'),150);
  assert.equal(await scalar(f.db,'select count(*) from financial_entries'),1);

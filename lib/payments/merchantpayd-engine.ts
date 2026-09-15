@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Client, Transaction, Row } from "@libsql/client";
 import { MerchantApiError, verifyPaymentAmount, type MerchantPayment } from "./merchantpayd-client.ts";
 import { merchantMethodCode, savedMerchantMethod, type MerchantMethodCode } from './merchantpayd-methods.ts';
+import { savedPaymentTerms, methodCurrency } from './payment-terms.ts';
 
 export class PaymentConflict extends Error { httpStatus=409; }
 export type IntentInput = {userId:string;kind:"deposit"|"purchase";key:string;fingerprint:string;amountMinor:number;snapshot:unknown;paymentMethod?:MerchantMethodCode};
@@ -39,6 +40,8 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
     const method=merchantMethodCode(input.paymentMethod ?? 'cash-app-v4');
     if (!input.snapshot || typeof input.snapshot !== 'object' || Array.isArray(input.snapshot)) throw new Error('Payment snapshot required.');
     const snapshot={...input.snapshot,paymentMethod:method};
+    const terms=savedPaymentTerms(snapshot,input.amountMinor);
+    if(terms.currency!==methodCurrency(method))throw new Error('Payment terms do not match the selected method.');
     if (!/^[A-Za-z0-9_-]{16,128}$/.test(input.key)) throw new Error("A valid Idempotency-Key is required.");
     if (!Number.isSafeInteger(input.amountMinor) || input.amountMinor<=0) throw new Error("Invalid payment amount.");
     const tx=await db.transaction("write");
@@ -62,7 +65,7 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
       await tx.commit();
     } catch(e) {await tx.rollback();throw e;} finally {tx.close();}
     try {
-      const result=await gateway.create({...customer,amountMinor:input.amountMinor,intentId:String(intent.id),paymentMethod:method});
+      const result=await gateway.create({...customer,amountMinor:terms.amountMinor,intentId:String(intent.id),paymentMethod:method});
       // A returned completed status still goes through independent status reconciliation.
       await db.execute({sql:`update payment_intents set payment_link_id=?,payment_url=?,provider_json=?,status='pending',updated_at=? where id=?`,args:[result.payment_link_id,result.payment_url!,JSON.stringify(result),now(),intent.id]});
       const table=input.kind==='deposit'?'deposit_payment_sessions':'payment_sessions';
@@ -107,7 +110,10 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
   async function apply(id:string,payment:MerchantPayment,eventTransactionId?:string|null) {
     let intent=await get(id); if (!intent) return;
     if (intent.payment_link_id!==payment.payment_link_id) {await review(id,"Provider payment link mismatch.");return;}
-    try {verifyPaymentAmount(payment,Number(intent.amount_minor),savedMerchantMethod(JSON.parse(String(intent.snapshot_json))));} catch(e) {await review(id,e instanceof Error?e.message:'Amount mismatch.');return;}
+    try {
+      const snapshot=JSON.parse(String(intent.snapshot_json));const terms=savedPaymentTerms(snapshot,Number(intent.amount_minor));
+      verifyPaymentAmount(payment,terms.amountMinor,savedMerchantMethod(snapshot),terms.currency);
+    } catch(e) {await review(id,e instanceof Error?e.message:'Amount mismatch.');return;}
     const providerId=payment.transaction_id;
     if (payment.transaction_id && eventTransactionId && payment.transaction_id!==eventTransactionId) {await review(id,"Webhook and provider transaction disagree.");return;}
     if (payment.status==='completed' && !providerId) {await review(id,"Completed payment has no verified transaction id.");return;}

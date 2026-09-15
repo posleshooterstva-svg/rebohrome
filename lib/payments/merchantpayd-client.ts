@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { minorUnits } from "./money.ts";
 import { MERCHANTPAYD_METHODS, merchantMethodCode, type MerchantMethodCode } from './merchantpayd-methods.ts';
+import { methodCurrency } from './payment-terms.ts';
 
 const amount = z.union([z.number().finite().nonnegative(), z.string().regex(/^\d+(?:\.\d+)?$/)]);
 const optionalAmount = amount.nullish();
@@ -50,12 +51,13 @@ export function validatePaymentUrl(value: string) {
   return url.toString();
 }
 
-export function verifyPaymentAmount(payment: MerchantPayment, expectedMinor: number, expectedMethod: MerchantMethodCode = 'cash-app-v4') {
+export function verifyPaymentAmount(payment: MerchantPayment, expectedMinor: number, expectedMethod: MerchantMethodCode = 'cash-app-v4',expectedCurrency:'USD'|'EUR'='USD') {
+  if(expectedMethod==='banking'&&expectedCurrency==='EUR'&&(payment.fiat_currency!=='EUR'||minorUnits(payment.fiat_base_amount)!==expectedMinor))throw new Error('Bank Transfer amount must match the agreed EUR amount.');
   const converted = payment.original_currency != null || payment.original_amount != null;
   if (converted) {
-    if (payment.original_currency !== "USD" || minorUnits(payment.original_amount) !== expectedMinor || !payment.exchange_rate || Number(payment.exchange_rate) <= 0)
+    if (payment.original_currency !== expectedCurrency || minorUnits(payment.original_amount) !== expectedMinor || !payment.exchange_rate || Number(payment.exchange_rate) <= 0)
       throw new Error("Payment original amount/currency mismatch.");
-  } else if (payment.fiat_currency !== "USD" || minorUnits(payment.fiat_base_amount) !== expectedMinor) {
+  } else if (payment.fiat_currency !== expectedCurrency || minorUnits(payment.fiat_base_amount) !== expectedMinor) {
     throw new Error("Payment amount/currency mismatch.");
   }
   if (Number(payment.fiat_base_amount) <= 0 || Number(payment.fiat_total_amount) < Number(payment.fiat_base_amount))
@@ -101,13 +103,14 @@ export function merchantClient(config: MerchantConfig, transport: typeof fetch =
   return {
     async create(input:{amountMinor:number;email:string;title:string;description:string;intentId:string;paymentMethod?:MerchantMethodCode}) {
       const method=merchantMethodCode(input.paymentMethod ?? config.method);
+      const currency=methodCurrency(method);
       const result = await request("/api/v1/payment/create",method,{
-        title:input.title,description:input.description,amount:input.amountMinor / 100,currency:"USD",
+        title:input.title,description:input.description,amount:input.amountMinor / 100,currency,
         payment_method:method,customer_details:{email:input.email},is_price_dynamic:false,
         metadata:{intent_id:input.intentId},
       });
       if (!result.payment_url) throw new MerchantApiError("Missing checkout URL.",502,true);
-      try { validatePaymentUrl(result.payment_url); verifyPaymentAmount(result,input.amountMinor,method); }
+      try { validatePaymentUrl(result.payment_url); verifyPaymentAmount(result,input.amountMinor,method,currency); }
       catch { throw new MerchantApiError("Payment link does not match the requested payment.",502,true); }
       return result;
     },

@@ -1,4 +1,5 @@
 "use client";
+import { convertMinor } from "@/lib/payments/payment-terms";
 import { paymentRequestKey, completePaymentRequest } from "@/lib/payments/request-key";
 
 import { useEffect, useMemo, useState } from "react";
@@ -21,6 +22,7 @@ import {
 
 type DepositPageClientProps = {
   userId: string;
+  eurUsdRate: number;
   initialOutcome: {
     deposit: DepositRecord;
     transactionId: string | null;
@@ -49,6 +51,7 @@ const amountOptions = [50, 100, 250, 500, 1000];
 
 export function DepositPageClient({
   userId,
+  eurUsdRate,
   initialOutcome,
 }: DepositPageClientProps) {
   const router = useRouter();
@@ -57,6 +60,7 @@ export function DepositPageClient({
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodName | "">("");
   const [currency, setCurrency] = useState<SupportedCurrency | "">("");
   const [provider, setProvider] = useState<PaymentProviderName | "">("");
+  useEffect(()=>{setCurrency(paymentMethod==='Bank Transfer'?'EUR':'USD');},[paymentMethod]);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -76,7 +80,7 @@ export function DepositPageClient({
       setSelectedAmount(draft.selectedAmount || 250);
       setCustomAmount(draft.customAmount || "");
       setPaymentMethod(draft.paymentMethod === "Bank Transfer" ? "Bank Transfer" : "Cash App");
-      setCurrency("USD");
+      setCurrency(draft.paymentMethod === "Bank Transfer" ? "EUR" : "USD");
       setProvider("RebohromePayment");
     } catch {
       window.sessionStorage.removeItem(DEPOSIT_DRAFT_KEY);
@@ -126,6 +130,7 @@ export function DepositPageClient({
   }, [currency]);
 
   const providerVisible = Boolean(paymentMethod && currency);
+  const creditedUsd=currency==='EUR'?convertMinor(Math.round(Math.max(amount,0)*100),eurUsdRate,'toUsd')/100:amount;
   const continueLabel = provider ? "Continue to secure payment" : "Select payment provider";
   const failureNotice =
     initialOutcome?.deposit.status === "failed"
@@ -222,7 +227,7 @@ export function DepositPageClient({
     setError(null);
 
     try {
-      const requestKey = paymentRequestKey(userId, JSON.stringify({kind:"deposit",amount,currency:"USD",provider:"RebohromePayment",paymentMethod}));
+      const requestKey = paymentRequestKey(userId, JSON.stringify({kind:"deposit",amount,currency,eurUsdRate:paymentMethod==='Bank Transfer'?eurUsdRate:1,provider:"RebohromePayment",paymentMethod}));
       const response = await fetch("/api/deposit/session", {
         method: "POST",
         headers: {
@@ -233,6 +238,7 @@ export function DepositPageClient({
           amount,
           paymentMethod,
           currency,
+          eurUsdRate,
           provider,
         }),
       });
@@ -376,16 +382,17 @@ export function DepositPageClient({
 
         <div className="rounded-[16px] border border-line bg-white p-5">
           <StepHeader number="3" title="Select currency" />
+          {currency==='EUR'?<p className="mt-3 text-sm text-muted">Site rate: 1 EUR = {eurUsdRate} USD. Balance credit: {formatUsd(creditedUsd)}.</p>:null}
           <div className="mt-5 grid gap-3 xl:grid-cols-2">
-            {(["USD"] as SupportedCurrency[]).map((option) => (
+            {([paymentMethod === "Bank Transfer" ? "EUR" : "USD"] as SupportedCurrency[]).map((option) => (
               <SelectorCard
                 key={option}
                 active={currency === option}
                 label={option}
                 sublabel={
                   option === "EUR"
-                    ? "Pay in euros with provider-aware availability"
-                    : "Pay in US dollars through all supported providers"
+                    ? "Bank Transfer payments in EUR only"
+                    : "Cash App payments in USD only"
                 }
                 onClick={() => {
                   setCurrency(option);

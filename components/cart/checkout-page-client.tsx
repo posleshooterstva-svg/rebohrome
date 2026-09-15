@@ -1,4 +1,5 @@
 "use client";
+import { convertMinor } from "@/lib/payments/payment-terms";
 
 import Link from "next/link";
 import { paymentRequestKey, completePaymentRequest } from "@/lib/payments/request-key";
@@ -28,6 +29,7 @@ const CHECKOUT_DRAFT_KEY = "rebohrome-checkout-draft";
 
 type CheckoutPageClientProps = {
   userId: string;
+  eurUsdRate: number;
   products: ProductRecord[];
   defaultName: string;
   defaultEmail: string;
@@ -65,10 +67,12 @@ type CheckoutSessionResponse =
 
 export function CheckoutPageClient({
   userId,
+  eurUsdRate,
   products,
   availableBalance,
 }: CheckoutPageClientProps) {
   const router = useRouter();
+  const toEur=(usd:number)=>convertMinor(Math.round(usd*100),eurUsdRate,'toEur')/100;
   const lines = useCartStore((state) => state.lines);
   const clearCart = useCartStore((state) => state.clearCart);
   const [mounted, setMounted] = useState(false);
@@ -76,6 +80,7 @@ export function CheckoutPageClient({
     useState<PaymentMethodName>("Archive Balance");
   const [currency, setCurrency] = useState<SupportedCurrency>("USD");
   const [provider, setProvider] = useState<PaymentProviderName | "">("");
+  useEffect(()=>{setCurrency(paymentMethod==='Bank Transfer'?'EUR':'USD');},[paymentMethod]);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -99,7 +104,7 @@ export function CheckoutPageClient({
     try {
       const draft = JSON.parse(saved) as CheckoutDraft;
       setPaymentMethod(draft.paymentMethod === "Bank Transfer" ? "Bank Transfer" : draft.paymentMethod === "Cash App" ? "Cash App" : "Archive Balance");
-      setCurrency("USD");
+      setCurrency(draft.paymentMethod === "Bank Transfer" ? "EUR" : "USD");
       setProvider("");
       setAgreedToTerms(Boolean(draft.agreedToTerms));
     } catch {
@@ -219,7 +224,7 @@ export function CheckoutPageClient({
         throw new Error("Select a payment provider to continue.");
       }
 
-      const requestKey = paymentRequestKey(userId, JSON.stringify({kind:"purchase",items:lines,paymentMethod}));
+      const requestKey = paymentRequestKey(userId, JSON.stringify({kind:"purchase",items:lines,paymentMethod,currency,eurUsdRate:paymentMethod==='Bank Transfer'?eurUsdRate:1}));
       const response = await fetch("/api/checkout/session", {
         method: "POST",
         headers: {
@@ -229,7 +234,8 @@ export function CheckoutPageClient({
         body: JSON.stringify({
           paymentMethod,
           provider,
-          currency: "USD",
+          currency,
+          eurUsdRate,
           items: lines,
         }),
       });
@@ -387,6 +393,7 @@ export function CheckoutPageClient({
             ) : null}
           </div>
 
+          {paymentMethod==='Bank Transfer'?<p className="mt-4 text-sm text-muted">Bank Transfer is charged in EUR. Site rate: 1 EUR = {eurUsdRate} USD. Order value: {formatUsd(summary.total)}.</p>:null}
           <div className="mt-6">
             <div className="text-[11px] uppercase tracking-[0.24em] text-muted">
               Payment Source
@@ -421,15 +428,15 @@ export function CheckoutPageClient({
               </div>
             ) : (
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                {(["USD"] as SupportedCurrency[]).map((option) => (
+                {([paymentMethod === "Bank Transfer" ? "EUR" : "USD"] as SupportedCurrency[]).map((option) => (
                   <SelectorCard
                     key={option}
                     active={currency === option}
                     label={option}
                     sublabel={
                       option === "USD"
-                        ? "Pay in US dollars through all supported providers"
-                        : "Pay in euros with provider-aware availability"
+                        ? "Cash App payments in USD only"
+                        : "Bank Transfer payments in EUR only"
                     }
                     onClick={() => {
                       setCurrency(option);
@@ -482,7 +489,7 @@ export function CheckoutPageClient({
                 {summary.items.length} item{summary.items.length === 1 ? "" : "s"}
               </div>
               <div className="mt-1 text-sm text-muted">
-                {formatCurrency(summary.total, checkoutCurrency)}
+                {formatCurrency(checkoutCurrency==='EUR'?toEur(summary.total):summary.total, checkoutCurrency)}
               </div>
             </div>
             <ChevronDown
@@ -514,7 +521,7 @@ export function CheckoutPageClient({
                   </div>
                 </div>
                 <div className="text-sm font-medium text-foreground">
-                  {formatCurrency(item.lineTotal, checkoutCurrency)}
+                  {formatCurrency(checkoutCurrency==='EUR'?toEur(item.lineTotal):item.lineTotal, checkoutCurrency)}
                 </div>
               </div>
             ))}
@@ -523,16 +530,16 @@ export function CheckoutPageClient({
           <div className={`${summaryOpen ? "mt-6 block" : "hidden"} space-y-3 border-t border-line pt-6 text-sm lg:mt-6 lg:block`}>
             <SummaryRow
               label="Subtotal"
-              value={formatCurrency(summary.subtotal, checkoutCurrency)}
+              value={formatCurrency(checkoutCurrency==='EUR'?toEur(summary.subtotal):summary.subtotal, checkoutCurrency)}
             />
             <SummaryRow
               label="Shipping"
-              value={formatCurrency(summary.shipping, checkoutCurrency)}
+              value={formatCurrency(checkoutCurrency==='EUR'?toEur(summary.shipping):summary.shipping, checkoutCurrency)}
             />
             <SummaryRow
               label="Total"
               strong
-              value={formatCurrency(summary.total, checkoutCurrency)}
+              value={formatCurrency(checkoutCurrency==='EUR'?toEur(summary.total):summary.total, checkoutCurrency)}
             />
           </div>
 
@@ -640,7 +647,7 @@ export function CheckoutPageClient({
             <div className="flex items-center justify-between text-sm text-muted lg:hidden">
               <span>Total</span>
               <span className="text-base font-semibold text-foreground">
-                {formatCurrency(summary.total, checkoutCurrency)}
+                {formatCurrency(checkoutCurrency==='EUR'?toEur(summary.total):summary.total, checkoutCurrency)}
               </span>
             </div>
             <Button

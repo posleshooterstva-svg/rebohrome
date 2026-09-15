@@ -1,3 +1,4 @@
+import { getExchangeRate } from "@/lib/currency-service";
 import { DepositPageClient } from "@/components/dashboard/deposit-page-client";
 import { DepositSidebarRail } from "@/components/dashboard/deposit-sidebar-rail";
 import { VerificationRequiredCard } from "@/components/kyc/verification-required-card";
@@ -43,6 +44,7 @@ export default async function DashboardDepositPage({
     getActivePaymentSession(session.userId, "deposit"),
     getAvailablePaymentGatesForUser(session.userId),
   ]);
+  const eurUsdRate=await getExchangeRate('EUR','USD');
   const user = session.user;
   const kycVerified = isKycVerified(user);
 
@@ -66,6 +68,7 @@ export default async function DashboardDepositPage({
             <ActivePaymentSessionCard session={activePaymentSession} />
           ) : null}
           <DepositPageClient
+            eurUsdRate={eurUsdRate}
             gate2Details={{
               firstName: user.gate2FirstName,
               lastName: user.gate2LastName,

@@ -1,3 +1,4 @@
+import { getExchangeRate } from "@/lib/currency-service";
 import { CheckoutPageClient } from "@/components/cart/checkout-page-client";
 import { ActivePaymentSessionCard } from "@/components/payment/active-payment-session-card";
 import {
@@ -19,6 +20,7 @@ export default async function CheckoutPage() {
     getActivePaymentSession(session.userId, "purchase"),
   ]);
 
+  const eurUsdRate=await getExchangeRate('EUR','USD');
   return (
     <main className="min-h-dvh w-full overflow-x-hidden px-4 py-6 sm:px-6 lg:px-8">
       <div className="space-y-5">
@@ -26,6 +28,7 @@ export default async function CheckoutPage() {
           <ActivePaymentSessionCard session={activePaymentSession} />
         ) : null}
         <CheckoutPageClient
+            eurUsdRate={eurUsdRate}
           availableBalance={balance?.available ?? 0}
           defaultEmail={user?.email ?? "collector@rebohrome.com"}
           defaultName={user?.name ?? user?.username ?? "Collector"}

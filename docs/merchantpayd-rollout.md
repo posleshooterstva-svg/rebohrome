@@ -1,6 +1,6 @@
 # RebohromePayment rollout
 
-New external deposits and purchases use RebohromePayment, with Cash App (`cash-app-v4`) and Bank Transfer (`banking`), in USD. The server integrates the MerchantPayd API. Internal Wallet remains available. Creation of new legacy payments is retired; existing provider handlers and reconciliation remain.
+New external deposits and purchases use RebohromePayment, with Cash App (`cash-app-v4`) in USD and Bank Transfer (`banking`) in EUR. The account balance and catalog accounting remain in USD. The server integrates the MerchantPayd API. Internal Wallet remains available. Creation of new legacy payments is retired; existing provider handlers and reconciliation remain.
 
 ## Configuration and migration
 
@@ -37,3 +37,9 @@ A controlled USD 10 link-creation check returned 201 for Cash App (`cash-app-v4`
 Known disabled-method errors now return an actionable public message. Raw provider diagnostics are not exposed. A definitive rejection keeps its explanation and permits a fresh, user-initiated request with a new key; ambiguous creation keeps its original key and reconciliation protection.
 
 The owner subsequently supplied separate API credentials and a webhook signing secret for the Bank Transfer project. These are stored as `MERCHANTPAYD_BANKING_API_KEY`, `MERCHANTPAYD_BANKING_API_SECRET`, and `MERCHANTPAYD_BANKING_WEBHOOK_SECRET`, locally outside Git and as sensitive Vercel production variables. With those credentials, the Bank Transfer USD 10 create probe returned 201. No payment was made. Creation and reconciliation select credentials from the saved payment method, without falling back to the Cash App project. The shared webhook endpoint accepts signatures from either configured project; independent status verification still precedes every financial effect.
+
+## Bank Transfer EUR-only payments
+
+New Bank Transfer requests must use EUR; Cash App remains USD. The configured site EUR/USD rate (`EUR_USD_FALLBACK_RATE`, existing default 1.08) is disclosed before payment and stored with the exact EUR amount and USD accounting amount in the immutable intent snapshot. This is the site conversion rate, not a live market-rate claim. A changed rate requires refreshing and reviewing the payment. Deposit limits remain denominated in USD and are checked after conversion. Purchases convert the server-computed USD order total to EUR. Amounts are rounded once to cents with integer arithmetic.
+
+Receipts and transactions preserve original EUR amounts; account credits use the agreed USD amount. Status verification requires the exact EUR base amount for new bank payments. Previously created USD bank links continue reconciling their original terms. No historical balances or links were rewritten. A controlled EUR 10 create request was accepted by the provider; no payment was made.

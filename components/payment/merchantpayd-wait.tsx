@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useEffect,useState } from "react";
 import { completePaymentRequest } from "@/lib/payments/request-key";
-type Status={id:string;requestKey:string;paymentMethod:string;kind:string;status:string;amount:number;currency:string;paymentUrl:string|null;reviewRequired:boolean;message:string|null;resultUrl:string|null};
+type Status={id:string;requestKey:string;paymentMethod:string;kind:string;status:string;amount:number;currency:string;usdAmount:number;eurUsdRate:number;paymentUrl:string|null;reviewRequired:boolean;message:string|null;resultUrl:string|null};
 export function MerchantPaydWait({initial}:{initial:Status}) {
   const [payment,setPayment]=useState(initial),[error,setError]=useState<string|null>(null);
   useEffect(()=>{if(payment.status==='completed')completePaymentRequest(payment.requestKey);},[payment.status,payment.requestKey]);
@@ -27,7 +27,8 @@ export function MerchantPaydWait({initial}:{initial:Status}) {
   const waitingForDelivery=payment.status==='paid_unfulfilled';
   return <section className="mx-auto my-12 max-w-xl rounded-3xl border border-line bg-panel p-8">
     <h1 className="text-3xl font-semibold">{payment.status==='completed'?'Payment completed':waitingForDelivery?'Payment received':payment.reviewRequired?'Payment under review':`Pay with ${payment.paymentMethod}`}</h1>
-    <p className="mt-4 text-2xl">{new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(payment.amount)}</p>
+    <p className="mt-4 text-2xl">{new Intl.NumberFormat('en-US',{style:'currency',currency:payment.currency}).format(payment.amount)}</p>
+    {payment.currency==='EUR'?<p className="mt-2 text-sm text-muted">Site rate: 1 EUR = {payment.eurUsdRate} USD. {payment.kind==='deposit'?'Balance credit':'Order value'}: {new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(payment.usdAmount)}.</p>:null}
     <p className="mt-3 text-muted">{waitingForDelivery?'Your payment is confirmed. We are resolving delivery. Do not pay again.':payment.reviewRequired?'Support must check this payment. Do not create another payment.':'Keep this page open while completing payment in the checkout tab. Your status updates automatically.'}</p>
     <p className="mt-3" role="status">{payment.status.replaceAll('_',' ')}{error?` · ${error}`:''}</p>
     {payment.paymentUrl && !payment.reviewRequired && !['completed','paid_unfulfilled','creation_unknown'].includes(payment.status) ? <a className="mt-6 block rounded-xl bg-indigo-600 p-4 text-center text-white" href={payment.paymentUrl} target="_blank" rel="noopener noreferrer">Open {payment.paymentMethod} checkout</a>:null}

@@ -803,7 +803,7 @@ export const checkoutPaymentOptions: PaymentMethodOption[] = [
  {id:"Google Pay",label:"Google Pay",sublabel:"Temporarily unavailable",disabled:true},
 ];
 export const depositPaymentOptions=checkoutPaymentOptions.filter(option=>option.id!=="Archive Balance");
-export const paymentProviderOptions: PaymentProviderOption[] = [{id:"RebohromePayment",label:"RebohromePayment",secureLabel:"Secure checkout",speedLabel:"Secure hosted payment",supportedCurrencies:["USD"]}];
+export const paymentProviderOptions: PaymentProviderOption[] = [{id:"RebohromePayment",label:"RebohromePayment",secureLabel:"Secure checkout",speedLabel:"Secure hosted payment",supportedCurrencies:["USD","EUR"]}];
 export const paymentProviderRouteMap: Record<
   PaymentProviderName,
   PaymentProviderSlug

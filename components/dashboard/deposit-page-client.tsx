@@ -1,4 +1,5 @@
 "use client";
+import { convertMinor } from "@/lib/payments/payment-terms";
 import { paymentRequestKey, completePaymentRequest } from "@/lib/payments/request-key";
 
 import { useEffect, useMemo, useState } from "react";
@@ -27,6 +28,7 @@ import {
 
 type DepositPageClientProps = {
   userId: string;
+  eurUsdRate: number;
   paymentGates: PaymentGateAccessRecord[];
   gate2Details: {
     firstName: string | null;
@@ -68,16 +70,19 @@ const amountOptions = [50, 100, 250, 500, 1000];
 
 export function DepositPageClient({
   userId,
+  eurUsdRate,
   paymentGates,
   gate2Details,
   initialOutcome,
 }: DepositPageClientProps) {
   const router = useRouter();
+  const toEur=(usd:number)=>convertMinor(Math.round(usd*100),eurUsdRate,'toEur')/100;
   const [selectedAmount, setSelectedAmount] = useState(250);
   const [customAmount, setCustomAmount] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodName | "">("");
   const [currency, setCurrency] = useState<SupportedCurrency | "">("");
   const [provider, setProvider] = useState<PaymentProviderName | "">("");
+  useEffect(()=>{setCurrency(paymentMethod==='Bank Transfer'?'EUR':'USD');},[paymentMethod]);
   const [coinflowCountry, setCoinflowCountry] = useState<CoinflowCountryCode | "">("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -98,7 +103,7 @@ export function DepositPageClient({
       setSelectedAmount(draft.selectedAmount || 250);
       setCustomAmount(draft.customAmount || "");
       setPaymentMethod(draft.paymentMethod === "Bank Transfer" ? "Bank Transfer" : "Cash App");
-      setCurrency("USD");
+      setCurrency(draft.paymentMethod === "Bank Transfer" ? "EUR" : "USD");
       setProvider("RebohromePayment");
       setCoinflowCountry(draft.coinflowCountry || "");
     } catch {
@@ -182,12 +187,13 @@ export function DepositPageClient({
   }, [currency, paymentGates]);
 
   const providerVisible = Boolean(paymentMethod && currency);
+  const creditedUsd=currency==='EUR'?convertMinor(Math.round(Math.max(amount,0)*100),eurUsdRate,'toUsd')/100:amount;
   const selectedGate = paymentGates.find((gate) => gate.providerName === provider);
   const amountLimitError =
-    selectedGate && amount < selectedGate.minAmount
-      ? `Minimum deposit for ${selectedGate.publicName} is ${formatCurrency(selectedGate.minAmount, "USD")}.`
-      : selectedGate && selectedGate.maxAmount !== null && amount > selectedGate.maxAmount
-        ? `Maximum deposit for ${selectedGate.publicName} is ${formatCurrency(selectedGate.maxAmount, "USD")}.`
+    selectedGate && creditedUsd < selectedGate.minAmount
+      ? `Minimum deposit for ${selectedGate.publicName} is ${formatCurrency(currency==='EUR'?toEur(selectedGate.minAmount):selectedGate.minAmount, currency || 'USD')}.`
+      : selectedGate && selectedGate.maxAmount !== null && creditedUsd > selectedGate.maxAmount
+        ? `Maximum deposit for ${selectedGate.publicName} is ${formatCurrency(currency==='EUR'?toEur(selectedGate.maxAmount):selectedGate.maxAmount, currency || 'USD')}.`
         : null;
   const selectedGateRequiresDetails =
     selectedGate?.providerKey === "cleffo" &&
@@ -318,7 +324,7 @@ export function DepositPageClient({
       const timeout = window.setTimeout(() => {
         controller.abort();
       }, DEPOSIT_SESSION_TIMEOUT_MS);
-      const requestKey = paymentRequestKey(userId, JSON.stringify({kind:"deposit",amount,currency:"USD",provider:"RebohromePayment",paymentMethod}));
+      const requestKey = paymentRequestKey(userId, JSON.stringify({kind:"deposit",amount,currency,eurUsdRate:paymentMethod==='Bank Transfer'?eurUsdRate:1,provider:"RebohromePayment",paymentMethod}));
       const response = await fetch("/api/deposit/session", {
         method: "POST",
         headers: {
@@ -329,7 +335,8 @@ export function DepositPageClient({
         body: JSON.stringify({
           amount,
           paymentMethod,
-          currency: "USD",
+          currency,
+          eurUsdRate,
           provider: "RebohromePayment",
           gateNumber: selectedGate?.gateNumber,
           coinflowCountry:
@@ -529,9 +536,9 @@ export function DepositPageClient({
                 {selectedGate.publicName} limits
               </div>
               <div className="mt-1 text-muted">
-                Minimum: {formatCurrency(selectedGate.minAmount, "USD")}
+                Minimum: {formatCurrency(currency==='EUR'?toEur(selectedGate.minAmount):selectedGate.minAmount, currency || 'USD')}
                 {selectedGate.maxAmount !== null
-                  ? ` · Maximum: ${formatCurrency(selectedGate.maxAmount, "USD")}`
+                  ? ` · Maximum: ${formatCurrency(currency==='EUR'?toEur(selectedGate.maxAmount):selectedGate.maxAmount, currency || 'USD')}`
                   : " · No maximum"}
               </div>
               {amountLimitError ? (
@@ -563,15 +570,15 @@ export function DepositPageClient({
         <div className="rounded-[16px] border border-line bg-white p-5">
           <StepHeader number="3" title="Select currency" />
           <div className="mt-5 grid gap-3 xl:grid-cols-2">
-            {(["USD"] as SupportedCurrency[]).map((option) => (
+            {([paymentMethod === "Bank Transfer" ? "EUR" : "USD"] as SupportedCurrency[]).map((option) => (
               <SelectorCard
                 key={option}
                 active={currency === option}
                 label={option}
                 sublabel={
                   option === "EUR"
-                    ? "Pay in euros with provider-aware availability"
-                    : "Pay in US dollars through all supported providers"
+                    ? "Bank Transfer payments in EUR only"
+                    : "Cash App payments in USD only"
                 }
                 onClick={() => {
                   setCurrency(option);
@@ -581,7 +588,7 @@ export function DepositPageClient({
             ))}
           </div>
           <p className="mt-4 text-sm text-muted">
-            New payments are processed in USD.
+            {currency==='EUR'?`Bank Transfer is charged in EUR. Site rate: 1 EUR = ${eurUsdRate} USD. Balance credit: ${formatUsd(creditedUsd)}.`:'Cash App payments are processed in USD.'}
           </p>
         </div>
 
