@@ -29,3 +29,9 @@ Verification commands: `npm run test:payments`, `npm run test:randomized-packs`,
 `payments:preflight` is a read-only authenticated status probe. A 404 for a nonexistent link verifies API authentication but does not establish that Cash App 4 is enabled in the merchant project or prove a successful real payment.
 
 On 2026-09-15, Bank Transfer was added to the payment-method selector alongside Cash App. Credit Card, Apple Pay and Google Pay remain visible but disabled. The selected method is part of the immutable intent snapshot and idempotency checks. Provider status is validated against that saved method. Public provider branding is RebohromePayment; protocol routes and environment variable names remain stable.
+
+## Provider validation on 2026-09-15
+
+A controlled USD 10 link-creation check returned 201 for Cash App (`cash-app-v4`) and 422 for Bank Transfer (`banking`): the provider reported that banking is not enabled for this project. No payment was made. Bank Transfer is enabled in the site selector, but requires activation in the provider project before it can create links. The API credentials do not provide documented project-administration access.
+
+Known disabled-method errors now return an actionable public message. Raw provider diagnostics are not exposed. A definitive rejection keeps its explanation and permits a fresh, user-initiated request with a new key; ambiguous creation keeps its original key and reconciliation protection.

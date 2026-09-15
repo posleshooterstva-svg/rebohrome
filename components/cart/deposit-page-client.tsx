@@ -1,5 +1,5 @@
 "use client";
-import { paymentRequestKey } from "@/lib/payments/request-key";
+import { paymentRequestKey, completePaymentRequest } from "@/lib/payments/request-key";
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -222,11 +222,12 @@ export function DepositPageClient({
     setError(null);
 
     try {
+      const requestKey = paymentRequestKey(userId, JSON.stringify({kind:"deposit",amount,currency:"USD",provider:"RebohromePayment",paymentMethod}));
       const response = await fetch("/api/deposit/session", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": paymentRequestKey(userId, JSON.stringify({kind:"deposit",amount,currency:"USD",provider:"RebohromePayment",paymentMethod})),
+          "Idempotency-Key": requestKey,
         },
         body: JSON.stringify({
           amount,
@@ -238,13 +239,14 @@ export function DepositPageClient({
 
       const payload = (await response.json()) as DepositSessionResponse;
       if (!response.ok || !("redirectPath" in payload)) {
+        if ("creationRejected" in payload && payload.creationRejected === true) completePaymentRequest(requestKey);
         throw new Error(
           "error" in payload ? payload.error : "Unable to initialize secure deposit.",
         );
       }
 
-      const paymentLink = payload.paymentUrl ?? payload.redirectPath;
-      window.open(paymentLink, "_blank");
+      router.push(payload.redirectPath);
+      router.refresh();
     } catch (depositError) {
       setError(
         depositError instanceof Error

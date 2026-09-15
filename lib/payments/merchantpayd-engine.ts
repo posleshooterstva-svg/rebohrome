@@ -47,6 +47,7 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
       const old=(await tx.execute({sql:"select * from payment_intents where user_id=? and idempotency_key=?",args:[input.userId,input.key]})).rows[0];
       if (old) {
         if (old.request_hash!==input.fingerprint || old.kind!==input.kind || savedMerchantMethod(JSON.parse(String(old.snapshot_json)))!==method) throw new PaymentConflict("This request key belongs to a different payment.");
+        if (old.status==='failed' && !old.payment_link_id) throw new MerchantApiError(String(old.last_error || 'RebohromePayment rejected payment creation.'),422);
         await tx.commit(); return {intent:old,reused:true};
       }
       const active=(await tx.execute({sql:`select id from payment_intents where user_id=? and kind=? and closed_at is null
@@ -68,7 +69,7 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
       await db.execute({sql:`update ${table} set payment_url=?,provider_payment_link_id=?,status='pending',updated_at=? where id=?`,args:[result.payment_url!,result.payment_link_id,now(),intent.id]});
     } catch(e) {
       const definitive=e instanceof MerchantApiError && !e.ambiguous;
-      await db.execute({sql:`update payment_intents set status=?,last_error=?,review_required=?,updated_at=? where id=?`,args:[definitive?'failed':'creation_unknown',definitive?'Provider rejected payment creation.':'Payment creation result is unknown. Do not pay again; support must reconcile this payment.',definitive?0:1,now(),intent.id]});
+      await db.execute({sql:`update payment_intents set status=?,last_error=?,review_required=?,updated_at=? where id=?`,args:[definitive?'failed':'creation_unknown',definitive?e.message:'Payment creation result is unknown. Do not pay again; support must reconcile this payment.',definitive?0:1,now(),intent.id]});
       if (definitive) throw e;
     }
     return {intent:(await get(String(intent.id)))!,reused:false};

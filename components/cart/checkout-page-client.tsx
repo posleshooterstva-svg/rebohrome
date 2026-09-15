@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { paymentRequestKey } from "@/lib/payments/request-key";
+import { paymentRequestKey, completePaymentRequest } from "@/lib/payments/request-key";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, LockKeyhole, ShieldCheck } from "lucide-react";
@@ -219,11 +219,12 @@ export function CheckoutPageClient({
         throw new Error("Select a payment provider to continue.");
       }
 
+      const requestKey = paymentRequestKey(userId, JSON.stringify({kind:"purchase",items:lines,paymentMethod}));
       const response = await fetch("/api/checkout/session", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": paymentRequestKey(userId, JSON.stringify({kind:"purchase",items:lines,paymentMethod})),
+          "Idempotency-Key": requestKey,
         },
         body: JSON.stringify({
           paymentMethod,
@@ -236,6 +237,7 @@ export function CheckoutPageClient({
       const payload = (await response.json()) as CheckoutSessionResponse;
 
       if (!response.ok || !("redirectPath" in payload)) {
+        if ("creationRejected" in payload && payload.creationRejected === true) completePaymentRequest(requestKey);
         throw new Error(
           "error" in payload ? payload.error : "Unable to initialize secure payment.",
         );

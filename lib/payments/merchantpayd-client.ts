@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { minorUnits } from "./money.ts";
-import { merchantMethodCode, type MerchantMethodCode } from './merchantpayd-methods.ts';
+import { MERCHANTPAYD_METHODS, merchantMethodCode, type MerchantMethodCode } from './merchantpayd-methods.ts';
 
 const amount = z.union([z.number().finite().nonnegative(), z.string().regex(/^\d+(?:\.\d+)?$/)]);
 const optionalAmount = amount.nullish();
@@ -69,7 +69,21 @@ export function merchantClient(config: MerchantConfig, transport: typeof fetch =
         body:body ? JSON.stringify(body) : undefined, signal:AbortSignal.timeout(15_000),
       });
     } catch { throw new MerchantApiError("Payment provider did not return a confirmed result.",502,Boolean(body)); }
-    if (!response.ok) throw new MerchantApiError(`Payment provider returned HTTP ${response.status}.`,502,Boolean(body) && ![401,403,422].includes(response.status));
+    if (!response.ok) {
+      if (response.status === 422) {
+        const rejected = await response.json().catch(() => null);
+        // Translate known validation failures; never expose arbitrary upstream bodies,
+        // which can contain customer data, credentials or internal diagnostics.
+        const disabled = typeof rejected?.message === 'string'
+          ? /^payment_method '(cash-app-v4|banking)' is not enabled for this project$/.exec(rejected.message)
+          : null;
+        const message = disabled
+          ? `${MERCHANTPAYD_METHODS[disabled[1] as MerchantMethodCode]} is not enabled for this project by RebohromePayment. Please choose another payment method or contact support.`
+          : 'RebohromePayment rejected the payment details. Please check the amount and your account email, or contact support.';
+        throw new MerchantApiError(message, 422);
+      }
+      throw new MerchantApiError(`Payment provider returned HTTP ${response.status}.`,502,Boolean(body) && ![401,403].includes(response.status));
+    }
     try {
       const json = await response.json();
       if (json.success !== true) throw new Error("Invalid response.");
