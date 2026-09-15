@@ -31,7 +31,9 @@ export function middleware(request: NextRequest) {
   const redirectTarget = routeRedirects[request.nextUrl.pathname];
 
   if (redirectTarget) {
-    return NextResponse.redirect(new URL(redirectTarget, request.url));
+    const destination = request.nextUrl.clone();
+    destination.pathname = redirectTarget;
+    return NextResponse.redirect(destination);
   }
 
   const requestHeaders = new Headers(request.headers);

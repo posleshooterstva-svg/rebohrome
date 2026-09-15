@@ -3,21 +3,10 @@ import {
   getAdminBroadcasts,
   sendBroadcastNow,
 } from "@/lib/db/repository";
-import { CRON_SECRET } from "@/lib/server-config";
-
-function isAuthorized(request: Request) {
-  const auth = request.headers.get("authorization");
-  const isVercelCron = request.headers.get("x-vercel-cron") === "1";
-
-  if (CRON_SECRET && auth === `Bearer ${CRON_SECRET}`) {
-    return true;
-  }
-
-  return isVercelCron;
-}
+import { authorizeCron } from "@/lib/security";
 
 export async function GET(request: Request) {
-  if (!isAuthorized(request)) {
+  if (!authorizeCron(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

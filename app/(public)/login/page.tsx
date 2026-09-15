@@ -1,3 +1,4 @@
+import { safeRedirect } from "@/lib/security";
 import { redirect } from "next/navigation";
 import { LoginFlowClient } from "@/components/auth/login-flow-client";
 import { getSessionState } from "@/lib/session";
@@ -7,17 +8,12 @@ type LoginPageProps = {
 };
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
-  const session = await getSessionState();
+  const session = await getSessionState({allowPasswordReset:true});
   const params = await searchParams;
-  const redirectTo =
-    typeof params.next === "string" && params.next.startsWith("/")
-      ? params.next
-      : typeof params.redirectTo === "string" && params.redirectTo.startsWith("/")
-        ? params.redirectTo
-        : "/dashboard";
+  const redirectTo = safeRedirect(params.next ?? params.redirectTo);
 
   if (session.isUserAuthenticated) {
-    redirect(session.isAdminAuthenticated ? "/admin" : redirectTo);
+    redirect(session.user.requirePasswordReset ? "/change-password" : session.isAdminAuthenticated ? "/admin" : redirectTo);
   }
 
   const error = typeof params.error === "string" ? params.error : null;

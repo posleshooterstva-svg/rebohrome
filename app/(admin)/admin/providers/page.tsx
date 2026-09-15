@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { merchantConfig } from "@/lib/payments/merchantpayd-client";
 import { AdminShell } from "@/components/rebohrome/shells/admin-shell";
 import { Button } from "@/components/ui/button";
 import {
@@ -110,7 +111,7 @@ function ProviderLimitCard({ gate }: { gate: PaymentGateAccessRecord }) {
   const usdOnly =
     gate.providerKey === "cleffo" ||
     gate.providerKey === "wert" ||
-    gate.providerKey === "coinflow";
+    gate.providerKey === "coinflow" || gate.providerKey === "merchantpayd";
 
   return (
     <section className="rounded-[22px] border border-line bg-panel p-5 shadow-[0_24px_90px_rgba(0,0,0,0.16)]">
@@ -128,7 +129,7 @@ function ProviderLimitCard({ gate }: { gate: PaymentGateAccessRecord }) {
           </p>
         </div>
         <span className="rounded-full border border-emerald-300/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200">
-          {gate.enabled ? "Enabled" : "Disabled"}
+          {gate.enabled && (gate.providerKey !== "merchantpayd" || merchantConfig().enabled) ? "Enabled" : "Disabled"}
         </span>
       </div>
 
@@ -207,19 +208,7 @@ function ProviderLimitCard({ gate }: { gate: PaymentGateAccessRecord }) {
                 Wert API key is not configured. Server-side order lookup is disabled.
               </p>
             ) : null}
-            <form action={syncWertOrderAction} className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
-              <input
-                className="rounded-2xl border border-line bg-panel-strong px-4 py-3 text-sm text-foreground outline-none"
-                name="clickId"
-                placeholder="click_id"
-              />
-              <input
-                className="rounded-2xl border border-line bg-panel-strong px-4 py-3 text-sm text-foreground outline-none"
-                name="wertOrderId"
-                placeholder="Wert order ID optional"
-              />
-              <Button type="submit">Sync Wert Order</Button>
-            </form>
+
           </div>
         ) : null}
         {gate.providerKey === "coinflow" ? (
@@ -257,6 +246,21 @@ function ProviderLimitCard({ gate }: { gate: PaymentGateAccessRecord }) {
           <Button type="submit">Save Gate Limits</Button>
         </div>
       </form>
+      {gate.providerKey === "wert" ? (
+            <form action={syncWertOrderAction} className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+              <input
+                className="rounded-2xl border border-line bg-panel-strong px-4 py-3 text-sm text-foreground outline-none"
+                name="clickId"
+                placeholder="click_id"
+              />
+              <input
+                className="rounded-2xl border border-line bg-panel-strong px-4 py-3 text-sm text-foreground outline-none"
+                name="wertOrderId"
+                placeholder="Wert order ID optional"
+              />
+              <Button type="submit">Sync Wert Order</Button>
+            </form>
+      ) : null}
     </section>
   );
 }

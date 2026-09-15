@@ -12,6 +12,7 @@ import {
   COINFLOW_ENABLE_PIX,
   COINFLOW_ENABLE_SEPA,
   COINFLOW_ENABLE_UK_FASTER_PAYMENTS,
+  COINFLOW_ENFORCE_COUNTRY_IP,
   COINFLOW_ENV,
   COINFLOW_MERCHANT_ID,
   COINFLOW_SETTLEMENT_TYPE,
@@ -87,6 +88,7 @@ export function getCoinflowConfig() {
     enableSepa: COINFLOW_ENABLE_SEPA,
     enableUkFasterPayments: COINFLOW_ENABLE_UK_FASTER_PAYMENTS,
     enablePix: COINFLOW_ENABLE_PIX,
+    enforceCountryIp: COINFLOW_ENFORCE_COUNTRY_IP,
     apiKeyConfigured: Boolean(COINFLOW_API_KEY),
     merchantIdConfigured: Boolean(COINFLOW_MERCHANT_ID),
     webhookValidationKeyConfigured: Boolean(COINFLOW_WEBHOOK_VALIDATION_KEY),
@@ -197,6 +199,7 @@ export function getCoinflowPublicConfig() {
     enableSepa: config.enableSepa,
     enableUkFasterPayments: config.enableUkFasterPayments,
     enablePix: config.enablePix,
+    enforceCountryIp: config.enforceCountryIp,
     apiKeyConfigured: config.apiKeyConfigured,
     merchantIdConfigured: config.merchantIdConfigured,
     webhookValidationKeyConfigured: config.webhookValidationKeyConfigured,
@@ -238,12 +241,24 @@ export function buildCoinflowChargebackProtectionData(input: CoinflowCheckoutJwt
   ];
 }
 
+export function buildCoinflowCustomerInfo(input: CoinflowCheckoutJwtInput) {
+  const ipAddress = input.ipAddress?.trim();
+  return {
+    country: input.country ?? undefined,
+    ip:
+      ipAddress && ipAddress.toLowerCase() !== "unknown"
+        ? ipAddress
+        : undefined,
+  };
+}
+
 export async function createCoinflowCheckoutToken(
   input: CoinflowCheckoutJwtInput,
 ): Promise<CoinflowCheckoutToken> {
   const config = getCoinflowConfig();
   const webhookInfo = buildCoinflowWebhookInfo(input);
   const chargebackProtectionData = buildCoinflowChargebackProtectionData(input);
+  const customerInfo = buildCoinflowCustomerInfo(input);
   console.info(`[COINFLOW_GATE4][${config.env}][card] session_key_requested`, {
     sessionId: input.sessionId,
     userId: input.userId,
@@ -279,9 +294,12 @@ export async function createCoinflowCheckoutToken(
       currency: input.currency,
     },
     email: input.email,
+    customerInfo,
     webhookInfo,
     chargebackProtectionData,
     settlementType: COINFLOW_SETTLEMENT_TYPE,
+    allowedPaymentMethods: ["card"],
+    idempotencyKey: input.idempotencyKey,
   };
   const jwtResponse = await coinflowRequest("/api/checkout/jwt-token", {
     body: jwtBody,

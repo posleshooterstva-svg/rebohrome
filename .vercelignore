@@ -7,3 +7,9 @@ data/*.db-*
 !.env.example
 node_modules
 .next/cache
+.tmp
+artifacts
+cache
+diagnostics
+qa
+qa-screenshots

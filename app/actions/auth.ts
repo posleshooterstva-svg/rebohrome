@@ -1,5 +1,7 @@
 "use server";
 
+import { limitAuthAttempt } from "@/lib/auth/rate-limit";
+import { safeRedirect } from "@/lib/security";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import {
@@ -13,13 +15,7 @@ import { SESSION_COOKIE_NAME } from "@/lib/rebohrome-data";
 import { getRequestMeta } from "@/lib/session";
 
 function getRedirectPath(formData: FormData, fallback: string) {
-  const redirectTo = formData.get("redirectTo");
-
-  if (typeof redirectTo === "string" && redirectTo.startsWith("/")) {
-    return redirectTo;
-  }
-
-  return fallback;
+ return safeRedirect(formData.get("redirectTo"), fallback);
 }
 
 async function setSessionCookie(token: string) {
@@ -41,6 +37,8 @@ export async function registerAction(formData: FormData) {
 export async function loginAction(formData: FormData) {
   const username = String(formData.get("username") ?? "");
   const password = String(formData.get("password") ?? "");
+  if (username.length>100 || password.length>128) redirect("/login?error=Invalid+credentials");
+  await limitAuthAttempt(username,(await getRequestMeta()).ipAddress);
   const user = await authenticateUser({ username, password });
 
   if (!user) {
@@ -72,7 +70,7 @@ export async function loginAction(formData: FormData) {
     console.warn("Login audit tracking failed", error);
   });
 
-  redirect(user.role === "admin" ? "/admin" : getRedirectPath(formData, "/dashboard"));
+  redirect(user.requirePasswordReset ? "/change-password" : user.role === "admin" ? "/admin" : getRedirectPath(formData, "/dashboard"));
 }
 
 export async function logoutAction(formData?: FormData) {

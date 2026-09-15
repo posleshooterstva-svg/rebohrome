@@ -21,7 +21,7 @@ export function getCartSummary(lines: CartLine[], products: ProductRecord[]) {
   const items = lines.map((line) => {
     const product = productMap.get(line.productId) ?? null;
     const lineTotal = product ? product.price * line.quantity : 0;
-    const isAvailable = product ? product.stock >= line.quantity : false;
+    const isAvailable = product ? product.currency === 'USD' && product.status === 'active' && product.stock >= line.quantity : false;
 
     return {
       key: `${line.productId}:${line.deliveryType}`,

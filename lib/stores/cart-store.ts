@@ -90,6 +90,9 @@ export const useCartStore = create<CartState>()(
     }),
     {
       name: "rebohrome-cart",
+      version: 2,
+      migrate: () => ({ lines: [], hydrated: false }),
+      partialize: () => ({ lines: [] }),
       storage: createJSONStorage(() => localStorage),
       onRehydrateStorage: () => (state) => {
         state?.setHydrated(true);

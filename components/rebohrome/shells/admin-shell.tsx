@@ -26,6 +26,7 @@ const adminNav = [
   { href: "/admin", label: "Dashboard", icon: LayoutDashboard, id: "overview" },
   { href: "/admin/products", label: "Products", icon: Boxes, id: "products" },
   { href: "/admin/orders", label: "Orders", icon: ReceiptText, id: "orders" },
+  { href: "/admin/payments", label: "Payment review", icon: ShieldCheck, id: "payments" },
   { href: "/admin/users", label: "Users", icon: Users, id: "users" },
   { href: "/admin/ledger", label: "Ledger", icon: History, id: "ledger" },
   {

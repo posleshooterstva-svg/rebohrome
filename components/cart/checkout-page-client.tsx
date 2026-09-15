@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { paymentRequestKey } from "@/lib/payments/request-key";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, LockKeyhole, ShieldCheck } from "lucide-react";
@@ -21,7 +22,6 @@ import {
   type ProductRecord,
   type SupportedCurrency,
 } from "@/lib/rebohrome-data";
-import { useAccountExperienceStore } from "@/lib/stores/account-experience-store";
 import { useCartStore } from "@/lib/stores/cart-store";
 
 const CHECKOUT_DRAFT_KEY = "rebohrome-checkout-draft";
@@ -71,7 +71,6 @@ export function CheckoutPageClient({
   const router = useRouter();
   const lines = useCartStore((state) => state.lines);
   const clearCart = useCartStore((state) => state.clearCart);
-  const applyPurchase = useAccountExperienceStore((state) => state.applyPurchase);
   const [mounted, setMounted] = useState(false);
   const [paymentMethod, setPaymentMethod] =
     useState<PaymentMethodName>("Archive Balance");
@@ -99,9 +98,9 @@ export function CheckoutPageClient({
 
     try {
       const draft = JSON.parse(saved) as CheckoutDraft;
-      setPaymentMethod(draft.paymentMethod || "Archive Balance");
-      setCurrency(draft.currency || "USD");
-      setProvider(draft.provider || "");
+      setPaymentMethod(draft.paymentMethod === "Bank Transfer" ? "Bank Transfer" : draft.paymentMethod === "Cash App" ? "Cash App" : "Archive Balance");
+      setCurrency("USD");
+      setProvider("");
       setAgreedToTerms(Boolean(draft.agreedToTerms));
     } catch {
       window.sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
@@ -136,7 +135,7 @@ export function CheckoutPageClient({
       return;
     }
 
-    setProvider("TransVoucher");
+    setProvider("RebohromePayment");
   }, [currency, paymentMethod]);
 
   const summary = getCartSummary(mounted ? lines : [], products);
@@ -209,27 +208,6 @@ export function CheckoutPageClient({
           return;
         }
 
-        applyPurchase(userId, {
-          orderId: payload.orderId,
-          amount: summary.total,
-          currency: "USD",
-          createdAt: new Date().toISOString(),
-          items: summary.items
-            .filter(
-              (
-                item,
-              ): item is typeof item & {
-                product: NonNullable<typeof item.product>;
-              } => item.product !== null,
-            )
-            .map((item) => ({
-              product: item.product,
-              quantity: item.quantity,
-            })),
-          summary: `${summary.items.length} archive item${
-            summary.items.length === 1 ? "" : "s"
-          } secured from balance`,
-        });
         clearCart();
         window.sessionStorage.removeItem(CHECKOUT_DRAFT_KEY);
         router.push(`/success?order=${payload.orderId}`);
@@ -245,11 +223,12 @@ export function CheckoutPageClient({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Idempotency-Key": paymentRequestKey(userId, JSON.stringify({kind:"purchase",items:lines,paymentMethod})),
         },
         body: JSON.stringify({
           paymentMethod,
           provider,
-          currency,
+          currency: "USD",
           items: lines,
         }),
       });
@@ -262,24 +241,7 @@ export function CheckoutPageClient({
         );
       }
 
-      const embedUrl = payload.embedUrl || null;
-      const paymentUrl = payload.paymentUrl || payload.redirectPath;
-      if (!paymentUrl) {
-        throw new Error("Payment page could not be created.");
-      }
-
-      if (payload.useEmbed && embedUrl) {
-        openEmbedPayment(embedUrl);
-      } else {
-        window.open(paymentUrl, "_blank");
-      }
-      setOpenedPayment({
-        sessionId: payload.sessionId,
-        paymentUrl,
-        embedUrl,
-        useEmbed: Boolean(payload.useEmbed && embedUrl),
-        reusedExistingSession: Boolean(payload.reusedExistingSession),
-      });
+      router.push(payload.redirectPath);
       router.refresh();
     } catch (checkoutError) {
       setError(
@@ -434,6 +396,7 @@ export function CheckoutPageClient({
                   active={paymentMethod === option.id}
                   label={option.label}
                   sublabel={option.sublabel}
+                  disabled={option.disabled}
                   onClick={() => {
                     setPaymentMethod(option.id);
                     setError(null);
@@ -456,7 +419,7 @@ export function CheckoutPageClient({
               </div>
             ) : (
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                {(["USD", "EUR"] as SupportedCurrency[]).map((option) => (
+                {(["USD"] as SupportedCurrency[]).map((option) => (
                   <SelectorCard
                     key={option}
                     active={currency === option}
@@ -702,18 +665,21 @@ export function CheckoutPageClient({
 
 function SelectorCard({
   active,
+  disabled = false,
   label,
   sublabel,
   onClick,
 }: {
   active: boolean;
+  disabled?: boolean;
   label: string;
   sublabel: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={`rounded-[14px] border px-4 py-4 text-left transition active:scale-[0.99] ${
+      disabled={disabled}
+      className={`rounded-[14px] border px-4 py-4 text-left transition disabled:cursor-not-allowed disabled:opacity-45 active:scale-[0.99] ${
         active
           ? "border-[var(--accent)] bg-[var(--accent-soft)]"
           : "border-line bg-panel-strong hover:bg-[var(--foreground-soft)]"

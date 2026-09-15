@@ -8,6 +8,7 @@ export function shouldUseSecureCookies(headerStore: Headers) {
   const referer = headerStore.get("referer");
 
   return (
+    process.env.NODE_ENV === "production" ||
     forwardedProto === "https" ||
     origin?.startsWith("https://") ||
     referer?.startsWith("https://") ||

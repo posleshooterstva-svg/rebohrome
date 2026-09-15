@@ -19,6 +19,8 @@ export type ProductStatus = "active" | "inactive";
 export type OrderStatus = "Completed" | "Processing" | "Pending" | "Declined";
 export type PaymentState = "completed" | "pending" | "failed" | "paid_unfulfilled";
 export type PaymentMethodName =
+  | "Cash App"
+  | "Bank Transfer"
   | "Archive Balance"
   | "Credit Card"
   | "Apple Pay"
@@ -26,18 +28,20 @@ export type PaymentMethodName =
   | "Crypto";
 export type SupportedCurrency = "USD" | "EUR";
 export type PaymentProviderName =
+  | "RebohromePayment"
   | "Internal Wallet"
   | "TransVoucher"
   | "Cleffo"
   | "Wert.io"
   | "Coinflow";
 export type PaymentProviderSlug =
+  | "merchantpayd"
   | "internal-wallet"
   | "transvoucher"
   | "cleffo"
   | "wert"
   | "coinflow";
-export type PaymentProviderKey = "transvoucher" | "cleffo" | "wert" | "coinflow";
+export type PaymentProviderKey = "merchantpayd" | "transvoucher" | "cleffo" | "wert" | "coinflow";
 export type CryptoNetwork = "USDT" | "BTC" | "ETH";
 export type TransactionKind =
   | "deposit"
@@ -653,6 +657,7 @@ export type PaymentMethodOption = {
   id: PaymentMethodName;
   label: string;
   sublabel: string;
+  disabled?: boolean;
 };
 
 export type PaymentProviderOption = {
@@ -790,42 +795,15 @@ export const dashboardQuickLinks = [
 ];
 
 export const checkoutPaymentOptions: PaymentMethodOption[] = [
-  {
-    id: "Archive Balance",
-    label: "Archive Balance",
-    sublabel: "Use your archive wallet for instant collector checkout",
-  },
-  {
-    id: "Credit Card",
-    label: "Credit Card",
-    sublabel: "Visa, Mastercard, American Express",
-  },
-  {
-    id: "Apple Pay",
-    label: "Apple Pay",
-    sublabel: "Secure wallet checkout with one-tap confirmation",
-  },
-  {
-    id: "Google Pay",
-    label: "Google Pay",
-    sublabel: "Fast browser wallet payment with secure authorization",
-  },
+ {id:"Archive Balance",label:"Archive Balance",sublabel:"Pay with your account balance"},
+ {id:"Cash App",label:"Cash App",sublabel:"Secure hosted checkout"},
+ {id:"Bank Transfer",label:"Bank Transfer",sublabel:"Pay securely by bank transfer"},
+ {id:"Credit Card",label:"Credit Card",sublabel:"Temporarily unavailable",disabled:true},
+ {id:"Apple Pay",label:"Apple Pay",sublabel:"Temporarily unavailable",disabled:true},
+ {id:"Google Pay",label:"Google Pay",sublabel:"Temporarily unavailable",disabled:true},
 ];
-
-export const depositPaymentOptions: PaymentMethodOption[] = checkoutPaymentOptions.filter(
-  (option) => option.id !== "Archive Balance",
-);
-
-export const paymentProviderOptions: PaymentProviderOption[] = [
-  {
-    id: "TransVoucher",
-    label: "Gate #1",
-    secureLabel: "Card / Apple Pay / Google Pay",
-    speedLabel: "Secure hosted payment",
-    supportedCurrencies: ["USD", "EUR"],
-  },
-];
-
+export const depositPaymentOptions=checkoutPaymentOptions.filter(option=>option.id!=="Archive Balance");
+export const paymentProviderOptions: PaymentProviderOption[] = [{id:"RebohromePayment",label:"RebohromePayment",secureLabel:"Secure checkout",speedLabel:"Secure hosted payment",supportedCurrencies:["USD"]}];
 export const paymentProviderRouteMap: Record<
   PaymentProviderName,
   PaymentProviderSlug
@@ -835,6 +813,7 @@ export const paymentProviderRouteMap: Record<
   Cleffo: "cleffo",
   "Wert.io": "wert",
   Coinflow: "coinflow",
+  RebohromePayment: "merchantpayd",
 };
 
 export const paymentProviderSlugMap: Record<
@@ -846,11 +825,13 @@ export const paymentProviderSlugMap: Record<
   cleffo: "Cleffo",
   wert: "Wert.io",
   coinflow: "Coinflow",
+  merchantpayd: "RebohromePayment",
 };
 
 export function getPublicPaymentProviderLabel(
   provider?: PaymentProviderName | string | null,
 ) {
+  if (provider === "RebohromePayment" || provider === "MerchantPayd") return "RebohromePayment";
   if (provider === "TransVoucher") {
     return "Gate #1";
   }
@@ -873,6 +854,7 @@ export function getPublicPaymentProviderLabel(
 export function getAdminPaymentProviderLabel(
   provider?: PaymentProviderName | string | null,
 ) {
+  if (provider === "RebohromePayment" || provider === "MerchantPayd") return "RebohromePayment";
   if (provider === "TransVoucher") {
     return "Gate #1 - TransVoucher";
   }

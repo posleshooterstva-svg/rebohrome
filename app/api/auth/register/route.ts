@@ -1,3 +1,4 @@
+import { limitAuthAttempt } from "@/lib/auth/rate-limit";
 import { NextResponse } from "next/server";
 import { buildSessionCookieDescriptor } from "@/lib/auth/session-cookie";
 import {
@@ -39,6 +40,8 @@ export async function POST(request: Request) {
     }
 
     const meta = await getRequestMeta("/register");
+    if(username.length>100 || email.length>254 || password.length>128) throw new Error("Registration input is too long.");
+    await limitAuthAttempt(`register:${email}`,meta.ipAddress,5);
     const userId = await registerUser({
       username,
       email,
@@ -51,7 +54,7 @@ export async function POST(request: Request) {
       ipAddress: meta.ipAddress,
     });
 
-    await trackUserRegistered({
+    void trackUserRegistered({
       eventType: "user_registered",
       userId,
       username,

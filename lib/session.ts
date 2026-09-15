@@ -26,7 +26,7 @@ export type RequestMeta = {
   timestamp: string;
 };
 
-export async function getSessionState(): Promise<
+export async function getSessionState(options: {allowPasswordReset?:boolean} = {}): Promise<
   AnonymousSession | AuthenticatedSession
 > {
   const cookieStore = await cookies();
@@ -43,7 +43,7 @@ export async function getSessionState(): Promise<
 
   const user = await getUserBySessionToken(token);
 
-  if (!user) {
+  if (!user || (user.requirePasswordReset && !options.allowPasswordReset)) {
     return {
       user: null,
       userId: null,
@@ -63,7 +63,8 @@ export async function getSessionState(): Promise<
 export async function requireUserSession(
   redirectTo = "/login",
 ): Promise<AuthenticatedSession> {
-  const session = await getSessionState();
+  const session = await getSessionState({allowPasswordReset:true});
+  if (session.user?.requirePasswordReset) redirect("/change-password");
 
   if (!session.isUserAuthenticated || !session.userId) {
     redirect(redirectTo);
@@ -75,7 +76,8 @@ export async function requireUserSession(
 export async function requireAdminSession(
   redirectTo = "/",
 ): Promise<AuthenticatedSession> {
-  const session = await getSessionState();
+  const session = await getSessionState({allowPasswordReset:true});
+  if (session.user?.requirePasswordReset) redirect("/change-password");
 
   if (!session.isAdminAuthenticated || !session.userId) {
     redirect(redirectTo);

@@ -1,3 +1,5 @@
+import { limitAuthAttempt } from "@/lib/auth/rate-limit";
+import { safeRedirect } from "@/lib/security";
 import { NextResponse } from "next/server";
 import { buildSessionCookieDescriptor } from "@/lib/auth/session-cookie";
 import {
@@ -9,13 +11,6 @@ import { getRequestMeta } from "@/lib/session";
 
 export const runtime = "nodejs";
 
-function getRedirectPath(value: unknown, fallback: string) {
-  if (typeof value === "string" && value.startsWith("/") && !value.startsWith("//")) {
-    return value;
-  }
-
-  return fallback;
-}
 
 export async function POST(request: Request) {
   let payload: Record<string, unknown>;
@@ -39,6 +34,9 @@ export async function POST(request: Request) {
     );
   }
 
+  if (username.length>100 || password.length>128) return NextResponse.json({error:"Invalid credentials."},{status:400});
+  try { await limitAuthAttempt(username,(await getRequestMeta()).ipAddress); }
+  catch(error) { return NextResponse.json({error:error instanceof Error?error.message:"Login unavailable."},{status:429}); }
   const user = await authenticateUser({ username, password });
 
   if (!user) {
@@ -55,7 +53,7 @@ export async function POST(request: Request) {
     ipAddress: meta.ipAddress,
   });
   const redirectTo =
-    user.role === "admin" ? "/admin" : getRedirectPath(payload.redirectTo, "/dashboard");
+    user.requirePasswordReset ? "/change-password" : user.role === "admin" ? "/admin" : safeRedirect(payload.redirectTo);
   const response = NextResponse.json({ ok: true, redirectTo });
   const descriptor = buildSessionCookieDescriptor(token, request.headers);
   response.cookies.set(descriptor.name, descriptor.value, descriptor.options);

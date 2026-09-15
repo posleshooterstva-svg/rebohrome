@@ -107,6 +107,8 @@ export const COINFLOW_ENABLE_UK_FASTER_PAYMENTS =
   "true";
 export const COINFLOW_ENABLE_PIX =
   process.env.COINFLOW_ENABLE_PIX?.trim().toLowerCase() === "true";
+export const COINFLOW_ENFORCE_COUNTRY_IP =
+  process.env.COINFLOW_ENFORCE_COUNTRY_IP?.trim().toLowerCase() !== "false";
 export const WERT_ENV =
   process.env.WERT_ENV?.trim().toLowerCase() === "production"
     ? "production"
@@ -153,7 +155,7 @@ export const WERT_PLATFORM_CUSTODY_ADDRESS =
 export const ADMIN_SEED_USERNAME =
   process.env.ADMIN_SEED_USERNAME ?? "monohrome_admin";
 export const ADMIN_SEED_PASSWORD =
-  process.env.ADMIN_SEED_PASSWORD ?? "123123nrrN!!";
+  process.env.ADMIN_SEED_PASSWORD ?? "";
 export const ADMIN_SEED_TELEGRAM =
   process.env.ADMIN_SEED_TELEGRAM_USERNAME ?? "@monohrome_admin";
 export const EUR_USD_FALLBACK_RATE = Number(

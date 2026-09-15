@@ -58,7 +58,7 @@ export function OrderSuccessView({
       icon: "transaction",
     },
     {
-      label: "TransVoucher Transaction ID",
+      label: "Provider Transaction ID",
       value: providerTransactionId ?? "Pending",
       icon: "transaction",
     },
@@ -111,7 +111,7 @@ export function OrderSuccessView({
       "REBOHROME PURCHASE RECEIPT",
       `Order ID: ${orderId}`,
       `Local Transaction ID: ${transactionId ?? "Pending"}`,
-      `TransVoucher Transaction ID: ${providerTransactionId ?? "Pending"}`,
+      `Provider Transaction ID: ${providerTransactionId ?? "Pending"}`,
       `Paid Amount: ${formatCurrency(total, currency)}`,
       `Payment Method: ${paymentMethod}`,
       `Provider: ${provider}`,

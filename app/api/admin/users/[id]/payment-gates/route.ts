@@ -27,7 +27,7 @@ export async function POST(
     };
     const providerKey = String(payload.providerKey ?? "");
 
-    if (!["transvoucher", "cleffo", "wert", "coinflow"].includes(providerKey)) {
+    if (!["transvoucher", "cleffo", "wert", "coinflow", "merchantpayd"].includes(providerKey)) {
       return NextResponse.json(
         { ok: false, error: "Unsupported payment gate." },
         { status: 400 },

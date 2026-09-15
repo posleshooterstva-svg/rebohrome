@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Manrope, Sora } from "next/font/google";
 import { redirect } from "next/navigation";
-import { CartSync } from "@/components/cart/cart-sync";
+import { CartSync } from "@/components/cart/cart-sync-v2";
 import { CookieConsent } from "@/components/rebohrome/cookie-consent";
 import { MaintenanceAdminBanner } from "@/components/rebohrome/maintenance-admin-banner";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -37,6 +37,7 @@ function canAccessDuringMaintenance(pathname: string) {
   return (
     pathname === "/maintenance" ||
     pathname === "/login" ||
+    pathname === "/change-password" ||
     pathname === "/status" ||
     pathname.startsWith("/admin") ||
     pathname.startsWith("/api/admin") ||
@@ -76,7 +77,7 @@ export default async function RootLayout({
     <html suppressHydrationWarning lang="en">
       <body className={`${manrope.variable} ${sora.variable} antialiased`}>
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
-          <CartSync />
+          <CartSync userId={session.userId} />
           {maintenance.enabled && isAdmin ? (
             <MaintenanceAdminBanner
               currentPath={pathname}

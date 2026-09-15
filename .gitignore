@@ -42,3 +42,16 @@ yarn-error.log*
 next-env.d.ts
 
 .vercel
+
+# Local runtime state, private deployment exports and QA artifacts
+/.tmp/
+/data/*.db
+/data/*.db-*
+/.codex-*.log
+/tmp*
+/qa-screenshots/
+/artifacts/
+/cache/
+/typechain-types/
+
+.env*

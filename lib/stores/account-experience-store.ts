@@ -155,18 +155,8 @@ export const useAccountExperienceStore = create<AccountExperienceState>((set) =>
             ...state.accounts,
             [userId]: {
               ...current,
-              balance:
-                current.balance.available === 0 &&
-                current.balance.pendingWithdrawal === 0 &&
-                current.balance.totalDeposited === 0 &&
-                current.balance.totalSpent === 0 &&
-                current.balance.totalWithdrawn === 0
-                  ? balance
-                  : current.balance,
-              activity:
-                current.activity.length === 0 && activity.length > 0
-                  ? activity
-                  : current.activity,
+              balance,
+              activity,
             },
           },
         };
@@ -194,10 +184,7 @@ export const useAccountExperienceStore = create<AccountExperienceState>((set) =>
           ...state.accounts,
           [userId]: {
             ...current,
-            inventory:
-              current.inventory.length === 0
-                ? inventory
-                : mergeInventory(current.inventory, inventory),
+            inventory,
           },
         },
       };
@@ -211,7 +198,7 @@ export const useAccountExperienceStore = create<AccountExperienceState>((set) =>
           ...state.accounts,
           [userId]: {
             ...current,
-            orders: current.orders.length === 0 ? orders : mergeOrders(current.orders, orders),
+            orders: orders,
           },
         },
       };

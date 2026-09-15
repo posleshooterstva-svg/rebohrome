@@ -1,26 +1,11 @@
+import { authorizeCron } from "@/lib/security";
 import { NextResponse } from "next/server";
 import { reconcilePendingTransVoucherPayments } from "@/lib/db/repository";
 
 export const dynamic = "force-dynamic";
 
-function getBearerToken(request: Request) {
-  const header = request.headers.get("authorization") ?? "";
-  const [scheme, token] = header.split(/\s+/, 2);
-  return scheme?.toLowerCase() === "bearer" ? token ?? "" : "";
-}
-
 export async function GET(request: Request) {
-  const secret = process.env.CRON_SECRET?.trim() ?? "";
-  const isVercelCron = request.headers.get("x-vercel-cron") === "1";
-
-  if (secret) {
-    if (getBearerToken(request) !== secret && !isVercelCron) {
-      return NextResponse.json({ ok: false, error: "Unauthorized." }, { status: 401 });
-    }
-  } else if (!isVercelCron) {
-    return NextResponse.json({ ok: false, error: "Unauthorized." }, { status: 401 });
-  }
-
+  if (!authorizeCron(request)) return NextResponse.json({error:"Unauthorized."},{status:401});
   try {
     const url = new URL(request.url);
     const limit = Math.min(

@@ -29,6 +29,11 @@ type CheckoutTokenResponse =
         settlementType: string;
         webhookInfo: Record<string, unknown>;
         chargebackProtectionData: Array<Record<string, unknown>>;
+        customerInfo: {
+          country?: string;
+          ip?: string;
+        };
+        residenceCountry: string;
         enableApplePay: boolean;
         enableGooglePay: boolean;
         enableCard: boolean;
@@ -168,6 +173,7 @@ export function CoinflowCheckoutClient({ sessionId }: { sessionId: string }) {
           <CoinflowPurchaseRuntime
             allowedPaymentMethods={["card"]}
             chargebackProtectionData={coinflow.chargebackProtectionData as never}
+            customerInfo={coinflow.customerInfo}
             disableApplePay={!coinflow.enableApplePay}
             disableGooglePay={!coinflow.enableGooglePay}
             email={coinflow.email}

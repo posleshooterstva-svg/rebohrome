@@ -1,4 +1,5 @@
 "use client";
+import { paymentRequestKey } from "@/lib/payments/request-key";
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -19,7 +20,10 @@ import {
   type PaymentProviderName,
   type SupportedCurrency,
 } from "@/lib/rebohrome-data";
-import { useAccountExperienceStore } from "@/lib/stores/account-experience-store";
+import {
+  COINFLOW_ALLOWED_COUNTRIES,
+  type CoinflowCountryCode,
+} from "@/lib/payments/coinflow-country-policy";
 
 type DepositPageClientProps = {
   userId: string;
@@ -42,6 +46,7 @@ type DepositDraft = {
   paymentMethod: PaymentMethodName | "";
   currency: SupportedCurrency | "";
   provider: PaymentProviderName | "";
+  coinflowCountry: CoinflowCountryCode | "";
 };
 
 type DepositSessionResponse =
@@ -68,12 +73,12 @@ export function DepositPageClient({
   initialOutcome,
 }: DepositPageClientProps) {
   const router = useRouter();
-  const applyDeposit = useAccountExperienceStore((state) => state.applyDeposit);
   const [selectedAmount, setSelectedAmount] = useState(250);
   const [customAmount, setCustomAmount] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodName | "">("");
   const [currency, setCurrency] = useState<SupportedCurrency | "">("");
   const [provider, setProvider] = useState<PaymentProviderName | "">("");
+  const [coinflowCountry, setCoinflowCountry] = useState<CoinflowCountryCode | "">("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -92,9 +97,10 @@ export function DepositPageClient({
       const draft = JSON.parse(saved) as DepositDraft;
       setSelectedAmount(draft.selectedAmount || 250);
       setCustomAmount(draft.customAmount || "");
-      setPaymentMethod(draft.paymentMethod || "");
-      setCurrency(draft.currency || "");
-      setProvider(draft.provider || "");
+      setPaymentMethod(draft.paymentMethod === "Bank Transfer" ? "Bank Transfer" : "Cash App");
+      setCurrency("USD");
+      setProvider("RebohromePayment");
+      setCoinflowCountry(draft.coinflowCountry || "");
     } catch {
       window.sessionStorage.removeItem(DEPOSIT_DRAFT_KEY);
     }
@@ -113,9 +119,18 @@ export function DepositPageClient({
         paymentMethod,
         currency,
         provider,
+        coinflowCountry,
       } satisfies DepositDraft),
     );
-  }, [currency, customAmount, mounted, paymentMethod, provider, selectedAmount]);
+  }, [
+    coinflowCountry,
+    currency,
+    customAmount,
+    mounted,
+    paymentMethod,
+    provider,
+    selectedAmount,
+  ]);
 
   useEffect(() => {
     if (!paymentMethod || !currency) {
@@ -159,8 +174,8 @@ export function DepositPageClient({
     return paymentGates.map((gate) => ({
       id: gate.providerName,
       gateNumber: gate.gateNumber,
-      label: gate.publicName,
-      secureLabel: "Card / Apple Pay / Google Pay",
+      label: gate.providerKey === 'merchantpayd' ? 'RebohromePayment' : gate.publicName,
+      secureLabel: "Secure checkout",
       speedLabel: "Secure hosted payment",
       supported: gate.enabled && gate.supportsCurrencies.includes(currency),
     }));
@@ -179,6 +194,8 @@ export function DepositPageClient({
     (!gate2Details.firstName ||
       !gate2Details.lastName ||
       !/^\d{8,15}$/.test((gate2Details.phone ?? "").replace(/\D/g, "")));
+  const selectedGateRequiresCountry =
+    selectedGate?.providerKey === "coinflow" && !coinflowCountry;
   const continueLabel = provider ? "Continue to secure payment" : "Select payment provider";
   const failureNotice =
     initialOutcome?.deposit.status === "failed"
@@ -266,26 +283,21 @@ export function DepositPageClient({
         ]
       : [];
 
-  useEffect(() => {
-    if (!initialOutcome || initialOutcome.deposit.status !== "completed") {
+
+
+  async function handleContinue() {
+    if (
+      !paymentMethod ||
+      !currency ||
+      !provider ||
+      isSubmitting ||
+      amount <= 0
+    ) {
       return;
     }
 
-    applyDeposit(userId, {
-      depositId: initialOutcome.deposit.id,
-      originalAmount:
-        initialOutcome.deposit.originalAmount ?? initialOutcome.deposit.amount,
-      originalCurrency: initialOutcome.deposit.originalCurrency ?? "USD",
-      creditedAmountUsd:
-        initialOutcome.deposit.creditedAmountUsd ?? initialOutcome.deposit.amount,
-      summary: `${initialOutcome.deposit.id} · ${formatDisplayDateTime(
-        initialOutcome.deposit.completedAt ?? initialOutcome.deposit.createdAt,
-      )}`,
-    });
-  }, [applyDeposit, initialOutcome, userId]);
-
-  async function handleContinue() {
-    if (!paymentMethod || !currency || !provider || isSubmitting || amount <= 0) {
+    if (selectedGateRequiresCountry) {
+      setError("Select your country of residence for Coinflow checkout.");
       return;
     }
 
@@ -310,14 +322,17 @@ export function DepositPageClient({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Idempotency-Key": paymentRequestKey(userId, JSON.stringify({kind:"deposit",amount,currency:"USD",provider:"RebohromePayment",paymentMethod})),
         },
         signal: controller.signal,
         body: JSON.stringify({
           amount,
           paymentMethod,
-          currency,
-          provider,
+          currency: "USD",
+          provider: "RebohromePayment",
           gateNumber: selectedGate?.gateNumber,
+          coinflowCountry:
+            selectedGate?.providerKey === "coinflow" ? coinflowCountry : undefined,
         }),
       }).finally(() => window.clearTimeout(timeout));
 
@@ -328,22 +343,7 @@ export function DepositPageClient({
         );
       }
 
-      const embedUrl = payload.embedUrl || null;
-      const paymentUrl = payload.paymentUrl || payload.redirectPath;
-      if (!paymentUrl) {
-        throw new Error("Payment page could not be created.");
-      }
-
-      const wertWidgetOptions = payload.wertWidgetOptions ?? null;
-      if (wertWidgetOptions) {
-        await openWertPayment(wertWidgetOptions);
-      } else if (selectedGate?.providerKey === "coinflow") {
-        router.push(paymentUrl);
-      } else if (payload.useEmbed && embedUrl) {
-        openEmbedPayment(embedUrl);
-      } else {
-        window.open(paymentUrl, "_blank");
-      }
+      router.push(payload.redirectPath);
       router.refresh();
     } catch (depositError) {
       if (depositError instanceof DOMException && depositError.name === "AbortError") {
@@ -548,6 +548,7 @@ export function DepositPageClient({
                 active={paymentMethod === option.id}
                 label={option.label}
                 sublabel={option.sublabel}
+                  disabled={option.disabled}
                 onClick={() => {
                   setPaymentMethod(option.id);
                   setError(null);
@@ -560,7 +561,7 @@ export function DepositPageClient({
         <div className="rounded-[16px] border border-line bg-white p-5">
           <StepHeader number="3" title="Select currency" />
           <div className="mt-5 grid gap-3 xl:grid-cols-2">
-            {(["EUR", "USD"] as SupportedCurrency[]).map((option) => (
+            {(["USD"] as SupportedCurrency[]).map((option) => (
               <SelectorCard
                 key={option}
                 active={currency === option}
@@ -632,6 +633,42 @@ export function DepositPageClient({
           ) : null}
         </AnimatePresence>
 
+        <AnimatePresence initial={false}>
+          {selectedGate?.providerKey === "coinflow" ? (
+            <motion.div
+              animate={{ opacity: 1, y: 0 }}
+              className="rounded-[16px] border border-line bg-white p-5"
+              exit={{ opacity: 0, y: -8 }}
+              initial={{ opacity: 0, y: 10 }}
+              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <StepHeader number="5" title="Country of residence" />
+              <p className="mt-3 text-sm leading-6 text-muted">
+                Select your current country of residence. Coinflow checkout is
+                available only from one of the supported IP locations.
+              </p>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                {COINFLOW_ALLOWED_COUNTRIES.map((countryOption) => (
+                  <CoinflowCountryCard
+                    key={countryOption.code}
+                    active={coinflowCountry === countryOption.code}
+                    code={countryOption.code}
+                    flag={countryOption.flag}
+                    name={countryOption.name}
+                    onClick={() => {
+                      setCoinflowCountry(countryOption.code);
+                      setError(null);
+                    }}
+                  />
+                ))}
+              </div>
+              <p className="mt-4 text-xs leading-5 text-muted">
+                VPN and proxy connections may prevent country verification.
+              </p>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+
         {error ? (
           <div className="rounded-[14px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
             {error}
@@ -664,7 +701,8 @@ export function DepositPageClient({
             isSubmitting ||
             amount <= 0 ||
             Boolean(amountLimitError) ||
-            selectedGateRequiresDetails
+            selectedGateRequiresDetails ||
+            selectedGateRequiresCountry
           }
           onClick={handleContinue}
           type="button"
@@ -703,18 +741,21 @@ export function DepositPageClient({
 
 function SelectorCard({
   active,
+  disabled = false,
   label,
   sublabel,
   onClick,
 }: {
   active: boolean;
+  disabled?: boolean;
   label: string;
   sublabel: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={`relative min-h-[112px] w-full rounded-[12px] border px-4 py-4 text-left transition ${
+      disabled={disabled}
+      className={`relative min-h-[112px] w-full rounded-[12px] border px-4 py-4 text-left transition disabled:cursor-not-allowed disabled:opacity-45 ${
         active
           ? "border-[var(--accent)] bg-[var(--accent-soft)]"
           : "border-line bg-white hover:bg-[var(--foreground-soft)]"
@@ -809,6 +850,48 @@ function AmountCard({
       type="button"
     >
       <span>{label}</span>
+      {active ? (
+        <span className="absolute right-3 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-full bg-[var(--accent)] text-white">
+          <Check className="size-3" />
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+function CoinflowCountryCard({
+  active,
+  code,
+  flag,
+  name,
+  onClick,
+}: {
+  active: boolean;
+  code: CoinflowCountryCode;
+  flag: string;
+  name: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-pressed={active}
+      className={`relative flex min-h-16 w-full items-center gap-3 rounded-[12px] border px-4 py-3 text-left transition ${
+        active
+          ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+          : "border-line bg-white hover:bg-[var(--foreground-soft)]"
+      }`}
+      onClick={onClick}
+      type="button"
+    >
+      <span aria-hidden="true" className="text-xl">
+        {flag}
+      </span>
+      <span className="min-w-0">
+        <span className="block truncate text-sm font-semibold text-foreground">
+          {name}
+        </span>
+        <span className="mt-0.5 block font-mono text-[11px] text-muted">{code}</span>
+      </span>
       {active ? (
         <span className="absolute right-3 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded-full bg-[var(--accent)] text-white">
           <Check className="size-3" />

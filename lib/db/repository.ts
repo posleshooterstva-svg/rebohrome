@@ -1,3 +1,6 @@
+import { MERCHANTPAYD_METHODS, savedMerchantMethod } from "@/lib/payments/merchantpayd-methods";
+import { currentTransaction, withDbTransaction, deferUntilCommit } from "@/lib/db/unit-of-work";
+import { minorUnits } from "@/lib/payments/money";
 ﻿import { readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 import { createHash, randomBytes, randomInt, randomUUID } from "crypto";
@@ -131,11 +134,16 @@ import {
 } from "@/lib/server/payments/providers/wert";
 import {
   buildCoinflowChargebackProtectionData,
+  buildCoinflowCustomerInfo,
   buildCoinflowWebhookInfo,
   createCoinflowCheckoutToken,
   getCoinflowPublicConfig,
   sanitizeCoinflowResponse,
 } from "@/lib/server/payments/coinflow-client";
+import {
+  assertCoinflowCountryAccess,
+  CoinflowCountryAccessError,
+} from "@/lib/payments/coinflow-country-policy";
 import {
   coinflowStatusMessage,
   mapCoinflowToProviderStatus,
@@ -183,8 +191,99 @@ import {
   uploadImageToSupabaseStorage,
 } from "@/lib/supabase-storage";
 
+
+function displayPaymentProvider(value: unknown) {
+  return value === "MerchantPayd" ? "RebohromePayment" : String(value);
+}
 type SqlValue = string | number | null;
 type DbRow = Record<string, SqlValue>;
+
+export async function prepareMerchantOrder(items: CheckoutSessionLine[]) {
+  await ensureDatabase();
+  const {productMap}=await resolveCheckoutProducts(items);
+  const totals=calculateCheckoutTotals(items,productMap);
+  return {amountMinor:minorUnits(totals.total),subtotal:totals.subtotal,shipping:totals.shipping,
+    items:items.map(item=>({...item,product:productMap.get(item.productId)!}))};
+}
+
+type MerchantSnapshot = {user:{name:string;email:string};order:Awaited<ReturnType<typeof prepareMerchantOrder>>|null};
+export async function initializeMerchantRecords(tx:LibsqlTransaction,intent:import("@libsql/client").Row) {
+  const snapshot=JSON.parse(String(intent.snapshot_json)) as MerchantSnapshot;
+  const amount=Number(intent.amount_minor)/100,timestamp=String(intent.created_at);
+  const methodLabel=MERCHANTPAYD_METHODS[savedMerchantMethod(snapshot)];
+  const balance=(await tx.execute({sql:"select available from balances where user_id=?",args:[intent.user_id]})).rows[0];
+  if (!balance) throw new Error("Balance account not found.");
+  if (intent.kind==='deposit') {
+    await tx.execute({sql:`insert into deposits(id,user_id,amount,original_amount,original_currency,credited_amount_usd,
+      exchange_rate,payment_method,payment_provider,cardholder_name,card_masked,status,balance_before,balance_after,created_at,updated_at)
+      values(?,?,?,?,'USD',?,1,?,'RebohromePayment',?,'','processing',?,?,?,?)`,
+      args:[intent.reference_id,intent.user_id,amount,amount,amount,methodLabel,snapshot.user.name,balance.available,balance.available,timestamp,timestamp]});
+    await tx.execute({sql:`insert into deposit_payment_sessions(id,user_id,payment_method,payment_provider,currency,original_amount,
+      credited_amount_usd,exchange_rate,status,deposit_id,transaction_id,provider_key,created_at,updated_at,expires_at)
+      values(?,?,?,'RebohromePayment','USD',?,?,1,'attempting',?,?,'merchantpayd',?,?,?)`,
+      args:[intent.id,intent.user_id,methodLabel,amount,amount,intent.reference_id,intent.transaction_id,timestamp,timestamp,new Date(Date.now()+86400_000).toISOString()]});
+  } else {
+    if (!snapshot.order) throw new Error("Order snapshot missing.");
+    await tx.execute({sql:`insert into orders(id,user_id,status,payment_state,subtotal,shipping,total,currency,shipping_name,shipping_email,
+      shipping_address,shipping_city,shipping_postal_code,payment_method,payment_provider,remaining_balance,created_at,updated_at)
+      values(?,?,'Pending','pending',?,?,?,'USD',?,?,'Delivery arranged after payment','','',?,'RebohromePayment',?,?,?)`,
+      args:[intent.reference_id,intent.user_id,snapshot.order.subtotal,snapshot.order.shipping,amount,snapshot.user.name,snapshot.user.email,methodLabel,balance.available,timestamp,timestamp]});
+    for (const item of snapshot.order.items) {
+      const live=(await tx.execute({sql:"select stock,status,archived,currency,price from products where id=?",args:[item.productId]})).rows[0];
+      if (!live || live.status!=='active' || live.archived || live.currency!=='USD' || minorUnits(Number(live.price))!==minorUnits(item.product.price)) throw new Error("Product changed. Refresh your checkout.");
+      for (let i=0;i<(item.product.isRandomized?item.quantity:1);i++) {
+        await tx.execute({sql:"insert into order_items(id,order_id,product_id,quantity,unit_price,delivery_type,product_snapshot_json) values(?,?,?,?,?,?,?)",
+          args:[randomUUID(),intent.reference_id,item.productId,item.product.isRandomized?1:item.quantity,item.product.price,item.deliveryType,JSON.stringify(item.product)]});
+      }
+    }
+    await reserveRandomizedOrderItemsInTransaction(tx,{orderId:String(intent.reference_id),userId:String(intent.user_id),expiresAt:new Date(Date.now()+30*60_000).toISOString()});
+    await tx.execute({sql:`insert into payment_sessions(id,user_id,payment_method,payment_provider,currency,subtotal,shipping,total,status,
+      items_json,order_id,transaction_id,provider_key,created_at,updated_at,expires_at)
+      values(?,?,?,'RebohromePayment','USD',?,?,?,'attempting',?,?,?,'merchantpayd',?,?,?)`,
+      args:[intent.id,intent.user_id,methodLabel,snapshot.order.subtotal,snapshot.order.shipping,amount,JSON.stringify(snapshot.order.items.map(({product: _product,...line})=>line)),intent.reference_id,intent.transaction_id,timestamp,timestamp,new Date(Date.now()+86400_000).toISOString()]});
+  }
+  await tx.execute({sql:`insert into transactions(id,user_id,kind,amount,original_amount,original_currency,display_currency,
+    payment_method,payment_provider,status,reference_id,summary,meta_json,created_at,updated_at)
+    values(?,?,?,?,?,'USD','USD',?,'RebohromePayment','attempting',?,'Awaiting payment',?,?,?)`,
+    args:[intent.transaction_id,intent.user_id,intent.kind,intent.kind==='deposit'?amount:-amount,amount,methodLabel,intent.reference_id,JSON.stringify({provider:'RebohromePayment',paymentIntentId:intent.id}),timestamp,timestamp]});
+}
+
+export async function fulfillMerchantOrder(tx:LibsqlTransaction,intent:import("@libsql/client").Row) {
+  const timestamp=nowIso();
+  const order=(await tx.execute({sql:"select * from orders where id=? and user_id=?",args:[intent.reference_id,intent.user_id]})).rows[0];
+  if (!order) throw new Error("Order not found.");
+  if (order.payment_state==='completed') return;
+  await reserveRandomizedOrderItemsInTransaction(tx,{orderId:String(intent.reference_id),userId:String(intent.user_id),expiresAt:new Date(Date.now()+300_000).toISOString()});
+  await fulfillOrderInventoryInTransaction(tx,{orderId:String(intent.reference_id),userId:String(intent.user_id),acquiredAt:timestamp});
+  await tx.execute({sql:"update balances set total_spent=round(total_spent+?,2),updated_at=? where user_id=?",args:[Number(intent.amount_minor)/100,timestamp,intent.user_id]});
+  const balance=(await tx.execute({sql:"select available from balances where user_id=?",args:[intent.user_id]})).rows[0];
+  await tx.execute({sql:`update orders set status=?,payment_state='completed',failure_reason=null,remaining_balance=?,paid_at=coalesce(paid_at,?),
+    provider_payment_link_id=?,provider_transaction_id=?,provider_status='completed',updated_at=? where id=?`,
+    args:[Number(order.shipping)>0?'Processing':'Completed',balance.available,timestamp,intent.payment_link_id,intent.provider_transaction_id,timestamp,intent.reference_id]});
+  // Preserve edits made to the cart while the external payment was open.
+  const items=(await tx.execute({sql:"select product_id,delivery_type,sum(quantity) quantity from order_items where order_id=? group by product_id,delivery_type",args:[intent.reference_id]})).rows;
+  for (const item of items) await tx.execute({sql:"delete from cart_items where user_id=? and product_id=? and delivery_type=? and quantity=?",args:[intent.user_id,item.product_id,item.delivery_type,item.quantity]});
+  await tx.execute({sql:"insert into cart_versions(user_id,version) values(?,1) on conflict(user_id) do update set version=version+1",args:[intent.user_id]});
+}
+
+export async function processPaymentJobs() {
+  const jobs=await queryMany("select * from app_jobs where status='pending' or (status='running' and lease_until < ?) order by created_at limit 25",[nowIso()]);
+  for (const job of jobs) {
+    const claimed=await execute("update app_jobs set status='running',lease_until=?,attempts=attempts+1 where id=? and (status='pending' or lease_until<?)",[new Date(Date.now()+300_000).toISOString(),String(job.id),nowIso()]);
+    if (!claimed.rowsAffected) continue;
+    try {
+      if(job.kind==='payment_completed') {
+        await rebuildAllRandomizedPackVersions();
+        const payload=JSON.parse(String(job.payload)) as {intentId:string};
+        const intent=await queryOne("select * from payment_intents where id=?",[payload.intentId]);
+        if(intent) {revalidatePrivate(String(intent.user_id));revalidateAdmin();revalidateStorefront();}
+      }
+      await execute("update app_jobs set status='completed',last_error=null,lease_until=null,updated_at=? where id=?",[nowIso(),String(job.id)]);
+    } catch {
+      await execute("update app_jobs set status='pending',last_error='Post-payment refresh failed.',lease_until=null,updated_at=? where id=?",[nowIso(),String(job.id)]);
+    }
+  }
+}
 type MaintenanceModeConfig = {
   enabled: boolean;
   title: string;
@@ -590,7 +689,7 @@ function normalizeUser(row: DbRow): UserRecord {
     name: String(row.name),
     role: String(row.role) as UserRecord["role"],
     status: String(row.status) as UserRecord["status"],
-    telegramUsername: String(row.telegram_username),
+    telegramUsername: row.telegram_username ? String(row.telegram_username) : "",
     telegramId: row.telegram_id ? String(row.telegram_id) : null,
     telegramChatId: row.telegram_chat_id ? String(row.telegram_chat_id) : null,
     telegramVerified: asBoolean(row.telegram_verified ?? row.verified ?? 0),
@@ -833,7 +932,7 @@ function normalizeOrder(row: DbRow): OrderRecord {
     shipping: Number(row.shipping),
     total: Number(row.total),
     currency: row.currency ? (String(row.currency) as SupportedCurrency) : "USD",
-    paymentProvider: row.payment_provider ? String(row.payment_provider) : null,
+    paymentProvider: row.payment_provider ? displayPaymentProvider(row.payment_provider) : null,
     transvoucherTransactionId: row.transvoucher_transaction_id
       ? String(row.transvoucher_transaction_id)
       : null,
@@ -846,7 +945,7 @@ function normalizeOrder(row: DbRow): OrderRecord {
     shippingAddress: String(row.shipping_address),
     shippingCity: String(row.shipping_city),
     shippingPostalCode: String(row.shipping_postal_code),
-    paymentMethod: String(row.payment_method),
+    paymentMethod: row.payment_method === "Cash App 4" ? "Cash App" : String(row.payment_method),
     failureReason: row.failure_reason ? String(row.failure_reason) : null,
     remainingBalance:
       row.remaining_balance === null ? null : Number(row.remaining_balance),
@@ -881,8 +980,8 @@ function normalizeTransaction(row: DbRow): TransactionRecord {
       row.exchange_rate === null || row.exchange_rate === undefined
         ? null
         : Number(row.exchange_rate),
-    paymentMethod: row.payment_method ? String(row.payment_method) : null,
-    paymentProvider: row.payment_provider ? String(row.payment_provider) : null,
+    paymentMethod: row.payment_method ? (row.payment_method === "Cash App 4" ? "Cash App" : String(row.payment_method)) : null,
+    paymentProvider: row.payment_provider ? displayPaymentProvider(row.payment_provider) : null,
     transvoucherTransactionId: row.transvoucher_transaction_id
       ? String(row.transvoucher_transaction_id)
       : null,
@@ -930,8 +1029,8 @@ function normalizeDeposit(row: DbRow): DepositRecord {
       row.exchange_rate === null || row.exchange_rate === undefined
         ? null
         : Number(row.exchange_rate),
-    paymentMethod: String(row.payment_method),
-    paymentProvider: row.payment_provider ? String(row.payment_provider) : null,
+    paymentMethod: row.payment_method === "Cash App 4" ? "Cash App" : String(row.payment_method),
+    paymentProvider: row.payment_provider ? displayPaymentProvider(row.payment_provider) : null,
     transvoucherTransactionId: row.transvoucher_transaction_id
       ? String(row.transvoucher_transaction_id)
       : null,
@@ -1032,8 +1131,8 @@ function normalizeCheckoutPaymentSession(
   return {
     id: String(row.id),
     userId: String(row.user_id),
-    paymentMethod: String(row.payment_method) as PaymentMethodName,
-    paymentProvider: String(row.payment_provider) as PaymentProviderName,
+    paymentMethod: row.payment_method === "Cash App 4" ? "Cash App" : String(row.payment_method) as PaymentMethodName,
+    paymentProvider: displayPaymentProvider(row.payment_provider) as PaymentProviderName,
     currency: String(row.currency) as SupportedCurrency,
     subtotal: Number(row.subtotal),
     shipping: Number(row.shipping),
@@ -1066,8 +1165,8 @@ function normalizeDepositPaymentSession(
   return {
     id: String(row.id),
     userId: String(row.user_id),
-    paymentMethod: String(row.payment_method) as PaymentMethodName,
-    paymentProvider: String(row.payment_provider) as PaymentProviderName,
+    paymentMethod: row.payment_method === "Cash App 4" ? "Cash App" : String(row.payment_method) as PaymentMethodName,
+    paymentProvider: displayPaymentProvider(row.payment_provider) as PaymentProviderName,
     currency: String(row.currency) as SupportedCurrency,
     originalAmount: Number(row.original_amount),
     creditedAmountUsd: Number(row.credited_amount_usd),
@@ -1097,7 +1196,7 @@ function normalizeActiveCheckoutSession(row: DbRow): ActivePaymentSessionRecord 
   return {
     id: String(row.id),
     type: "purchase",
-    provider: String(row.payment_provider),
+    provider: displayPaymentProvider(row.payment_provider),
     transactionId: row.transaction_id ? String(row.transaction_id) : null,
     providerTransactionId: row.transvoucher_transaction_id
       ? String(row.transvoucher_transaction_id)
@@ -1116,7 +1215,7 @@ function normalizeActiveDepositSession(row: DbRow): ActivePaymentSessionRecord {
   return {
     id: String(row.id),
     type: "deposit",
-    provider: String(row.payment_provider),
+    provider: displayPaymentProvider(row.payment_provider),
     transactionId: row.transaction_id ? String(row.transaction_id) : null,
     providerTransactionId: row.transvoucher_transaction_id
       ? String(row.transvoucher_transaction_id)
@@ -1171,6 +1270,9 @@ function isTransientDatabaseError(error: unknown) {
 }
 
 async function execute(sql: string, args: SqlValue[] = []) {
+  const transaction = currentTransaction();
+  if (transaction) return transaction.execute({sql,args});
+
   const runtime = getDbRuntimeConfig();
   const maxAttempts = runtime.usingExternalDatabase ? 3 : 1;
 
@@ -1181,6 +1283,7 @@ async function execute(sql: string, args: SqlValue[] = []) {
       const shouldRetry =
         runtime.usingExternalDatabase &&
         attempt < maxAttempts &&
+        /^\s*(select|pragma)\b/i.test(sql) &&
         isTransientDatabaseError(error);
 
       if (!shouldRetry) {
@@ -1218,6 +1321,7 @@ async function tableExists(tableName: string) {
 }
 
 async function ensureColumn(table: string, definition: string) {
+  if (!shouldAutoSetupDatabase()) return;
   try {
     await execute(`alter table ${table} add column ${definition}`);
   } catch (error) {
@@ -1234,6 +1338,7 @@ async function ensureColumn(table: string, definition: string) {
 }
 
 async function ensureRandomizedPackTables() {
+  if (!shouldAutoSetupDatabase()) return;
   for (const statement of RANDOMIZED_PACK_CREATE_STATEMENTS) {
     await execute(statement);
   }
@@ -1243,6 +1348,7 @@ async function ensureRandomizedPackTables() {
 }
 
 async function ensureSystemSettingsTable() {
+  if (!shouldAutoSetupDatabase()) return;
   await execute(
     `create table if not exists system_settings (
       key text primary key,
@@ -1254,6 +1360,7 @@ async function ensureSystemSettingsTable() {
 }
 
 async function ensurePaymentReconciliationRunsTable() {
+  if (!shouldAutoSetupDatabase()) return;
   await execute(
     `create table if not exists payment_reconciliation_runs (
       id text primary key,
@@ -1274,6 +1381,7 @@ async function ensurePaymentReconciliationRunsTable() {
 }
 
 async function ensureArchiveTrustTables() {
+  if (!shouldAutoSetupDatabase()) return;
   await execute(
     `create table if not exists archive_ledger (
       id text primary key,
@@ -1437,6 +1545,7 @@ async function migrateLegacyRandomizedProducts() {
 }
 
 async function ensureAdminUserManagementTables() {
+  if (!shouldAutoSetupDatabase()) return;
   await ensureColumn("transactions", "direction text");
   await ensureColumn("transactions", "balance_before integer");
   await ensureColumn("transactions", "balance_after integer");
@@ -1767,7 +1876,7 @@ async function ensureApplicationColumns() {
   await ensureColumn("deposit_payment_sessions", "nft_delivery_mode text");
   await ensureColumn("deposit_payment_sessions", "chain_tx_hash text");
   await ensureColumn("deposit_payment_sessions", "nft_delivered_at text");
-  await ensurePaymentProviderRegistry();
+  // Provider registry is maintained by explicit migrations.
   await ensureColumn("balances", "payout_bonus_override_enabled integer not null default 0");
   await ensureColumn("balances", "payout_bonus_percent integer");
   await ensureColumn("transactions", "provider_checked_at text");
@@ -1856,12 +1965,16 @@ async function ensureCoinflowDepositPaymentSessionColumns() {
   await ensureColumn("deposit_payment_sessions", "coinflow_last4 text");
   await ensureColumn("deposit_payment_sessions", "coinflow_bin text");
   await ensureColumn("deposit_payment_sessions", "coinflow_card_token text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_residence_country text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_request_country text");
+  await ensureColumn("deposit_payment_sessions", "coinflow_request_ip text");
   await ensureColumn("deposit_payment_sessions", "idempotency_key text");
   await ensureColumn("deposit_payment_sessions", "completed_at text");
   await ensureColumn("deposit_payment_sessions", "failed_at text");
 }
 
 async function ensurePerformanceIndexes() {
+  if (!shouldAutoSetupDatabase()) return;
   await Promise.all([
     execute("create index if not exists idx_users_username on users(username)"),
     execute("create index if not exists idx_users_email on users(email)"),
@@ -1888,6 +2001,7 @@ async function ensurePerformanceIndexes() {
 }
 
 async function ensurePaymentProviderRegistry() {
+  if (!shouldAutoSetupDatabase()) return;
   const timestamp = nowIso();
   const providers: Array<{
     key: PaymentProviderKey;
@@ -2050,7 +2164,7 @@ function normalizePaymentGateAccess(row: DbRow): PaymentGateAccessRecord {
   return {
     providerKey,
     gateNumber: Number(row.gate_number),
-    providerName: String(row.provider_name) as Exclude<
+    providerName: displayPaymentProvider(row.provider_name) as Exclude<
       PaymentProviderName,
       "Internal Wallet"
     >,
@@ -2080,7 +2194,7 @@ export async function getUserPaymentGateAccess(
   userId: string,
 ): Promise<PaymentGateAccessRecord[]> {
   await ensureDatabase();
-  await ensurePaymentProviderRegistry();
+  // Provider registry is maintained by explicit migrations.
   const rows = await queryMany(
     `select
       payment_providers.*,
@@ -2102,7 +2216,7 @@ export async function getAvailablePaymentGatesForUser(
   userId: string,
 ): Promise<PaymentGateAccessRecord[]> {
   const gates = await getUserPaymentGateAccess(userId);
-  return gates.filter((gate) => gate.enabled && gate.accessEnabled);
+  return gates.filter((gate) => gate.enabled && gate.accessEnabled && gate.providerKey === "merchantpayd" && process.env.MERCHANTPAYD_ENABLED === "true");
 }
 
 function formatCompactAmount(value: number) {
@@ -2295,7 +2409,7 @@ export async function updateUserPaymentGateAccess(input: {
 
 export async function getAdminPaymentProviders() {
   await ensureDatabase();
-  await ensurePaymentProviderRegistry();
+  // Provider registry is maintained by explicit migrations.
   const rows = await queryMany(
     `select payment_providers.*
      from payment_providers
@@ -2326,7 +2440,7 @@ export async function updateAdminPaymentProviderLimits(input: {
   timestamp: string;
 }) {
   await ensureDatabase();
-  await ensurePaymentProviderRegistry();
+  // Provider registry is maintained by explicit migrations.
 
   const admin = await getAdminIdentity(input.adminUserId);
   const current = await queryOne(
@@ -4316,7 +4430,7 @@ async function assertDatabaseReady() {
   );
 
   if (missingTables.length === 0) {
-    await ensurePaymentSessionLookupIndexes();
+
     return;
   }
 
@@ -4405,6 +4519,7 @@ async function seedAdminAccount() {
 
   const timestamp = nowIso();
   const userId = randomUUID();
+  if (!ADMIN_SEED_PASSWORD || ADMIN_SEED_PASSWORD.length<12) throw new Error("Set a strong ADMIN_SEED_PASSWORD explicitly before seeding.");
   const passwordHash = hashPassword(ADMIN_SEED_PASSWORD);
 
   await execute(
@@ -4831,7 +4946,7 @@ async function resolveCheckoutProducts(
   const productIds = [...quantityByProduct.keys()];
   const placeholders = productIds.map(() => "?").join(", ");
   const productRows = await queryMany(
-    `select * from products where id in (${placeholders}) and archived = 0`,
+    `select * from products where id in (${placeholders}) and archived = 0 and status = 'active'`,
     productIds,
   );
   const productMap = new Map(
@@ -4848,6 +4963,7 @@ async function resolveCheckoutProducts(
       throw new Error("One or more selected products are no longer available.");
     }
 
+    if (product.currency !== "USD") throw new Error("This product requires a USD price before checkout.");
     if (product.stock < quantity) {
       throw new Error(`${product.title} no longer has enough stock.`);
     }
@@ -4867,10 +4983,11 @@ function calculateCheckoutTotals(
   items: CheckoutSessionLine[],
   productMap: Map<string, ProductRecord>,
 ) {
-  let subtotal = 0;
+  let subtotalMinor = 0;
 
   for (const item of items) {
-    subtotal += (productMap.get(item.productId)?.price ?? 0) * item.quantity;
+    subtotalMinor += minorUnits(productMap.get(item.productId)?.price ?? 0) * item.quantity;
+    if (!Number.isSafeInteger(subtotalMinor)) throw new Error("Order amount is too large.");
   }
 
   const shipping = items.some((item) => item.deliveryType === "physical")
@@ -4878,9 +4995,9 @@ function calculateCheckoutTotals(
     : 0;
 
   return {
-    subtotal,
+    subtotal: subtotalMinor / 100,
     shipping,
-    total: subtotal + shipping,
+    total: (subtotalMinor + shipping * 100) / 100,
   };
 }
 
@@ -4905,9 +5022,9 @@ async function insertCheckoutOrderItems(input: {
       const quantity = product.isRandomized ? 1 : item.quantity;
       await execute(
         `insert into order_items (
-          id, order_id, product_id, quantity, unit_price, delivery_type
-        ) values (?, ?, ?, ?, ?, ?)`,
-        [id, input.orderId, product.id, quantity, product.price, item.deliveryType],
+          id, order_id, product_id, quantity, unit_price, delivery_type, product_snapshot_json
+        ) values (?, ?, ?, ?, ?, ?, ?)`,
+        [id, input.orderId, product.id, quantity, product.price, item.deliveryType, JSON.stringify(product)],
       );
       created.push({ id, product, quantity, deliveryType: item.deliveryType });
     }
@@ -5285,7 +5402,7 @@ async function completeArchiveBalanceOrderAtomically(input: {
     });
     await transaction.commit();
     if (fulfillment.randomizedInventoryChanged) {
-      await rebuildAllRandomizedPackVersions();
+      await rebuildAllRandomizedPackVersions().catch(() => console.warn("Pack refresh deferred after completed payment."));
     }
     return {
       completedNow: true,
@@ -5396,7 +5513,7 @@ async function completeTransVoucherOrderAtomically(input: {
     }
     await transaction.commit();
     if (fulfillment.randomizedInventoryChanged) {
-      await rebuildAllRandomizedPackVersions();
+      await rebuildAllRandomizedPackVersions().catch(() => console.warn("Pack refresh deferred after completed payment."));
     }
     return { completedNow: true, delivered: fulfillment.delivered, remainingBalance };
   } catch (error) {
@@ -6019,6 +6136,8 @@ async function sendWithdrawalFailureNotification(params: {
 }
 
 async function notifySafely(task: () => Promise<unknown>) {
+  if (deferUntilCommit(task)) return;
+
   try {
     await task();
   } catch (error) {
@@ -7783,7 +7902,7 @@ export async function ensureDatabase() {
         `create table if not exists profiles (
           user_id text primary key,
           role text not null,
-          telegram_username text not null unique,
+          telegram_username text unique,
           telegram_id text,
           telegram_chat_id text,
           telegram_verified integer not null default 0,
@@ -9318,12 +9437,13 @@ export async function registerUser(input: {
   telegramLinkedAt?: string | null;
 }) {
   await ensureDatabase();
+  return withDbTransaction(async () => {
 
   const username = normalizeUsername(input.username);
   const email = normalizeEmail(input.email);
   const telegramUsername = input.telegramUsername?.trim()
     ? normalizeTelegramUsername(input.telegramUsername)
-    : normalizeTelegramUsername(`@${username}`);
+    : null;
   const telegramId = normalizeTelegramNumericId(input.telegramId);
 
   if (username.length < 3) {
@@ -9334,7 +9454,7 @@ export async function registerUser(input: {
     throw new Error("Enter a valid email address.");
   }
 
-  if (!isValidTelegramUsername(telegramUsername)) {
+  if (telegramUsername && !isValidTelegramUsername(telegramUsername)) {
     throw new Error("Telegram username must start with @ and use 5-32 valid characters.");
   }
 
@@ -9402,6 +9522,8 @@ export async function registerUser(input: {
   );
 
   return userId;
+
+  });
 }
 
 export async function authenticateUser(input: {
@@ -10775,174 +10897,8 @@ export async function createDeposit(input: {
   billingCountry?: string;
   cryptoNetwork?: CryptoNetwork | null;
 }) {
-  await ensureDatabase();
-  await requireDocumentAcceptanceForUser(input.userId);
-
-  if (input.amount <= 0) {
-    throw new Error("Deposit amount must be greater than zero.");
-  }
-
-  if (input.provider !== "TransVoucher") {
-    throw new Error("TransVoucher is the only active payment provider.");
-  }
-
-  const account = await getUserAndBalance(input.userId);
-
-  if (!account) {
-    throw new Error("Unable to load collector account.");
-  }
-
-  const depositId = createReadableId("DEP");
-  const timestamp = nowIso();
-  const paymentReference = getPaymentReference({
-    paymentMethod: input.paymentMethod,
-    cardNumber: input.cardNumber,
-    cryptoNetwork: input.cryptoNetwork,
-  });
-  const digits = input.cardNumber?.replace(/\D+/g, "") ?? "";
-  const shouldDecline =
-    input.paymentMethod === "Credit Card" && digits.endsWith("0000");
-  const balanceBefore = account.balance.available;
-  const conversion = await convertAmount(input.amount, input.currency, "USD");
-  const creditedAmountUsd = conversion.convertedAmount;
-  const exchangeRate = conversion.exchangeRate;
-  const balanceAfter = shouldDecline
-    ? balanceBefore
-    : Number((balanceBefore + creditedAmountUsd).toFixed(2));
-  const cardholderName =
-    input.cardholderName?.trim() ||
-    (input.paymentMethod === "Crypto" ? "Crypto settlement" : input.paymentMethod);
-
-  await execute(
-    `insert into deposits (
-      id, user_id, amount, original_amount, original_currency, credited_amount_usd,
-      exchange_rate, payment_method, payment_provider, cardholder_name, card_masked,
-      status, balance_before, balance_after, created_at, updated_at, completed_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
-    [
-      depositId,
-      input.userId,
-      creditedAmountUsd,
-      input.amount,
-      input.currency,
-      creditedAmountUsd,
-      exchangeRate,
-      input.paymentMethod,
-      input.provider,
-      cardholderName,
-      paymentReference,
-      shouldDecline ? "failed" : "completed",
-      balanceBefore,
-      balanceAfter,
-      timestamp,
-      timestamp,
-      shouldDecline ? null : timestamp,
-    ],
-  );
-
-  const transactionId = await createTransactionRecord({
-    userId: input.userId,
-    kind: "deposit",
-    amount: creditedAmountUsd,
-    originalAmount: input.amount,
-    originalCurrency: input.currency,
-    displayCurrency: input.currency,
-    creditedAmountUsd,
-    exchangeRate,
-    paymentMethod: input.paymentMethod,
-    paymentProvider: input.provider,
-    status: shouldDecline ? "failed" : "completed",
-    referenceId: depositId,
-    summary: shouldDecline ? "Deposit failed" : "Deposit completed",
-    meta: {
-      originalAmount: input.amount,
-      originalCurrency: input.currency,
-      creditedAmountUsd,
-      exchangeRate,
-      paymentMethod: input.paymentMethod,
-      provider: input.provider,
-      paymentReference,
-      billingCountry: input.billingCountry ?? null,
-      cryptoNetwork: input.cryptoNetwork ?? null,
-      relatedOrderId: depositId,
-      telegramUsername: account.user.telegramUsername,
-    },
-  });
-
-  if (shouldDecline) {
-    await notifySafely(() =>
-      sendDepositFailureNotification({
-        username: account.user.username,
-        telegramUsername: account.user.telegramUsername,
-        depositId,
-        amount: input.amount,
-        currency: input.currency,
-        paymentMethod: `${input.paymentMethod} ${paymentReference}`,
-        reason: "Payment was declined by the issuing bank.",
-        timestamp,
-      }),
-    );
-
-    revalidatePrivate(input.userId);
-    return {
-      ok: false as const,
-      depositId,
-      transactionId,
-      reason: "Payment was declined by the issuing bank.",
-      balanceBefore,
-      balanceAfter,
-      originalAmount: input.amount,
-      originalCurrency: input.currency,
-      creditedAmountUsd,
-      exchangeRate,
-      paymentMethod: input.paymentMethod,
-      provider: input.provider,
-      paymentReference,
-      timestamp,
-    };
-  }
-
-  await execute(
-    `update balances set
-      available = ?,
-      total_deposited = total_deposited + ?,
-      updated_at = ?
-     where user_id = ?`,
-    [balanceAfter, creditedAmountUsd, timestamp, input.userId],
-  );
-
-  await notifySafely(() =>
-    sendDepositNotification({
-      username: account.user.username,
-      telegramUsername: account.user.telegramUsername,
-      depositId,
-      originalAmount: input.amount,
-      originalCurrency: input.currency,
-      creditedAmountUsd,
-      exchangeRate,
-      paymentMethod: input.paymentMethod,
-      provider: input.provider,
-      timestamp,
-    }),
-  );
-
-  revalidatePrivate(input.userId);
-
-  return {
-    ok: true as const,
-    depositId,
-    transactionId,
-    balanceBefore,
-    balanceAfter,
-    originalAmount: input.amount,
-    originalCurrency: input.currency,
-    creditedAmountUsd,
-    exchangeRate,
-    paymentMethod: input.paymentMethod,
-    provider: input.provider,
-    paymentReference,
-    timestamp,
-  };
+  void input;
+  throw new Error("Direct payment completion is retired. A verified provider payment is required.");
 }
 
 export async function createWithdrawalRequest(input: {
@@ -10962,314 +10918,8 @@ export async function createCheckoutPaymentSession(input: {
   currency: SupportedCurrency;
   items: CheckoutSessionLine[];
 }) {
-  await ensureDatabase();
-
-  if (input.provider !== "TransVoucher") {
-    throw new Error("TransVoucher is the only active payment provider.");
-  }
-
-  if (input.paymentMethod === "Crypto") {
-    throw new Error("Crypto checkout is not available in the TransVoucher flow.");
-  }
-
-  const account = await getUserAndBalance(input.userId);
-
-  if (!account) {
-    throw new Error("Unable to load collector account.");
-  }
-
-  if (!userHasKycAccess(account.user)) {
-    throw new KycVerificationRequiredError(
-      "Please complete verification before making a card payment.",
-    );
-  }
-
-  const existingSession = await getActivePaymentSession(input.userId, "purchase");
-  if (existingSession) {
-    return {
-      sessionId: existingSession.id,
-      paymentUrl: existingSession.paymentUrl,
-      embedUrl: null,
-      useEmbed: false,
-      redirectPath:
-        existingSession.provider === "TransVoucher"
-          ? `/payment/transvoucher?session=${encodeURIComponent(existingSession.id)}`
-          : existingSession.paymentUrl,
-      activeSession: existingSession,
-      reusedExistingSession: true,
-    };
-  }
-
-  const { productMap } = await resolveCheckoutProducts(input.items);
-  const pricing = calculateCheckoutTotals(input.items, productMap);
-  const sessionId = randomUUID();
-  const orderId = createReadableId("ORD");
-  const transactionId = createReadableId("TXN");
-  const timestamp = nowIso();
-  const expiresAt = new Date(
-    Date.now() + CHECKOUT_PAYMENT_SESSION_TTL_MINUTES * 60 * 1000,
-  ).toISOString();
-  const shippingName = account.user.name || account.user.username;
-  const shippingEmail = account.user.email;
-  const shippingAddress =
-    pricing.shipping > 0
-      ? "Archive delivery managed after verified payment confirmation."
-      : "Digital delivery";
-  const shippingCity = "Archive";
-  const shippingPostalCode = "00000";
-  const { successUrl, cancelUrl, redirectUrl } =
-    buildTransVoucherReturnUrls(transactionId);
-  await execute(
-    `insert into orders (
-      id, user_id, status, payment_state, subtotal, shipping, total, currency,
-      shipping_name, shipping_email, shipping_address, shipping_city,
-      shipping_postal_code, payment_method, payment_provider,
-      transvoucher_transaction_id, transvoucher_reference_id, provider_status,
-      failure_reason, remaining_balance, created_at, updated_at, paid_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      orderId,
-      input.userId,
-      "Pending",
-      "pending",
-      pricing.subtotal,
-      pricing.shipping,
-      pricing.total,
-      input.currency,
-      shippingName,
-      shippingEmail,
-      shippingAddress,
-      shippingCity,
-      shippingPostalCode,
-      input.paymentMethod,
-      "TransVoucher",
-      null,
-      null,
-      "initializing",
-      null,
-      account.balance.available,
-      timestamp,
-      timestamp,
-      null,
-    ],
-  );
-  await insertCheckoutOrderItems({ orderId, items: input.items, productMap });
-  await createTransactionRecord({
-    id: transactionId,
-    userId: input.userId,
-    kind: "purchase",
-    amount: -pricing.total,
-    originalAmount: pricing.total,
-    originalCurrency: input.currency,
-    displayCurrency: input.currency,
-    paymentMethod: input.paymentMethod,
-    paymentProvider: "TransVoucher",
-    providerStatus: "initializing",
-    status: "attempting",
-    referenceId: orderId,
-    summary: "Preparing secure payment session",
-    meta: {
-      currency: input.currency,
-      paymentMethod: input.paymentMethod,
-      provider: "TransVoucher",
-      paymentSessionId: sessionId,
-      telegramUsername: account.user.telegramUsername,
-      items: input.items,
-    },
-  });
-  await execute(
-    `insert into payment_sessions (
-      id, user_id, payment_method, payment_provider, currency, subtotal,
-      shipping, total, status, items_json, meta_json, order_id, transaction_id,
-      transvoucher_transaction_id, transvoucher_reference_id, payment_url,
-      provider_status, raw_provider_response, created_at, updated_at, expires_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      sessionId,
-      input.userId,
-      input.paymentMethod,
-      "TransVoucher",
-      input.currency,
-      pricing.subtotal,
-      pricing.shipping,
-      pricing.total,
-      "attempting",
-      toJson(input.items),
-      toJson({
-        internalOrderId: orderId,
-        internalTransactionId: transactionId,
-        successUrl,
-        cancelUrl,
-        redirectUrl,
-      }),
-      orderId,
-      transactionId,
-      null,
-      null,
-      null,
-      "initializing",
-      null,
-      timestamp,
-      timestamp,
-      expiresAt,
-    ],
-  );
-
-  try {
-    await reserveRandomizedOrderItems({
-      orderId,
-      userId: input.userId,
-      expiresAt,
-    });
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : "Unable to reserve a card.";
-    const failedAt = nowIso();
-    await execute(
-      "update orders set status = 'Declined', payment_state = 'failed', failure_reason = ?, updated_at = ? where id = ?",
-      [reason, failedAt, orderId],
-    );
-    await execute(
-      "update payment_sessions set status = 'failed', provider_status = 'reservation_failed', updated_at = ? where id = ?",
-      [failedAt, sessionId],
-    );
-    await execute(
-      "update transactions set status = 'failed', summary = 'Card reservation failed', last_error = ?, updated_at = ? where id = ?",
-      [reason, failedAt, transactionId],
-    );
-    throw error;
-  }
-
-  let payment: Awaited<ReturnType<typeof createTransVoucherPayment>>;
-  try {
-    payment = await createTransVoucherPayment({
-      amount: pricing.total,
-      currency: input.currency,
-      title: "ReboHrome Digital Collectible Purchase",
-      description: "Digital collectible card purchase",
-      successUrl,
-      cancelUrl,
-      redirectUrl,
-      customerDetails: {
-        email: account.user.email,
-      },
-      metadata: {
-        type: "purchase",
-        user_id: account.user.id,
-        username: account.user.username,
-        telegram_username: account.user.telegramUsername,
-        internal_order_id: orderId,
-        internal_transaction_id: transactionId,
-        cart_id: sessionId,
-      },
-      defaultPaymentMethod: mapTransVoucherMethod(input.paymentMethod),
-      paymentMethodForced: true,
-    });
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : "Payment provider did not respond.";
-    const failedAt = nowIso();
-    await execute(
-      `update orders set failure_reason = ?, provider_status = 'initialization_unknown',
-        updated_at = ? where id = ? and payment_state = 'pending'`,
-      [reason, failedAt, orderId],
-    );
-    await execute(
-      `update payment_sessions set status = 'processing', provider_status = 'initialization_unknown',
-        updated_at = ? where id = ? and status <> 'completed'`,
-      [failedAt, sessionId],
-    );
-    await execute(
-      `update transactions set status = 'processing', summary = 'Payment initialization requires reconciliation',
-        last_error = ?, provider_status = 'initialization_unknown', updated_at = ?
-        where id = ? and status <> 'completed'`,
-      [reason, failedAt, transactionId],
-    );
-    throw error;
-  }
-  const providerStatus = normalizeProviderStatus(payment.status);
-  const mappedSessionStatus = mapProviderStatusToCheckoutSessionStatus(providerStatus);
-  const mappedTransactionStatus = mapProviderStatusToTransactionStatus(providerStatus);
-  const initialSessionStatus =
-    mappedSessionStatus === "completed" ? "processing" : mappedSessionStatus;
-  const initialTransactionStatus =
-    mappedTransactionStatus === "completed" ? "processing" : mappedTransactionStatus;
-  const paymentReference = buildTransVoucherPaymentReference({
-    referenceId: payment.referenceId,
-    transactionId: payment.transactionId,
-  });
-
-  await execute(
-    `update orders set payment_state = ?, transvoucher_transaction_id = ?,
-      transvoucher_reference_id = ?, provider_status = ?, failure_reason = ?,
-      updated_at = ? where id = ? and payment_state <> 'completed'`,
-    [
-      ["failed", "expired"].includes(initialTransactionStatus) ? "failed" : "pending",
-      payment.transactionId,
-      payment.referenceId,
-      providerStatus || null,
-      ["failed", "expired"].includes(initialTransactionStatus)
-        ? "Unable to initialize TransVoucher payment."
-        : null,
-      timestamp,
-      orderId,
-    ],
-  );
-
-  await execute(
-    `update transactions set transvoucher_transaction_id = ?,
-      transvoucher_reference_id = ?, payment_url = ?, provider_status = ?,
-      raw_provider_response = ?, status = ?, summary = ?, meta_json = ?, updated_at = ?
-      where id = ? and status <> 'completed'`,
-    [
-      payment.transactionId,
-      payment.referenceId,
-      payment.paymentUrl,
-      providerStatus || null,
-      toJson(payment.raw),
-      initialTransactionStatus,
-      "Awaiting TransVoucher payment confirmation",
-      toJson({
-        currency: input.currency,
-        paymentMethod: input.paymentMethod,
-        provider: "TransVoucher",
-        paymentReference,
-        paymentSessionId: sessionId,
-        telegramUsername: account.user.telegramUsername,
-        items: input.items,
-      }),
-      timestamp,
-      transactionId,
-    ],
-  );
-
-  await execute(
-    `update payment_sessions set status = ?, transvoucher_transaction_id = ?,
-      transvoucher_reference_id = ?, payment_url = ?, provider_status = ?,
-      raw_provider_response = ?, updated_at = ? where id = ? and status <> 'completed'`,
-    [
-      initialSessionStatus,
-      payment.transactionId,
-      payment.referenceId,
-      payment.paymentUrl,
-      providerStatus || null,
-      toJson(payment.raw),
-      timestamp,
-      sessionId,
-    ],
-  );
-
-  if (["failed", "expired"].includes(initialTransactionStatus)) {
-    await releaseRandomizedOrderReservations(orderId, "payment_initialization_failed");
-  }
-
-  return {
-    sessionId,
-    paymentUrl: payment.paymentUrl,
-    embedUrl: payment.embedUrl,
-    useEmbed: payment.useEmbed && Boolean(payment.embedUrl),
-    redirectPath: `/payment/transvoucher?session=${encodeURIComponent(sessionId)}`,
-    activeSession: null,
-    reusedExistingSession: false,
-  };
+  void input;
+  throw new Error("New legacy payments are disabled. Use RebohromePayment.");
 }
 
 export async function getActivePaymentSession(
@@ -11433,12 +11083,20 @@ export async function getCoinflowGateCheckoutSession(input: {
     credited: Boolean(row.balance_credited_at),
     providerPaymentId: row.provider_payment_id ? String(row.provider_payment_id) : null,
     webhookInfo: row.coinflow_webhook_info ? String(row.coinflow_webhook_info) : null,
+    residenceCountry: row.coinflow_residence_country
+      ? String(row.coinflow_residence_country)
+      : null,
+    requestCountry: row.coinflow_request_country
+      ? String(row.coinflow_request_country)
+      : null,
   };
 }
 
 export async function createCoinflowCheckoutTokenForSession(input: {
   userId: string;
   sessionId: string;
+  requestIpAddress?: string | null;
+  requestCountry?: string | null;
 }) {
   await ensureDatabase();
   await ensureCoinflowDepositPaymentSessionColumns();
@@ -11469,6 +11127,14 @@ export async function createCoinflowCheckoutTokenForSession(input: {
   const amountCents = Number(row.amount_cents ?? Math.round(amount * 100));
   const email = String(row.user_email ?? "");
   const idempotencyKey = String(row.idempotency_key ?? `coinflow_credit:${sessionId}`);
+  const residenceCountry = row.coinflow_residence_country
+    ? String(row.coinflow_residence_country)
+    : null;
+  const geography = assertCoinflowCountryAccess({
+    selectedCountry: residenceCountry,
+    ipCountry: input.requestCountry,
+    enforceIpCountry: getCoinflowPublicConfig().enforceCountryIp,
+  });
 
   if (!email) {
     throw new Error("Gate #4 requires an email address before payment.");
@@ -11484,6 +11150,8 @@ export async function createCoinflowCheckoutTokenForSession(input: {
     currency: "USD",
     email,
     kycStatus: row.user_kyc_status ? String(row.user_kyc_status) : null,
+    ipAddress: input.requestIpAddress,
+    country: geography.selectedCountry,
   });
   const timestamp = nowIso();
 
@@ -11493,12 +11161,16 @@ export async function createCoinflowCheckoutTokenForSession(input: {
       provider_checkout_jwt = ?,
       provider_status = 'pending',
       raw_provider_response = ?,
+      coinflow_request_country = ?,
+      coinflow_request_ip = ?,
       updated_at = ?
      where id = ?`,
     [
       token.sessionKey,
       token.checkoutJwtToken,
       toJson(token.raw),
+      geography.ipCountry,
+      input.requestIpAddress ?? null,
       timestamp,
       sessionId,
     ],
@@ -11526,6 +11198,8 @@ export async function createCoinflowCheckoutTokenForSession(input: {
     currency: "USD",
     email,
     kycStatus: row.user_kyc_status ? String(row.user_kyc_status) : null,
+    ipAddress: input.requestIpAddress,
+    country: geography.selectedCountry,
   });
   const chargebackProtectionData = buildCoinflowChargebackProtectionData({
     sessionId,
@@ -11537,6 +11211,21 @@ export async function createCoinflowCheckoutTokenForSession(input: {
     currency: "USD",
     email,
     kycStatus: row.user_kyc_status ? String(row.user_kyc_status) : null,
+    ipAddress: input.requestIpAddress,
+    country: geography.selectedCountry,
+  });
+  const customerInfo = buildCoinflowCustomerInfo({
+    sessionId,
+    userId,
+    localTransactionId,
+    idempotencyKey,
+    amount,
+    amountCents,
+    currency: "USD",
+    email,
+    kycStatus: row.user_kyc_status ? String(row.user_kyc_status) : null,
+    ipAddress: input.requestIpAddress,
+    country: geography.selectedCountry,
   });
 
   return {
@@ -11560,6 +11249,8 @@ export async function createCoinflowCheckoutTokenForSession(input: {
       settlementType: publicConfig.settlementType,
       webhookInfo,
       chargebackProtectionData,
+      customerInfo,
+      residenceCountry: geography.selectedCountry,
       enableApplePay: publicConfig.enableApplePay,
       enableGooglePay: publicConfig.enableGooglePay,
       enableCard: publicConfig.enableCard,
@@ -11839,22 +11530,12 @@ export async function cancelActivePaymentSession(input: {
   if (!["created", "pending", "attempting", "processing"].includes(status)) {
     throw new Error("This payment session can no longer be canceled.");
   }
-  const transactionId = row.transaction_id ? String(row.transaction_id) : null;
+
   const timestamp = nowIso();
-  await execute(`update ${table} set status = 'canceled', updated_at = ? where id = ?`, [
+  await execute(`update ${table} set status = 'expired', updated_at = ? where id = ?`, [
     timestamp,
     input.sessionId,
   ]);
-  if (transactionId) {
-    await execute(
-      `update transactions set
-        status = 'expired',
-        processed_at = coalesce(processed_at, ?),
-        updated_at = ?
-       where id = ? and user_id = ? and status in ('pending', 'attempting', 'processing')`,
-      [timestamp, timestamp, transactionId, input.userId],
-    );
-  }
   if (input.type === "purchase" && row.order_id) {
     await releaseRandomizedOrderReservations(
       String(row.order_id),
@@ -11872,799 +11553,12 @@ export async function createDepositPaymentSession(input: {
   provider?: Exclude<PaymentProviderName, "Internal Wallet">;
   gateNumber?: number;
   currency: SupportedCurrency;
+  coinflowResidenceCountry?: string | null;
+  requestIpAddress?: string | null;
+  requestCountry?: string | null;
 }) {
-  await ensureDatabase();
-  await requireDocumentAcceptanceForUser(input.userId);
-
-  if (input.amount <= 0) {
-    throw new Error("Deposit amount must be greater than zero.");
-  }
-
-  if (input.paymentMethod === "Crypto") {
-    throw new Error("Crypto deposits are not available in hosted gate flows.");
-  }
-
-  const requestedProviderName = getRequestedDepositProviderName({
-    provider: input.provider ?? null,
-    gateNumber: input.gateNumber ?? null,
-  });
-  const requestedProviderKey = getRequestedDepositProviderKey({
-    provider: input.provider ?? null,
-    gateNumber: input.gateNumber ?? null,
-  });
-  const existingSession = requestedProviderKey
-    ? await getActiveDepositPaymentSessionForProvider(
-        input.userId,
-        requestedProviderKey,
-        requestedProviderName ?? input.provider ?? "TransVoucher",
-      )
-    : await getActivePaymentSession(input.userId, "deposit");
-
-  if (existingSession && requestedProviderName && existingSession.provider === requestedProviderName) {
-    return {
-      sessionId: existingSession.id,
-      paymentUrl:
-        existingSession.provider === "Wert.io"
-          ? `/checkout/gate-3/${encodeURIComponent(existingSession.id)}`
-          : existingSession.provider === "Coinflow"
-            ? `/checkout/gate-4/${encodeURIComponent(existingSession.id)}`
-          : existingSession.paymentUrl,
-      embedUrl: null,
-      useEmbed: false,
-      wertWidgetOptions: null,
-      redirectPath:
-        existingSession.provider === "TransVoucher"
-          ? `/payment/deposit/transvoucher?session=${encodeURIComponent(existingSession.id)}`
-          : existingSession.provider === "Wert.io"
-            ? `/checkout/gate-3/${encodeURIComponent(existingSession.id)}`
-            : existingSession.provider === "Coinflow"
-              ? `/checkout/gate-4/${encodeURIComponent(existingSession.id)}`
-          : existingSession.paymentUrl ?? "/dashboard/deposit",
-      activeSession: existingSession,
-      reusedExistingSession: true,
-    };
-  }
-
-  const account = await getUserAndBalance(input.userId);
-
-  if (!account) {
-    throw new Error("Unable to load collector account.");
-  }
-
-  if (!userHasKycAccess(account.user)) {
-    throw new KycVerificationRequiredError(
-      "Please complete verification before making a card payment.",
-    );
-  }
-
-  const gate = await resolveDepositGateForUser({
-    userId: input.userId,
-    provider: input.provider ?? null,
-    gateNumber: input.gateNumber ?? null,
-    amount: input.amount,
-    currency: input.currency,
-  });
-
-  const conversion = await convertAmount(input.amount, input.currency, "USD");
-  const sessionId = randomUUID();
-  const depositId = createReadableId("DEP");
-  const transactionId = createReadableId("TXN");
-  const timestamp = nowIso();
-  const expiresAt = new Date(
-    Date.now() + CHECKOUT_PAYMENT_SESSION_TTL_MINUTES * 60 * 1000,
-  ).toISOString();
-
-  if (gate.providerName === "Coinflow") {
-    await ensureCoinflowDepositPaymentSessionColumns();
-    const coinflowConfig = getCoinflowPublicConfig();
-    console.info(`[COINFLOW_GATE4][${coinflowConfig.serverEnv}][card] session_create_requested`, {
-      userId: input.userId,
-      amount: input.amount,
-      currency: "USD",
-    });
-    if (!account.user.email) {
-      throw new Error("Gate #4 requires an email address before payment.");
-    }
-    if (!coinflowConfig.merchantId || !coinflowConfig.apiKeyConfigured) {
-      throw new Error(
-        "Gate #4 checkout could not be prepared. Please try another gate or contact support.",
-      );
-    }
-
-    const amountCents = Math.round(input.amount * 100);
-    const idempotencyKey = `coinflow_credit:${sessionId}`;
-    const webhookInfo = buildCoinflowWebhookInfo({
-      sessionId,
-      userId: input.userId,
-      localTransactionId: transactionId,
-      idempotencyKey,
-      amount: input.amount,
-      amountCents,
-      currency: "USD",
-      email: account.user.email,
-      kycStatus: account.user.kycStatus,
-    });
-    const chargebackProtectionData = buildCoinflowChargebackProtectionData({
-      sessionId,
-      userId: input.userId,
-      localTransactionId: transactionId,
-      idempotencyKey,
-      amount: input.amount,
-      amountCents,
-      currency: "USD",
-      email: account.user.email,
-      kycStatus: account.user.kycStatus,
-    });
-    const coinflowMetaJson = toJson({
-      internalDepositId: depositId,
-      internalTransactionId: transactionId,
-      gate: gate.publicName,
-      provider: "Coinflow",
-      webhookInfo,
-      chargebackProtectionData,
-      environment: coinflowConfig.serverEnv,
-      paymentMethod: "card",
-    });
-    const coinflowRawResponseJson = toJson({ webhookInfo, chargebackProtectionData });
-    const coinflowWebhookInfoJson = toJson(webhookInfo);
-
-    await execute(
-      `insert into deposit_payment_sessions (
-        id, user_id, payment_method, payment_provider, currency, original_amount,
-        credited_amount_usd, exchange_rate, status, meta_json, deposit_id, transaction_id,
-        transvoucher_transaction_id, transvoucher_reference_id, payment_url,
-        provider_status, raw_provider_response, provider_key, provider_click_id,
-        provider_order_id, provider_payment_id, provider_environment, provider_checkout_env,
-        amount_cents, coinflow_webhook_info,
-        coinflow_settlement_type, idempotency_key, created_at, updated_at, expires_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        sessionId,
-        input.userId,
-        "card",
-        "Coinflow",
-        "USD",
-        input.amount,
-        conversion.convertedAmount,
-        conversion.exchangeRate,
-        "pending",
-        coinflowMetaJson,
-        depositId,
-        transactionId,
-        null,
-        transactionId,
-        `/checkout/gate-4/${encodeURIComponent(sessionId)}`,
-        "created",
-        coinflowRawResponseJson,
-        "coinflow",
-        transactionId,
-        null,
-        null,
-        coinflowConfig.serverEnv,
-        coinflowConfig.env,
-        amountCents,
-        coinflowWebhookInfoJson,
-        coinflowConfig.settlementType,
-        idempotencyKey,
-        timestamp,
-        timestamp,
-        expiresAt,
-      ],
-    );
-
-    console.info(`[COINFLOW_GATE4][${coinflowConfig.serverEnv}][card] session_created`, {
-      sessionId,
-      userId: input.userId,
-      amount: input.amount,
-      currency: "USD",
-    });
-
-    return {
-      sessionId,
-      paymentUrl: `/checkout/gate-4/${encodeURIComponent(sessionId)}`,
-      embedUrl: null,
-      useEmbed: false,
-      redirectPath: `/checkout/gate-4/${encodeURIComponent(sessionId)}`,
-      activeSession: null,
-      reusedExistingSession: false,
-    };
-  }
-
-  if (gate.providerName === "Wert.io") {
-    let widgetOptions: WertWidgetOptions;
-    const clickId = transactionId;
-
-    try {
-      widgetOptions = createWertSignedWidgetOptions({
-        clickId,
-        localTransactionId: transactionId,
-        depositId,
-        userId: input.userId,
-        fiatAmount: input.amount,
-        fiatCurrency: "USD",
-        recipientWallet: account.user.withdrawalWallet,
-      });
-    } catch (error) {
-      await insertSecurityAuditEvent({
-        eventType: "wert_signature_error",
-        userId: account.user.id,
-        username: account.user.username,
-        telegramUsername: account.user.telegramUsername,
-        role: account.user.role,
-        ipAddress: "system",
-        country: "unknown",
-        userAgent: "server",
-        language: "unknown",
-        route: "/api/deposit/session",
-        timestamp,
-      });
-      console.error("Wert signature generation failed.", error);
-      throw new Error(
-        "Gate #3 is temporarily unavailable. Please try another payment gate or contact support.",
-      );
-    }
-
-    await execute(
-      `insert into deposits (
-        id, user_id, amount, original_amount, original_currency, credited_amount_usd,
-        exchange_rate, payment_method, payment_provider, transvoucher_transaction_id,
-        transvoucher_reference_id, cardholder_name, card_masked, status, balance_before,
-        balance_after, created_at, updated_at, completed_at, paid_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        depositId,
-        input.userId,
-        conversion.convertedAmount,
-        input.amount,
-        "USD",
-        conversion.convertedAmount,
-        conversion.exchangeRate,
-        input.paymentMethod,
-        "Wert.io",
-        null,
-        clickId,
-        "Gate #3 smart contract checkout",
-        clickId,
-        "processing",
-        account.balance.available,
-        account.balance.available,
-        timestamp,
-        timestamp,
-        null,
-        null,
-      ],
-    );
-
-    await createTransactionRecord({
-      id: transactionId,
-      userId: input.userId,
-      kind: "deposit",
-      amount: conversion.convertedAmount,
-      originalAmount: input.amount,
-      originalCurrency: "USD",
-      displayCurrency: "USD",
-      creditedAmountUsd: conversion.convertedAmount,
-      exchangeRate: conversion.exchangeRate,
-      paymentMethod: input.paymentMethod,
-      paymentProvider: "Wert.io",
-      transvoucherTransactionId: null,
-      transvoucherReferenceId: clickId,
-      paymentUrl: widgetOptions.origin,
-      providerStatus: "created",
-      rawProviderResponse: toJson({ widgetOptions }),
-      status: "pending",
-      referenceId: depositId,
-      summary: "Awaiting Gate #3 deposit confirmation",
-      meta: {
-        gate: gate.publicName,
-        provider: "Wert.io",
-        clickId,
-        originalAmount: input.amount,
-        originalCurrency: "USD",
-        creditedAmountUsd: conversion.convertedAmount,
-        exchangeRate: conversion.exchangeRate,
-        paymentMethod: input.paymentMethod,
-        relatedOrderId: depositId,
-        wert: {
-          environment: widgetOptions.extra.environment,
-          commodity: widgetOptions.commodity,
-          commodityAmount: widgetOptions.commodity_amount,
-          network: widgetOptions.network,
-          scAddress: widgetOptions.sc_address,
-          scInputData: widgetOptions.sc_input_data,
-          contractOrderId: widgetOptions.extra.contract_order_id,
-          tokenId: widgetOptions.extra.token_id,
-          tokenQuantity: widgetOptions.extra.token_quantity,
-          nftDeliveryMode: widgetOptions.extra.nft_delivery_mode,
-        },
-      },
-    });
-
-    await execute(
-      `insert into deposit_payment_sessions (
-        id, user_id, payment_method, payment_provider, currency, original_amount,
-        credited_amount_usd, exchange_rate, status, meta_json, deposit_id, transaction_id,
-        transvoucher_transaction_id, transvoucher_reference_id, payment_url,
-        provider_status, raw_provider_response, provider_key, provider_click_id,
-        provider_order_id, balance_credited_at, token_id, token_quantity,
-        contract_address, contract_order_id, sc_input_data, chain_network,
-        recipient_wallet, nft_delivery_mode, chain_tx_hash, nft_delivered_at,
-        created_at, updated_at, expires_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        sessionId,
-        input.userId,
-        input.paymentMethod,
-        "Wert.io",
-        "USD",
-        input.amount,
-        conversion.convertedAmount,
-        conversion.exchangeRate,
-        "pending",
-        toJson({
-          internalDepositId: depositId,
-          internalTransactionId: transactionId,
-          clickId,
-          gate: gate.publicName,
-          provider: "Wert.io",
-          wertEnvironment: widgetOptions.extra.environment,
-        }),
-        depositId,
-        transactionId,
-        null,
-        clickId,
-        widgetOptions.origin,
-        "created",
-        toJson({ widgetOptions }),
-        "wert",
-        clickId,
-        null,
-        null,
-        widgetOptions.extra.token_id,
-        widgetOptions.extra.token_quantity,
-        widgetOptions.sc_address,
-        widgetOptions.extra.contract_order_id,
-        widgetOptions.sc_input_data,
-        widgetOptions.network,
-        widgetOptions.address,
-        widgetOptions.extra.nft_delivery_mode,
-        null,
-        null,
-        timestamp,
-        timestamp,
-        expiresAt,
-      ],
-    );
-
-    await execute(
-      `insert into wert_payment_sessions (
-        id, user_id, provider_key, gate_number, type, local_transaction_id,
-        deposit_id, click_id, wert_order_id, wert_status, amount_fiat,
-        fiat_currency, commodity, commodity_amount, network, user_wallet_address,
-        sc_address, sc_input_data, signature_hash, token_id, token_quantity,
-        contract_order_id, recipient_wallet, nft_delivery_mode, chain_tx_hash,
-        status, balance_credited_at, nft_delivered_at, provider_payload_safe,
-        last_status_check_at, last_webhook_at, created_at, updated_at
-      ) values (?, ?, 'wert', 3, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        randomUUID(),
-        input.userId,
-        widgetOptions.extra.type,
-        transactionId,
-        depositId,
-        clickId,
-        null,
-        "created",
-        input.amount,
-        "USD",
-        widgetOptions.commodity,
-        widgetOptions.commodity_amount,
-        widgetOptions.network,
-        null,
-        widgetOptions.sc_address,
-        widgetOptions.sc_input_data,
-        hashWertSignature(widgetOptions.signature),
-        widgetOptions.extra.token_id,
-        widgetOptions.extra.token_quantity,
-        widgetOptions.extra.contract_order_id,
-        widgetOptions.address,
-        widgetOptions.extra.nft_delivery_mode,
-        null,
-        "created",
-        null,
-        null,
-        toJson({
-          widgetOptions: {
-            ...widgetOptions,
-            signature: "[redacted]",
-          },
-        }),
-        null,
-        null,
-        timestamp,
-        timestamp,
-      ],
-    );
-
-    await insertSecurityAuditEvent({
-      eventType: "wert_session_created",
-      userId: account.user.id,
-      username: account.user.username,
-      telegramUsername: account.user.telegramUsername,
-      role: account.user.role,
-      ipAddress: "system",
-      country: "unknown",
-      userAgent: "server",
-      language: "unknown",
-      route: "/api/deposit/session",
-      timestamp,
-    });
-
-    await insertSecurityAuditEvent({
-      eventType: "wert_widget_options_generated",
-      userId: account.user.id,
-      username: account.user.username,
-      telegramUsername: account.user.telegramUsername,
-      role: account.user.role,
-      ipAddress: "system",
-      country: "unknown",
-      userAgent: "server",
-      language: "unknown",
-      route: "/api/deposit/session",
-      timestamp,
-    });
-
-    return {
-      sessionId,
-      paymentUrl: `/checkout/gate-3/${encodeURIComponent(sessionId)}`,
-      embedUrl: null,
-      useEmbed: false,
-      wertWidgetOptions: null,
-      redirectPath: `/checkout/gate-3/${encodeURIComponent(sessionId)}`,
-      activeSession: null,
-      reusedExistingSession: false,
-    };
-  }
-
-  if (gate.providerName === "Cleffo") {
-    let firstName = "";
-    let lastName = "";
-    let phone = "";
-
-    try {
-      firstName = normalizeGate2Name(
-        account.user.gate2FirstName,
-        "First name",
-        account.user.username,
-      );
-      lastName = normalizeGate2Name(
-        account.user.gate2LastName,
-        "Last name",
-        account.user.username,
-      );
-      phone = normalizeGate2Phone(account.user.gate2Phone ?? account.user.paymentPhone);
-    } catch {
-      await insertSecurityAuditEvent({
-        eventType: "gate2_payment_blocked_missing_details",
-        userId: account.user.id,
-        username: account.user.username,
-        telegramUsername: account.user.telegramUsername,
-        role: account.user.role,
-        ipAddress: "unknown",
-        country: "unknown",
-        userAgent: "server",
-        language: "unknown",
-        route: "/api/deposit/session",
-        timestamp,
-      });
-      throw new Gate2DetailsRequiredError(
-        "Gate #2 requires your first name, last name, and phone number before payment.",
-      );
-    }
-
-    const redirectUrl = `${SITE_BASE_URL.replace(/\/+$/, "")}/dashboard/deposit`;
-    const payment = await createCleffoPaymentLink({
-      merchantOrderId: transactionId,
-      amount: input.amount,
-      currency: "USD",
-      customer: {
-        firstName,
-        lastName,
-        email: account.user.email,
-        phone,
-      },
-      redirectUrl,
-      metadata: {
-        type: "deposit",
-        user_id: account.user.id,
-        username: account.user.username,
-        internal_deposit_id: depositId,
-        internal_transaction_id: transactionId,
-      },
-    });
-    const providerStatus = normalizeProviderStatus(payment.status);
-    const mappedSessionStatus = mapProviderStatusToDepositSessionStatus(providerStatus);
-    const mappedTransactionStatus = mapProviderStatusToTransactionStatus(providerStatus);
-    const initialSessionStatus =
-      mappedSessionStatus === "completed" ? "processing" : mappedSessionStatus;
-    const initialTransactionStatus =
-      mappedTransactionStatus === "completed" ? "processing" : mappedTransactionStatus;
-    const paymentReference = buildTransVoucherPaymentReference({
-      referenceId: payment.referenceId,
-      transactionId: payment.transactionId,
-    });
-
-    await execute(
-      `insert into deposits (
-        id, user_id, amount, original_amount, original_currency, credited_amount_usd,
-        exchange_rate, payment_method, payment_provider, transvoucher_transaction_id,
-        transvoucher_reference_id, cardholder_name, card_masked, status, balance_before,
-        balance_after, created_at, updated_at, completed_at, paid_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        depositId,
-        input.userId,
-        conversion.convertedAmount,
-        input.amount,
-        input.currency,
-        conversion.convertedAmount,
-        conversion.exchangeRate,
-        input.paymentMethod,
-        "Cleffo",
-        payment.transactionId,
-        payment.referenceId,
-        "Gate #2 hosted payment",
-        paymentReference,
-        ["failed", "expired"].includes(initialTransactionStatus) ? "failed" : "processing",
-        account.balance.available,
-        account.balance.available,
-        timestamp,
-        timestamp,
-        null,
-        null,
-      ],
-    );
-
-    await createTransactionRecord({
-      id: transactionId,
-      userId: input.userId,
-      kind: "deposit",
-      amount: conversion.convertedAmount,
-      originalAmount: input.amount,
-      originalCurrency: input.currency,
-      displayCurrency: input.currency,
-      creditedAmountUsd: conversion.convertedAmount,
-      exchangeRate: conversion.exchangeRate,
-      paymentMethod: input.paymentMethod,
-      paymentProvider: "Cleffo",
-      transvoucherTransactionId: payment.transactionId,
-      transvoucherReferenceId: payment.referenceId,
-      paymentUrl: payment.paymentUrl,
-      providerStatus: providerStatus || null,
-      rawProviderResponse: toJson(payment.raw),
-      status: initialTransactionStatus,
-      referenceId: depositId,
-      summary: "Awaiting Gate #2 deposit confirmation",
-      meta: {
-        gate: gate.publicName,
-        provider: "Cleffo",
-        originalAmount: input.amount,
-        originalCurrency: input.currency,
-        creditedAmountUsd: conversion.convertedAmount,
-        exchangeRate: conversion.exchangeRate,
-        paymentMethod: input.paymentMethod,
-        paymentReference,
-        relatedOrderId: depositId,
-      },
-    });
-
-    await execute(
-      `insert into deposit_payment_sessions (
-        id, user_id, payment_method, payment_provider, currency, original_amount,
-        credited_amount_usd, exchange_rate, status, meta_json, deposit_id, transaction_id,
-        transvoucher_transaction_id, transvoucher_reference_id, payment_url,
-        provider_status, raw_provider_response, created_at, updated_at, expires_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        sessionId,
-        input.userId,
-        input.paymentMethod,
-        "Cleffo",
-        input.currency,
-        input.amount,
-        conversion.convertedAmount,
-        conversion.exchangeRate,
-        initialSessionStatus,
-        toJson({
-          internalDepositId: depositId,
-          internalTransactionId: transactionId,
-          redirectUrl,
-          gate: gate.publicName,
-        }),
-        depositId,
-        transactionId,
-        payment.transactionId,
-        payment.referenceId,
-        payment.paymentUrl,
-        providerStatus || null,
-        toJson(payment.raw),
-        timestamp,
-        timestamp,
-        expiresAt,
-      ],
-    );
-
-    await insertSecurityAuditEvent({
-      eventType: "cleffo_payment_created",
-      userId: account.user.id,
-      username: account.user.username,
-      telegramUsername: account.user.telegramUsername,
-      role: account.user.role,
-      ipAddress: "system",
-      country: "unknown",
-      userAgent: "server",
-      language: "unknown",
-      route: "/api/deposit/session",
-      timestamp,
-    });
-
-    return {
-      sessionId,
-      paymentUrl: payment.paymentUrl,
-      embedUrl: null,
-      useEmbed: false,
-      redirectPath: payment.paymentUrl,
-      activeSession: null,
-      reusedExistingSession: false,
-    };
-  }
-
-  const { successUrl, cancelUrl, redirectUrl } =
-    buildTransVoucherReturnUrls(transactionId);
-  const payment = await createTransVoucherPayment({
-    amount: input.amount,
-    currency: input.currency,
-    title: "ReboHrome Balance Top-Up",
-    description: "Top up balance",
-    successUrl,
-    cancelUrl,
-    redirectUrl,
-    customerDetails: {
-      email: account.user.email,
-    },
-    metadata: {
-      type: "deposit",
-      user_id: account.user.id,
-      username: account.user.username,
-      telegram_username: account.user.telegramUsername,
-      internal_deposit_id: depositId,
-      internal_transaction_id: transactionId,
-    },
-    defaultPaymentMethod: mapTransVoucherMethod(input.paymentMethod),
-    paymentMethodForced: true,
-  });
-  const providerStatus = normalizeProviderStatus(payment.status);
-  const mappedSessionStatus = mapProviderStatusToDepositSessionStatus(providerStatus);
-  const mappedTransactionStatus = mapProviderStatusToTransactionStatus(providerStatus);
-  const initialSessionStatus =
-    mappedSessionStatus === "completed" ? "processing" : mappedSessionStatus;
-  const initialTransactionStatus =
-    mappedTransactionStatus === "completed" ? "processing" : mappedTransactionStatus;
-  const paymentReference = buildTransVoucherPaymentReference({
-    referenceId: payment.referenceId,
-    transactionId: payment.transactionId,
-  });
-
-  await execute(
-    `insert into deposits (
-      id, user_id, amount, original_amount, original_currency, credited_amount_usd,
-      exchange_rate, payment_method, payment_provider, transvoucher_transaction_id,
-      transvoucher_reference_id, cardholder_name, card_masked, status, balance_before,
-      balance_after, created_at, updated_at, completed_at, paid_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      depositId,
-      input.userId,
-      conversion.convertedAmount,
-      input.amount,
-      input.currency,
-      conversion.convertedAmount,
-      conversion.exchangeRate,
-      input.paymentMethod,
-      "TransVoucher",
-      payment.transactionId,
-      payment.referenceId,
-      "TransVoucher hosted payment",
-      paymentReference,
-      ["failed", "expired"].includes(initialTransactionStatus) ? "failed" : "processing",
-      account.balance.available,
-      account.balance.available,
-      timestamp,
-      timestamp,
-      null,
-      null,
-    ],
-  );
-
-  await createTransactionRecord({
-    id: transactionId,
-    userId: input.userId,
-    kind: "deposit",
-    amount: conversion.convertedAmount,
-    originalAmount: input.amount,
-    originalCurrency: input.currency,
-    displayCurrency: input.currency,
-    creditedAmountUsd: conversion.convertedAmount,
-    exchangeRate: conversion.exchangeRate,
-    paymentMethod: input.paymentMethod,
-    paymentProvider: "TransVoucher",
-    transvoucherTransactionId: payment.transactionId,
-    transvoucherReferenceId: payment.referenceId,
-    paymentUrl: payment.paymentUrl,
-    providerStatus: providerStatus || null,
-    rawProviderResponse: toJson(payment.raw),
-    status: initialTransactionStatus,
-    referenceId: depositId,
-    summary: "Awaiting TransVoucher deposit confirmation",
-    meta: {
-      originalAmount: input.amount,
-      originalCurrency: input.currency,
-      creditedAmountUsd: conversion.convertedAmount,
-      exchangeRate: conversion.exchangeRate,
-      paymentMethod: input.paymentMethod,
-      provider: "TransVoucher",
-      paymentReference,
-      relatedOrderId: depositId,
-      telegramUsername: account.user.telegramUsername,
-    },
-  });
-
-  await execute(
-    `insert into deposit_payment_sessions (
-      id, user_id, payment_method, payment_provider, currency, original_amount,
-      credited_amount_usd, exchange_rate, status, meta_json, deposit_id, transaction_id,
-      transvoucher_transaction_id, transvoucher_reference_id, payment_url,
-      provider_status, raw_provider_response, created_at, updated_at, expires_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      sessionId,
-      input.userId,
-      input.paymentMethod,
-      "TransVoucher",
-      input.currency,
-      input.amount,
-      conversion.convertedAmount,
-      conversion.exchangeRate,
-      initialSessionStatus,
-      toJson({
-        internalDepositId: depositId,
-        internalTransactionId: transactionId,
-        successUrl,
-        cancelUrl,
-        redirectUrl,
-      }),
-      depositId,
-      transactionId,
-      payment.transactionId,
-      payment.referenceId,
-      payment.paymentUrl,
-      providerStatus || null,
-      toJson(payment.raw),
-      timestamp,
-      timestamp,
-      expiresAt,
-    ],
-  );
-
-  return {
-    sessionId,
-    paymentUrl: payment.paymentUrl,
-    embedUrl: payment.embedUrl,
-    useEmbed: payment.useEmbed && Boolean(payment.embedUrl),
-    redirectPath: `/payment/deposit/transvoucher?session=${encodeURIComponent(sessionId)}`,
-    activeSession: null,
-    reusedExistingSession: false,
-  };
+  void input;
+  throw new Error("New legacy payments are disabled. Use RebohromePayment.");
 }
 
 export async function getCheckoutPaymentSessionBundle(
@@ -12683,7 +11577,15 @@ export async function getCheckoutPaymentSessionBundle(
 
   const session = normalizeCheckoutPaymentSession(row);
   const items = parseCheckoutSessionItems(session.itemsJson);
-  const { productMap } = await resolveCheckoutProducts(items);
+  const snapshots = session.orderId ? await queryMany("select product_id, product_snapshot_json from order_items where order_id = ?", [session.orderId]) : [];
+  const productMap = new Map<string, ProductRecord>();
+  for (const row of snapshots) {
+    if (row.product_snapshot_json) productMap.set(String(row.product_id), JSON.parse(String(row.product_snapshot_json)) as ProductRecord);
+  }
+  for (const item of items) if (!productMap.has(item.productId)) {
+    const product = await queryOne("select * from products where id = ?", [item.productId]);
+    if (product) productMap.set(item.productId, normalizeProduct(product));
+  }
 
   return {
     session,
@@ -12724,61 +11626,8 @@ export async function finalizeCheckoutPaymentSession(input: {
   billingCountry?: string;
   cryptoNetwork?: CryptoNetwork | null;
 }) {
-  await ensureDatabase();
-  await requireDocumentAcceptanceForUser(input.userId);
-  const row = await queryOne(
-    "select * from payment_sessions where id = ? and user_id = ? limit 1",
-    [input.sessionId, input.userId],
-  );
-
-  if (!row) {
-    throw new Error("Payment session not found.");
-  }
-
-  const session = normalizeCheckoutPaymentSession(row);
-
-  if (session.status !== "pending") {
-    throw new Error("This payment session can no longer be processed.");
-  }
-
-  if (new Date(session.expiresAt).getTime() < Date.now()) {
-    await execute(
-      "update payment_sessions set status = ?, updated_at = ? where id = ?",
-      ["expired", nowIso(), session.id],
-    );
-    throw new Error("This secure payment session has expired.");
-  }
-
-  const result = await createCheckoutOrder({
-    userId: input.userId,
-    paymentMethod: session.paymentMethod,
-    provider: session.paymentProvider,
-    currency: session.currency,
-    cardholderName: input.cardholderName,
-    cardNumber: input.cardNumber,
-    billingCountry: input.billingCountry,
-    cryptoNetwork: input.cryptoNetwork ?? null,
-    items: parseCheckoutSessionItems(session.itemsJson),
-    paymentSessionId: session.id,
-  });
-
-  await execute(
-    `update payment_sessions set
-      status = ?,
-      order_id = ?,
-      transaction_id = ?,
-      updated_at = ?
-     where id = ?`,
-    [
-      result.ok ? "completed" : "failed",
-      result.orderId,
-      result.transactionId,
-      nowIso(),
-      session.id,
-    ],
-  );
-
-  return result;
+  void input;
+  throw new Error("Direct payment completion is retired. A verified provider payment is required.");
 }
 
 export async function finalizeDepositPaymentSession(input: {
@@ -12791,80 +11640,8 @@ export async function finalizeDepositPaymentSession(input: {
   billingCountry?: string;
   cryptoNetwork?: CryptoNetwork | null;
 }) {
-  await ensureDatabase();
-  await requireDocumentAcceptanceForUser(input.userId);
-  const row = await queryOne(
-    "select * from deposit_payment_sessions where id = ? and user_id = ? limit 1",
-    [input.sessionId, input.userId],
-  );
-
-  if (!row) {
-    throw new Error("Deposit payment session not found.");
-  }
-
-  const session = normalizeDepositPaymentSession(row);
-
-  if (session.status !== "pending") {
-    throw new Error("This deposit payment session can no longer be processed.");
-  }
-
-  if (new Date(session.expiresAt).getTime() < Date.now()) {
-    await execute(
-      "update deposit_payment_sessions set status = ?, updated_at = ? where id = ?",
-      ["expired", nowIso(), session.id],
-    );
-    throw new Error("This secure payment session has expired.");
-  }
-
-  const result = await createDeposit({
-    userId: input.userId,
-    amount: session.originalAmount,
-    currency: session.currency,
-    paymentMethod: session.paymentMethod as Exclude<
-      PaymentMethodName,
-      "Archive Balance"
-    >,
-    provider: session.paymentProvider as Exclude<
-      PaymentProviderName,
-      "Internal Wallet"
-    >,
-    cardholderName: input.cardholderName,
-    cardNumber: input.cardNumber,
-    billingCountry: input.billingCountry,
-    cryptoNetwork: input.cryptoNetwork ?? null,
-  });
-
-  await execute(
-    `update deposit_payment_sessions set
-      status = ?,
-      deposit_id = ?,
-      transaction_id = ?,
-      meta_json = ?,
-      updated_at = ?
-     where id = ?`,
-    [
-      result.ok ? "completed" : "failed",
-      result.depositId,
-      result.transactionId,
-      toJson({
-        balanceBefore: result.balanceBefore,
-        balanceAfter: result.balanceAfter,
-        originalAmount: result.originalAmount,
-        originalCurrency: result.originalCurrency,
-        creditedAmountUsd: result.creditedAmountUsd,
-        exchangeRate: result.exchangeRate,
-        paymentMethod: result.paymentMethod,
-        provider: result.provider,
-        paymentReference: result.paymentReference,
-        timestamp: result.timestamp,
-        reason: !result.ok ? result.reason : null,
-      }),
-      nowIso(),
-      session.id,
-    ],
-  );
-
-  return result;
+  void input;
+  throw new Error("Direct payment completion is retired. A verified provider payment is required.");
 }
 
 export async function recordTransVoucherInvalidSignatureAttempt(input: {
@@ -13207,6 +11984,13 @@ async function reconcileTransVoucherDeposit(input: {
   paidAt: string | null;
   rawProviderResponse: unknown;
 }) {
+  return withDbTransaction(async () => {
+
+  const fresh = await queryOne("select * from deposits where id = ?", [input.deposit.id]);
+  const freshTx = await queryOne("select * from transactions where id = ?", [input.transaction.id]);
+  if (!fresh || !freshTx) throw new Error("Deposit records missing.");
+  input = {...input, deposit: normalizeDeposit(fresh), transaction: normalizeTransaction(freshTx)};
+  if (input.deposit.status === "completed" || input.transaction.creditedAt) return;
   const timestamp = nowIso();
   const providerName = input.providerName ?? "TransVoucher";
   const rawProviderResponse = toJson(input.rawProviderResponse);
@@ -13228,7 +12012,7 @@ async function reconcileTransVoucherDeposit(input: {
   if (isProviderCompletedStatus(input.providerStatus)) {
     let balanceAfter = input.deposit.balanceAfter;
 
-    if (input.deposit.status !== "completed") {
+    if (String(input.deposit.status) !== "completed") {
       const account = await getUserAndBalance(input.deposit.userId);
 
       if (!account) {
@@ -13368,7 +12152,7 @@ async function reconcileTransVoucherDeposit(input: {
       extractProviderFailureReason(input.rawProviderResponse) ??
       `Payment failed or was declined by ${providerName}.`;
 
-    if (input.deposit.status !== "completed" && input.deposit.status !== "failed") {
+    if (String(input.deposit.status) !== "completed" && input.deposit.status !== "failed") {
       const user = await getUserById(input.deposit.userId);
       await notifySafely(() =>
         sendDepositFailureNotification({
@@ -13541,6 +12325,8 @@ async function reconcileTransVoucherDeposit(input: {
       ],
     );
   }
+
+  });
 }
 
 async function applyTransVoucherPaymentStatus(input: {
@@ -13601,6 +12387,8 @@ async function applyTransVoucherPaymentStatus(input: {
   const providerName =
     input.providerName ??
     (transaction.paymentProvider === "Cleffo" ? "Cleffo" : "TransVoucher");
+  if (transaction.paymentProvider !== providerName) throw new Error("Payment provider does not match the local transaction.");
+  if (input.providerTransactionId && transaction.transvoucherTransactionId && input.providerTransactionId !== transaction.transvoucherTransactionId) throw new Error("Provider transaction does not match the saved payment.");
   const normalizedProviderStatus = normalizeProviderStatus(input.providerStatus);
   console.info(`Processing ${providerName} payment update.`, {
     source: input.source ?? "manual_check",
@@ -13615,7 +12403,7 @@ async function applyTransVoucherPaymentStatus(input: {
 
   if (
     transaction.processedAt &&
-    ["completed", "failed", "expired"].includes(transaction.status)
+    transaction.status === "completed"
   ) {
     console.info("Skipped TransVoucher update because transaction is already final.", {
       transactionId: transaction.id,
@@ -13680,9 +12468,8 @@ async function applyTransVoucherPaymentStatus(input: {
   }
 
   const timestamp = nowIso();
-  const isFinalProviderState =
-    isProviderCompletedStatus(normalizedProviderStatus) ||
-    isProviderTerminalFailureStatus(normalizedProviderStatus);
+  const financialResult = await queryOne("select status, credited_at from transactions where id = ?", [transaction.id]);
+  const isFinalProviderState = financialResult?.status === "completed";
   const nextCheckAt = isFinalProviderState
     ? null
     : getNextTransVoucherCheckAt(transaction.createdAt, timestamp);
@@ -13693,17 +12480,18 @@ async function applyTransVoucherPaymentStatus(input: {
       processed_at = case when ? = 1 then coalesce(processed_at, ?) else processed_at end,
       credited_at = case when ? = 1 then coalesce(credited_at, ?) else credited_at end,
       next_check_at = ?,
-      last_error = null
+      last_error = case when ? = 1 then null else last_error end
      where id = ?`,
     [
       timestamp,
       isFinalProviderState ? 1 : 0,
       timestamp,
-      transaction.kind === "deposit" && isProviderCompletedStatus(normalizedProviderStatus)
+      transaction.kind === "deposit" && isFinalProviderState
         ? 1
         : 0,
       timestamp,
       nextCheckAt,
+      isFinalProviderState ? 1 : 0,
       transaction.id,
     ],
   );
@@ -13821,9 +12609,9 @@ export async function processCoinflowWebhookPayload(payload: Record<string, unkn
     ? String(sessionRow.provider_environment)
     : requestedEnvironment;
   const amount = readCoinflowAmount(data);
-  const currency = readCoinflowString(data, ["currency", "fiatCurrency"]) ?? "USD";
+  const currency = readCoinflowString(data, ["currency", "fiatCurrency"]);
 
-  if (amount !== null && Math.abs(amount - session.originalAmount) > 0.01) {
+  if (amount === null || Math.abs(amount - session.originalAmount) > 0.001) {
     await execute(
       `update deposit_payment_sessions set
         provider_status = ?,
@@ -14205,11 +12993,11 @@ export async function reconcilePendingTransVoucherPayments(input?: {
        and transvoucher_transaction_id is not null
        and (? is null or created_at >= ?)
        and (? is null or created_at >= ?)
-       and processed_at is null
+
        and credited_at is null
        and (next_check_at is null or next_check_at <= ?)
        and (
-         status in ('pending', 'attempting', 'processing')
+         status in ('pending', 'attempting', 'processing', 'failed', 'expired')
          or lower(coalesce(provider_status, '')) in (
            '', 'pending', 'attempting', 'processing', 'created',
            'waiting', 'in_progress', 'unknown'
@@ -14235,26 +13023,7 @@ export async function reconcilePendingTransVoucherPayments(input?: {
 
   for (const row of rows) {
     const before = normalizeTransaction(row);
-    const ageMs = Date.now() - new Date(before.createdAt).getTime();
 
-    if (ageMs > 24 * 60 * 60 * 1000) {
-      summary.skipped += 1;
-      summary.expired += 1;
-      await applyTransVoucherPaymentStatus({
-        transactionId: before.id,
-        providerTransactionId: before.transvoucherTransactionId,
-        providerReferenceId: before.transvoucherReferenceId,
-        providerStatus: "expired",
-        source: "reconciliation",
-        paymentUrl: before.paymentUrl,
-        paidAt: null,
-        rawProviderResponse: {
-          source: "cron",
-          reason: "Pending TransVoucher transaction exceeded 24 hour reconciliation window.",
-        },
-      });
-      continue;
-    }
 
     summary.checked += 1;
 
@@ -14349,6 +13118,10 @@ export async function getTransactionById(transactionId: string, userId?: string)
 export function getTransactionResultTarget(transaction: TransactionRecord | null) {
   if (!transaction) {
     return null;
+  }
+  if (transaction.paymentProvider === "RebohromePayment" && transaction.status !== "completed") {
+    const metadata = getTransactionMeta(transaction);
+    if (typeof metadata.paymentIntentId === "string") return `/payment/merchantpayd?session=${encodeURIComponent(metadata.paymentIntentId)}`;
   }
 
   if (transaction.kind === "purchase") {
@@ -15095,6 +13868,7 @@ export async function createCheckoutOrder(input: {
     deliveryType: DeliveryType;
   }>;
 }) {
+  if (input.paymentMethod !== "Archive Balance") throw new Error("Verified provider payment required.");
   await ensureDatabase();
   await requireDocumentAcceptanceForUser(input.userId);
 
@@ -15172,7 +13946,7 @@ export async function createCheckoutOrder(input: {
 
   if (input.paymentMethod === "Archive Balance" && account.balance.available < total) {
     failureReason = "Insufficient archive balance";
-  } else if (input.paymentMethod === "Credit Card" && digits.endsWith("0000")) {
+  } else if (String(input.paymentMethod) === "Credit Card" && digits.endsWith("0000")) {
     failureReason = "Payment was declined by the issuing bank.";
   }
 
@@ -15902,6 +14676,7 @@ export async function adminAdjustUserBalance(input: {
   userAgent?: string;
 }) {
   await ensureDatabase();
+  return withDbTransaction(async () => {
   const admin = await getAdminIdentity(input.adminUserId);
   const target = await getAdminUserEntryById(input.targetUserId);
   if (!target) {
@@ -15915,7 +14690,7 @@ export async function adminAdjustUserBalance(input: {
   const amount = normalizePositiveAmount(input.amount, "Amount");
   const reason = requireReason(input.reason);
   const currency = (normalizeEditableOptionalString(input.currency) || "USD") as SupportedCurrency;
-  if (currency !== "USD" && currency !== "EUR") {
+  if (currency !== "USD") {
     throw new Error("Unsupported currency.");
   }
 
@@ -16004,6 +14779,8 @@ export async function adminAdjustUserBalance(input: {
   });
 
   return getAdminUserDetail(input.targetUserId);
+
+  });
 }
 
 export async function adminAddProductToUser(input: {
@@ -16660,7 +15437,7 @@ export async function adminUpdateTransaction(input: {
 export async function getAdminUsers() {
   return withPerf("query=getAdminUsers", async () => {
   await ensureDatabase();
-  await ensurePaymentProviderRegistry();
+  // Provider registry is maintained by explicit migrations.
   const rows = await queryMany(
     `select users.*, profiles.role, profiles.telegram_username, profiles.telegram_id,
       profiles.telegram_chat_id, profiles.telegram_verified, profiles.telegram_verified_at,

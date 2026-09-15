@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { COINFLOW_WEBHOOK_VALIDATION_KEY } from "@/lib/server-config";
 
 export type CoinflowWebhookVerificationResult =
-  | { ok: true; method: "signature" | "authorization" | "unconfigured" }
+  | { ok: true; method: "signature" | "authorization" }
   | { ok: false; reason: string };
 
 function parseSignatureHeader(header: string) {
@@ -34,7 +34,7 @@ export function verifyCoinflowWebhook(input: {
   authorizationHeader: string | null;
 }): CoinflowWebhookVerificationResult {
   if (!COINFLOW_WEBHOOK_VALIDATION_KEY) {
-    return { ok: true, method: "unconfigured" };
+    return { ok: false, reason: "Coinflow webhook verification is not configured." };
   }
 
   if (input.signatureHeader) {

@@ -141,7 +141,7 @@ const CREATE_STATEMENTS = [
   `create table if not exists profiles (
     user_id text primary key,
     role text not null,
-    telegram_username text not null unique,
+    telegram_username text unique,
     telegram_id text,
     telegram_chat_id text,
     telegram_verified integer not null default 0,
@@ -1085,7 +1085,7 @@ async function main() {
           adminUsername,
           buildPlaceholderEmail(adminUsername),
           "Archive Admin",
-          hashPassword(env.ADMIN_SEED_PASSWORD || "123123nrrN!!"),
+          hashPassword((() => { if (!env.ADMIN_SEED_PASSWORD || env.ADMIN_SEED_PASSWORD.length < 12) throw new Error("ADMIN_SEED_PASSWORD of at least 12 characters is required for seeding."); return env.ADMIN_SEED_PASSWORD; })()),
           "active",
           timestamp,
           timestamp,

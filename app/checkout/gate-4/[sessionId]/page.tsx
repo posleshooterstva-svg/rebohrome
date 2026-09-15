@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { CoinflowCheckoutClient } from "@/components/payments/gate4/CoinflowCheckoutClient";
 import { getCoinflowGateCheckoutSession } from "@/lib/db/repository";
 import { getSessionState } from "@/lib/session";
+import { getCoinflowCountryName } from "@/lib/payments/coinflow-country-policy";
 
 type CoinflowGateCheckoutPageProps = {
   params: Promise<{
@@ -38,6 +39,9 @@ export default async function CoinflowGateCheckoutPage({
   const shortSessionId = shortenSessionId(checkout.session.id);
   const formattedAmount = `$${checkout.session.amount.toFixed(2)} USD`;
   const formattedStatus = checkout.session.status.replaceAll("_", " ");
+  const residenceCountry = checkout.residenceCountry
+    ? `${getCoinflowCountryName(checkout.residenceCountry)} (${checkout.residenceCountry})`
+    : "Not selected";
 
   return (
     <main className="min-h-dvh w-full overflow-x-hidden bg-[radial-gradient(circle_at_15%_0%,rgba(124,58,237,0.18),transparent_34%),radial-gradient(circle_at_88%_12%,rgba(14,165,233,0.11),transparent_30%),#050712] px-3 py-5 text-foreground sm:px-5 sm:py-8 lg:px-8">
@@ -53,7 +57,7 @@ export default async function CoinflowGateCheckoutPage({
             Secure card checkout.
           </p>
 
-          <div className="mt-6 grid gap-3 rounded-[22px] border border-line bg-background/60 p-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-6 grid gap-3 rounded-[22px] border border-line bg-background/60 p-4 text-sm sm:grid-cols-2 lg:grid-cols-5">
             <div>
               <div className="text-muted">Session</div>
               <div
@@ -76,6 +80,10 @@ export default async function CoinflowGateCheckoutPage({
             <div>
               <div className="text-muted">Payment method</div>
               <div className="mt-1 font-semibold">Credit / debit card</div>
+            </div>
+            <div>
+              <div className="text-muted">Country</div>
+              <div className="mt-1 font-semibold">{residenceCountry}</div>
             </div>
           </div>
         </section>
@@ -106,6 +114,7 @@ export default async function CoinflowGateCheckoutPage({
               <div className="mt-5 space-y-4 text-sm">
                 <SummaryRow label="Amount" value={formattedAmount} />
                 <SummaryRow label="Method" value="Credit / debit card" />
+                <SummaryRow label="Country" value={residenceCountry} />
                 <SummaryRow label="Status" value={formattedStatus} capitalize />
                 <SummaryRow label="Session" value={shortSessionId} mono title={checkout.session.id} />
               </div>

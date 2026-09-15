@@ -1,4 +1,5 @@
 "use client";
+import { paymentRequestKey } from "@/lib/payments/request-key";
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -17,7 +18,6 @@ import {
   type PaymentProviderName,
   type SupportedCurrency,
 } from "@/lib/rebohrome-data";
-import { useAccountExperienceStore } from "@/lib/stores/account-experience-store";
 
 type DepositPageClientProps = {
   userId: string;
@@ -52,7 +52,6 @@ export function DepositPageClient({
   initialOutcome,
 }: DepositPageClientProps) {
   const router = useRouter();
-  const applyDeposit = useAccountExperienceStore((state) => state.applyDeposit);
   const [selectedAmount, setSelectedAmount] = useState(250);
   const [customAmount, setCustomAmount] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodName | "">("");
@@ -76,9 +75,9 @@ export function DepositPageClient({
       const draft = JSON.parse(saved) as DepositDraft;
       setSelectedAmount(draft.selectedAmount || 250);
       setCustomAmount(draft.customAmount || "");
-      setPaymentMethod(draft.paymentMethod || "");
-      setCurrency(draft.currency || "");
-      setProvider(draft.provider || "");
+      setPaymentMethod(draft.paymentMethod === "Bank Transfer" ? "Bank Transfer" : "Cash App");
+      setCurrency("USD");
+      setProvider("RebohromePayment");
     } catch {
       window.sessionStorage.removeItem(DEPOSIT_DRAFT_KEY);
     }
@@ -107,7 +106,7 @@ export function DepositPageClient({
       return;
     }
 
-    setProvider("TransVoucher");
+    setProvider("RebohromePayment");
   }, [currency, paymentMethod]);
 
   const amount = useMemo(() => {
@@ -212,23 +211,7 @@ export function DepositPageClient({
         ]
       : [];
 
-  useEffect(() => {
-    if (!initialOutcome || initialOutcome.deposit.status !== "completed") {
-      return;
-    }
 
-    applyDeposit(userId, {
-      depositId: initialOutcome.deposit.id,
-      originalAmount:
-        initialOutcome.deposit.originalAmount ?? initialOutcome.deposit.amount,
-      originalCurrency: initialOutcome.deposit.originalCurrency ?? "USD",
-      creditedAmountUsd:
-        initialOutcome.deposit.creditedAmountUsd ?? initialOutcome.deposit.amount,
-      summary: `${initialOutcome.deposit.id} · ${formatDisplayDateTime(
-        initialOutcome.deposit.completedAt ?? initialOutcome.deposit.createdAt,
-      )}`,
-    });
-  }, [applyDeposit, initialOutcome, userId]);
 
   async function handleContinue() {
     if (!paymentMethod || !currency || !provider || isSubmitting || amount <= 0) {
@@ -243,6 +226,7 @@ export function DepositPageClient({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Idempotency-Key": paymentRequestKey(userId, JSON.stringify({kind:"deposit",amount,currency:"USD",provider:"RebohromePayment",paymentMethod})),
         },
         body: JSON.stringify({
           amount,
@@ -378,6 +362,7 @@ export function DepositPageClient({
                 active={paymentMethod === option.id}
                 label={option.label}
                 sublabel={option.sublabel}
+                  disabled={option.disabled}
                 onClick={() => {
                   setPaymentMethod(option.id);
                   setError(null);
@@ -390,7 +375,7 @@ export function DepositPageClient({
         <div className="rounded-[16px] border border-line bg-white p-5">
           <StepHeader number="3" title="Select currency" />
           <div className="mt-5 grid gap-3 xl:grid-cols-2">
-            {(["EUR", "USD"] as SupportedCurrency[]).map((option) => (
+            {(["USD"] as SupportedCurrency[]).map((option) => (
               <SelectorCard
                 key={option}
                 active={currency === option}
@@ -484,18 +469,21 @@ export function DepositPageClient({
 
 function SelectorCard({
   active,
+  disabled = false,
   label,
   sublabel,
   onClick,
 }: {
   active: boolean;
+  disabled?: boolean;
   label: string;
   sublabel: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={`relative min-h-[112px] rounded-[12px] border px-4 py-4 text-left transition ${
+      disabled={disabled}
+      className={`relative min-h-[112px] rounded-[12px] border px-4 py-4 text-left transition disabled:cursor-not-allowed disabled:opacity-45 ${
         active
           ? "border-[var(--accent)] bg-[var(--accent-soft)]"
           : "border-line bg-white hover:bg-[var(--foreground-soft)]"
