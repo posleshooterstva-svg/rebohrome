@@ -9,7 +9,7 @@ import { minorUnits } from "@/lib/payments/money";
 import { getExchangeRate } from '@/lib/currency-service';
 import { paymentTerms, savedPaymentTerms, methodCurrency } from '@/lib/payments/payment-terms';
 import type { DeliveryType } from "@/lib/rebohrome-data";
-import { MERCHANTPAYD_METHODS, savedMerchantMethod, type MerchantMethodCode } from '@/lib/payments/merchantpayd-methods';
+import { MERCHANTPAYD_METHODS, savedMerchantMethod, canCloseMerchantIntent, type MerchantMethodCode } from '@/lib/payments/merchantpayd-methods';
 
 export function getMerchantEngine() {
   return paymentEngine(getDbClient(),merchantClient(merchantConfig()),{
@@ -20,9 +20,8 @@ export function getMerchantEngine() {
 export async function closeMerchantPayment(userId:string,id:string,kind:'deposit'|'purchase') {
   const engine=getMerchantEngine();const intent=await engine.get(id,userId);
   if(!intent||intent.kind!==kind)throw new Error('Payment session not found.');
-  if(!intent.closed_at&&intent.payment_link_id){
-    if(!await engine.reconcile(id))throw new Error('Unable to verify payment status. Please try closing the session again shortly.');
-  }
+  // Local closure must not depend on the provider being reachable or on a polling
+  // lease. The transaction checks the latest local state; reconciliation stays due.
   return engine.close(id,userId,kind);
 }
 export async function createMerchantPayment(input:{userId:string;kind:"purchase"|"deposit";key:string;amount?:number;paymentMethod?:MerchantMethodCode;currency?:'USD'|'EUR';eurUsdRate?:number;items?:Array<{productId:string;quantity:number;deliveryType:DeliveryType}>}) {
@@ -62,7 +61,7 @@ export async function merchantStatus(id:string,userId:string,refresh=true) {
   const method=savedMerchantMethod(JSON.parse(String(intent.snapshot_json)));
   const terms=savedPaymentTerms(JSON.parse(String(intent.snapshot_json)),Number(intent.amount_minor));
   return {id:String(intent.id),requestKey:String(intent.idempotency_key),paymentMethod:MERCHANTPAYD_METHODS[method],kind:String(intent.kind),status:String(intent.status),amount:terms.amountMinor/100,currency:terms.currency,usdAmount:terms.usdAmountMinor/100,eurUsdRate:terms.eurUsdRate,
-    paymentUrl:intent.payment_url?String(intent.payment_url):null,closedAt:intent.closed_at?String(intent.closed_at):null,canClose:!intent.closed_at&&!intent.provider_transaction_id&&!intent.review_required&&['pending','failed','expired'].includes(String(intent.status)),reviewRequired:Boolean(intent.review_required),
+    paymentUrl:intent.payment_url?String(intent.payment_url):null,closedAt:intent.closed_at?String(intent.closed_at):null,canClose:!intent.closed_at&&canCloseMerchantIntent({status:intent.status,provider_transaction_id:intent.provider_transaction_id,review_required:intent.review_required,last_error:intent.last_error}),reviewRequired:Boolean(intent.review_required),
     message:intent.last_error?String(intent.last_error):null,
     resultUrl:intent.status==='completed'?(intent.kind==='deposit'?`/dashboard/deposit?receipt=${encodeURIComponent(String(intent.reference_id))}`:`/success?order=${encodeURIComponent(String(intent.reference_id))}`):null};
 }

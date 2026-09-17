@@ -1,6 +1,6 @@
 import { paymentTerms, savedPaymentTerms, convertMinor } from '../lib/payments/payment-terms.ts';
 import test from 'node:test';
-import {merchantMethodCode,MERCHANTPAYD_METHODS,type MerchantMethodCode} from '../lib/payments/merchantpayd-methods.ts';
+import {merchantMethodCode,MERCHANTPAYD_METHODS,isClosableMerchantStatus,canCloseMerchantIntent,type MerchantMethodCode} from '../lib/payments/merchantpayd-methods.ts';
 import assert from 'node:assert/strict';
 import {createClient,type Client} from '@libsql/client';
 import {createHmac,randomUUID} from 'node:crypto';
@@ -189,6 +189,35 @@ test('processing, paid-unfulfilled and creation-unknown payments cannot be close
   assert.equal((await f.engine.get(String(intent.id)))?.closed_at,null);await assert.rejects(f.create(),PaymentConflict);
  }finally{await f.close();}}
 });
+
+test('attempting sessions can close during a polling lease and late success still credits once',async()=>{const f=await fixture();try{
+ assert.equal(isClosableMerchantStatus('attempting'),true);
+ for(const status of ['processing','paid_unfulfilled','completed','creation_unknown','manual_review'])assert.equal(isClosableMerchantStatus(status),false);
+ const {intent}=await f.create();
+ await f.engine.apply(String(intent.id),payment({status:'attempting'}));
+ await f.db.execute({sql:'update payment_intents set lease_owner=?,lease_until=? where id=?',args:['active-poll',new Date(Date.now()+60000).toISOString(),intent.id]});
+ await f.engine.close(String(intent.id),'user','deposit');
+ const closed=await f.engine.get(String(intent.id));assert(closed?.closed_at);assert.equal(closed?.status,'attempting');assert(closed?.next_check_at);
+ assert.equal(await scalar(f.db,'select status from deposit_payment_sessions'),'expired');
+ assert.equal(await scalar(f.db,'select available from balances'),50);
+ await f.engine.apply(String(intent.id),payment({status:'attempting'}));
+ assert.equal(await scalar(f.db,'select status from deposit_payment_sessions'),'expired');
+ await f.engine.apply(String(intent.id),payment());await f.engine.apply(String(intent.id),payment());
+ assert.equal(await scalar(f.db,'select available from balances'),150);
+ assert.equal(await scalar(f.db,'select count(*) from financial_entries'),1);
+}finally{await f.close();}});
+
+test('age-only review does not block dismissing an unpaid attempt, while financial review remains protected',async()=>{const f=await fixture();try{
+ assert.equal(canCloseMerchantIntent({status:'attempting',review_required:1,last_error:'Payment amount/currency mismatch.'}),false);
+ assert.equal(canCloseMerchantIntent({status:'attempting',provider_transaction_id:'confirmed-payment'}),false);
+ const {intent}=await f.create();
+ await f.db.execute({sql:"update payment_intents set created_at='2020-01-01T00:00:00.000Z' where id=?",args:[intent.id]});
+ await f.engine.apply(String(intent.id),payment({status:'attempting'}));
+ assert.equal((await f.engine.get(String(intent.id)))?.review_required,1);
+ await f.engine.close(String(intent.id),'user','deposit');
+ const result=await f.engine.get(String(intent.id));assert(result?.closed_at);assert.equal(result?.review_required,1);
+ assert.equal(await scalar(f.db,'select available from balances'),50);
+}finally{await f.close();}});
 
 test('expired provider responses parse, stop blocking a new payment and remain eligible for late settlement',async()=>{const f=await fixture();try{
  const client=merchantClient({baseUrl:'https://api.example',apiKey:'test',apiSecret:'test',webhookSecret:'test',method:'cash-app-v4',enabled:true},async()=>Response.json({success:true,data:payment({status:'expired',transaction_id:null})}));

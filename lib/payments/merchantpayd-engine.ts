@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Client, Transaction, Row } from "@libsql/client";
 import { MerchantApiError, verifyPaymentAmount, type MerchantPayment } from "./merchantpayd-client.ts";
-import { merchantMethodCode, savedMerchantMethod, type MerchantMethodCode } from './merchantpayd-methods.ts';
+import { merchantMethodCode, savedMerchantMethod, canCloseMerchantIntent, type MerchantMethodCode } from './merchantpayd-methods.ts';
 import { savedPaymentTerms, methodCurrency } from './payment-terms.ts';
 
 export class PaymentConflict extends Error { httpStatus=409; }
@@ -86,9 +86,9 @@ export function paymentEngine(db:Client,gateway:PaymentGateway,adapters:PaymentA
       const intent=(await tx.execute({sql:'select * from payment_intents where id=? and user_id=? and kind=?',args:[id,userId,kind]})).rows[0];
       if(!intent)throw new Error('Payment session not found.');
       if(!intent.closed_at){
-        if(intent.provider_transaction_id||intent.review_required||!['pending','failed','expired'].includes(String(intent.status)))throw new PaymentConflict('Payment is being processed or requires review. Check its status before starting another payment.');
+        if(!canCloseMerchantIntent({status:intent.status,provider_transaction_id:intent.provider_transaction_id,review_required:intent.review_required,last_error:intent.last_error}))throw new PaymentConflict('Payment is being processed or requires review. Check its status before starting another payment.');
         const timestamp=now();
-        await tx.execute({sql:'update payment_intents set closed_at=?,updated_at=? where id=?',args:[timestamp,timestamp,id]});
+        await tx.execute({sql:'update payment_intents set closed_at=?,updated_at=?,next_check_at=? where id=?',args:[timestamp,timestamp,timestamp,id]});
         const table=kind==='deposit'?'deposit_payment_sessions':'payment_sessions';
         await tx.execute({sql:`update ${table} set status='expired',updated_at=? where id=? and user_id=?`,args:[timestamp,id,userId]});
         await adapters.close?.(tx,intent);

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { completePaymentRequest } from "@/lib/payments/request-key";
+import { isClosableMerchantStatus } from '@/lib/payments/merchantpayd-methods';
 import { useRouter } from "next/navigation";
 import { AlertCircle, ExternalLink, RefreshCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -227,7 +228,7 @@ export function ActivePaymentSessionCard({
             {busyAction === "check" ? "Checking..." : "Check status"}
           </Button>
           <Button
-            disabled={busyAction !== null || isFinal || (session.provider === 'RebohromePayment' && !['pending','failed','expired'].includes(liveStatus))}
+            disabled={busyAction !== null || isFinal || (session.provider === 'RebohromePayment' && !isClosableMerchantStatus(liveStatus))}
             onClick={cancelSession}
             size="sm"
             type="button"
